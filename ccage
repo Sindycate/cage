@@ -1,0 +1,73 @@
+#!/bin/bash
+set -euo pipefail
+
+IMAGE="claude-code:latest"
+HOST_CLAUDE_DIR="$HOME/.claude"
+AWS_CREDS="$HOME/.aws/credentials"
+BUILD_DIR="$HOME/claude-container"
+
+YOLO=0
+if [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yolo" ]; then
+    YOLO=1
+    shift
+fi
+
+if [ $# -lt 1 ]; then
+    echo "Usage: ccage [-y|--yolo] /path/to/repo [claude-args...]"
+    echo ""
+    echo "Options:"
+    echo "  -y, --yolo    Skip all permission prompts (dangerously-skip-permissions)"
+    echo ""
+    echo "Examples:"
+    echo "  ccage ~/projects/myapp"
+    echo "  ccage -y ~/projects/myapp"
+    echo "  ccage ~/projects/myapp --resume"
+    echo "  ccage ~/projects/myapp -p 'explain this codebase'"
+    exit 1
+fi
+
+REPO_PATH="$(cd "$1" && pwd -P)"
+shift
+
+REPO_BASENAME="$(basename "$REPO_PATH")"
+REPO_HASH="$(echo -n "$REPO_PATH" | md5 -q | cut -c1-8)"
+CONTAINER_NAME="claude-${REPO_BASENAME}-${REPO_HASH}"
+VOLUME_NAME="claude-state-${REPO_BASENAME}-${REPO_HASH}"
+
+# Auto-build if image missing
+if ! docker image inspect "$IMAGE" &>/dev/null; then
+    echo "Image $IMAGE not found. Building..."
+    docker build -t "$IMAGE" "$BUILD_DIR"
+fi
+
+YOLO_LABEL=""
+if [ "$YOLO" -eq 1 ]; then
+    YOLO_LABEL=" [YOLO]"
+fi
+
+echo "=== Claude Code Container${YOLO_LABEL} ==="
+echo "  Repo:      $REPO_PATH"
+echo "  Container: $CONTAINER_NAME"
+echo "  Volume:    $VOLUME_NAME"
+echo "=============================="
+
+exec docker run \
+    --rm \
+    -it \
+    --name "$CONTAINER_NAME" \
+    --hostname "$CONTAINER_NAME" \
+    --security-opt no-new-privileges:true \
+    --cap-drop ALL \
+    --tmpfs /tmp \
+    --tmpfs /run \
+    -e "CLAUDE_CODE_USE_BEDROCK=1" \
+    -e "AWS_PROFILE=${AWS_PROFILE:-claude-full}" \
+    -e "AWS_REGION=${AWS_REGION:-eu-central-1}" \
+    -e "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1" \
+    -v "$REPO_PATH:/workspace" \
+    -v "$VOLUME_NAME:/home/claude/.claude" \
+    -v "$HOST_CLAUDE_DIR:/host-claude:ro" \
+    -v "$AWS_CREDS:/home/claude/.aws/credentials:ro" \
+    "$IMAGE" \
+    $([ "$YOLO" -eq 1 ] && echo "--dangerously-skip-permissions") \
+    "$@"
