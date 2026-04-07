@@ -77,7 +77,7 @@ cage ~/repo-b   # terminal 2
 By default, `cage ~/repo` runs Claude Code. Override with `CAGE_DEFAULT` in your config:
 
 ```bash
-# ~/.claude/cage.conf
+# ~/.config/cage/cage.conf
 CAGE_DEFAULT=codex
 ```
 
@@ -86,7 +86,7 @@ CAGE_DEFAULT=codex
 **Claude Code** supports two auth modes, set via `CLAUDE_AUTH` in `cage.conf`:
 
 ```bash
-# ~/.claude/cage.conf
+# ~/.config/cage/cage.conf
 
 # Option 1: API key (simple — set ANTHROPIC_API_KEY in your shell env)
 CLAUDE_AUTH=api-key
@@ -133,7 +133,7 @@ On each start, the entrypoint copies host settings into the container's writable
 To enable git commit and push inside the container, create a config file:
 
 ```bash
-# ~/.claude/cage.conf (global defaults)
+# ~/.config/cage/cage.conf (global defaults)
 GIT_USER_NAME="Your Name"
 GIT_USER_EMAIL="you@example.com"
 SSH_KEY="~/.ssh/id_ed25519"

@@ -4,11 +4,10 @@ set -euo pipefail
 CODEX_DIR="$HOME/.codex"
 mkdir -p "$CODEX_DIR"
 
-# Copy host Codex auth/config (read-only mount → writable volume)
-if [ -d /host-codex ]; then
-    for f in /host-codex/*; do
-        [ -f "$f" ] && cp -f "$f" "$CODEX_DIR/$(basename "$f")"
-    done
+# Copy host Codex config (read-only mount → writable volume)
+# Only copy config.toml — avoid overwriting state DB and session data
+if [ -f /host-codex/config.toml ]; then
+    cp -f /host-codex/config.toml "$CODEX_DIR/config.toml"
 fi
 
 # Prevent git "dubious ownership" errors from UID mismatch

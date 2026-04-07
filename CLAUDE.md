@@ -47,7 +47,7 @@ cage --net off ~/path/to/repo
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool; defaults to `claude` (overridable via `CAGE_DEFAULT` in `cage.conf`)
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
-- Loads config from `~/.claude/cage.conf` (global) then `<repo>/.cage.conf` (per-project override)
+- Loads config from `~/.config/cage/cage.conf` (global) then `<repo>/.cage.conf` (per-project override)
 - Runs `docker run` with security hardening (cap_drop ALL, no-new-privileges) and tool-specific mounts:
   - Repo at `/workspace` (read-write) — the only writable host path
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`

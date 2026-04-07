@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HOST_CLAUDE_DIR="$HOME/.claude"
+CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
 AWS_CREDS="$HOME/.aws/credentials"
 # Resolve symlinks to find the real script directory
 SOURCE="$0"
@@ -87,8 +88,8 @@ shift
 
 # Load config: global first, then per-project override
 GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
-CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION=""
-[ -f "$HOST_CLAUDE_DIR/cage.conf" ] && source "$HOST_CLAUDE_DIR/cage.conf"
+CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV=""
+[ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
 [ -f "$REPO_PATH/.cage.conf" ]      && source "$REPO_PATH/.cage.conf"
 
 # Resolve tool: explicit subcommand > CAGE_DEFAULT from config > "claude"
@@ -285,6 +286,13 @@ fi
 if [ -n "$SSH_HOST" ]; then
     DOCKER_ARGS+=(-e "SSH_HOST=$SSH_HOST")
 fi
+
+# Extra env vars from cage.conf
+for varname in $EXTRA_ENV; do
+    if [ -n "${!varname:-}" ]; then
+        DOCKER_ARGS+=(-e "$varname=${!varname}")
+    fi
+done
 
 [[ ${#PROXY_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${PROXY_ARGS[@]}")
 
