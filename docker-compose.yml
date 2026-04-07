@@ -2,3 +2,8 @@ services:
   claude:
     build: .
     image: claude-code:latest
+  codex:
+    build:
+      context: .
+      dockerfile: Dockerfile.codex
+    image: codex:latest

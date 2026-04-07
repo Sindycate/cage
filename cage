@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-IMAGE="claude-code:latest"
 HOST_CLAUDE_DIR="$HOME/.claude"
 AWS_CREDS="$HOME/.aws/credentials"
 # Resolve symlinks to find the real script directory
@@ -13,6 +12,13 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR"
+
+# Subcommand detection: cage [claude|codex] [options] /path/to/repo [tool-args...]
+CAGE_TOOL=""
+if [[ "${1:-}" == "claude" || "${1:-}" == "codex" ]]; then
+    CAGE_TOOL="$1"
+    shift
+fi
 
 YOLO=0
 NET_MODE=""  # empty = not explicitly set
@@ -53,16 +59,22 @@ case "$NET_MODE" in
 esac
 
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [-y|--yolo] [--net open|gate|off] /path/to/repo [claude-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [--net open|gate|off] /path/to/repo [tool-args...]"
+    echo ""
+    echo "Tools:"
+    echo "  claude    Run Claude Code (default)"
+    echo "  codex     Run OpenAI Codex CLI"
     echo ""
     echo "Options:"
-    echo "  -y, --yolo         Skip all permission prompts (dangerously-skip-permissions)"
+    echo "  -y, --yolo         Skip all permission prompts"
     echo "  --net open         Full network access (default without --yolo)"
     echo "  --net gate         Domain-gated network via proxy (default with --yolo)"
     echo "  --net off          No network access at all"
     echo ""
     echo "Examples:"
     echo "  cage ~/projects/myapp"
+    echo "  cage codex ~/projects/myapp"
+    echo "  cage codex -y ~/projects/myapp"
     echo "  cage -y ~/projects/myapp"
     echo "  cage --net gate ~/projects/myapp"
     echo "  cage ~/projects/myapp --resume"
@@ -73,20 +85,50 @@ fi
 REPO_PATH="$(cd "$1" && pwd -P)"
 shift
 
-# Load git/SSH config: global first, then per-project override
-GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
+# Load config: global first, then per-project override
+GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
+CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION=""
 [ -f "$HOST_CLAUDE_DIR/cage.conf" ] && source "$HOST_CLAUDE_DIR/cage.conf"
 [ -f "$REPO_PATH/.cage.conf" ]      && source "$REPO_PATH/.cage.conf"
 
+# Resolve tool: explicit subcommand > CAGE_DEFAULT from config > "claude"
+if [ -z "$CAGE_TOOL" ]; then
+    CAGE_TOOL="${CAGE_DEFAULT:-claude}"
+fi
+case "$CAGE_TOOL" in
+    claude|codex) ;;
+    *) echo "Unknown tool: $CAGE_TOOL (use 'claude' or 'codex')" >&2; exit 1 ;;
+esac
+
+# Tool-specific variables
+case "$CAGE_TOOL" in
+    claude)
+        IMAGE="claude-code:latest"
+        CONTAINER_PREFIX="claude"
+        VOLUME_PREFIX="claude-state"
+        CONTAINER_HOME="/home/claude"
+        TOOL_DISPLAY_NAME="Claude Code"
+        DOCKERFILE="Dockerfile"
+        ;;
+    codex)
+        IMAGE="codex:latest"
+        CONTAINER_PREFIX="codex"
+        VOLUME_PREFIX="codex-state"
+        CONTAINER_HOME="/home/codex"
+        TOOL_DISPLAY_NAME="Codex CLI"
+        DOCKERFILE="Dockerfile.codex"
+        ;;
+esac
+
 REPO_BASENAME="$(basename "$REPO_PATH")"
 REPO_HASH="$(echo -n "$REPO_PATH" | md5 -q | cut -c1-8)"
-CONTAINER_NAME="claude-${REPO_BASENAME}-${REPO_HASH}"
-VOLUME_NAME="claude-state-${REPO_BASENAME}-${REPO_HASH}"
+CONTAINER_NAME="${CONTAINER_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
+VOLUME_NAME="${VOLUME_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
 
 # Auto-build if image missing
 if ! docker image inspect "$IMAGE" &>/dev/null; then
     echo "Image $IMAGE not found. Building..."
-    docker build -t "$IMAGE" "$BUILD_DIR"
+    docker build -t "$IMAGE" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
 fi
 
 YOLO_LABEL=""
@@ -162,12 +204,13 @@ if [ "$NET_MODE" = "off" ]; then
     PROXY_ARGS=(--network none)
 fi
 
-echo "=== Claude Code Container${YOLO_LABEL}${NET_LABEL} ==="
+echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL} ==="
 echo "  Repo:      $REPO_PATH"
 echo "  Container: $CONTAINER_NAME"
 echo "  Volume:    $VOLUME_NAME"
 echo "=============================="
 
+# Shared Docker args
 DOCKER_ARGS=(
     --rm
     -it
@@ -177,15 +220,52 @@ DOCKER_ARGS=(
     --cap-drop ALL
     --tmpfs /tmp
     --tmpfs /run
-    -e "CLAUDE_CODE_USE_BEDROCK=1"
-    -e "AWS_PROFILE=${AWS_PROFILE:-claude-full}"
-    -e "AWS_REGION=${AWS_REGION:-eu-central-1}"
-    -e "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
     -v "$REPO_PATH:/workspace"
-    -v "$VOLUME_NAME:/home/claude/.claude"
-    -v "$HOST_CLAUDE_DIR:/host-claude:ro"
-    -v "$AWS_CREDS:/home/claude/.aws/credentials:ro"
 )
+
+# Tool-specific Docker args
+case "$CAGE_TOOL" in
+    claude)
+        DOCKER_ARGS+=(
+            -v "$VOLUME_NAME:${CONTAINER_HOME}/.claude"
+            -v "$HOST_CLAUDE_DIR:/host-claude:ro"
+        )
+        # Auth: bedrock (default) or api-key
+        case "${CLAUDE_AUTH:-bedrock}" in
+            bedrock)
+                DOCKER_ARGS+=(
+                    -e "CLAUDE_CODE_USE_BEDROCK=1"
+                    -e "AWS_PROFILE=${AWS_PROFILE:-}"
+                    -e "AWS_REGION=${AWS_REGION:-}"
+                    -e "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"
+                    -v "$AWS_CREDS:${CONTAINER_HOME}/.aws/credentials:ro"
+                )
+                ;;
+            api-key)
+                if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+                    echo "ERROR: CLAUDE_AUTH=api-key but ANTHROPIC_API_KEY is not set" >&2
+                    exit 1
+                fi
+                DOCKER_ARGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+                ;;
+            *)
+                echo "Invalid CLAUDE_AUTH: $CLAUDE_AUTH (use 'bedrock' or 'api-key')" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    codex)
+        DOCKER_ARGS+=(
+            -v "$VOLUME_NAME:${CONTAINER_HOME}/.codex"
+        )
+        if [ -d "$HOME/.codex" ]; then
+            DOCKER_ARGS+=(-v "$HOME/.codex:/host-codex:ro")
+        fi
+        if [ -n "${OPENAI_API_KEY:-}" ]; then
+            DOCKER_ARGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+        fi
+        ;;
+esac
 
 # Git/SSH mounts and env vars (from cage.conf)
 if [ -n "$GIT_USER_NAME" ]; then
@@ -197,9 +277,9 @@ fi
 if [ -n "$SSH_KEY" ]; then
     SSH_KEY_PATH="${SSH_KEY/#\~/$HOME}"
     if [ -f "$SSH_KEY_PATH" ]; then
-        DOCKER_ARGS+=(-v "$SSH_KEY_PATH:/home/claude/.ssh/id:ro")
-        DOCKER_ARGS+=(-e 'GIT_SSH_COMMAND=ssh -i /home/claude/.ssh/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new')
-        [ -f "$HOME/.ssh/known_hosts" ] && DOCKER_ARGS+=(-v "$HOME/.ssh/known_hosts:/home/claude/.ssh/known_hosts:ro")
+        DOCKER_ARGS+=(-v "$SSH_KEY_PATH:${CONTAINER_HOME}/.ssh/id:ro")
+        DOCKER_ARGS+=(-e 'GIT_SSH_COMMAND=ssh -i '"${CONTAINER_HOME}"'/.ssh/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new')
+        [ -f "$HOME/.ssh/known_hosts" ] && DOCKER_ARGS+=(-v "$HOME/.ssh/known_hosts:${CONTAINER_HOME}/.ssh/known_hosts:ro")
     fi
 fi
 if [ -n "$SSH_HOST" ]; then
@@ -208,14 +288,17 @@ fi
 
 [[ ${#PROXY_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${PROXY_ARGS[@]}")
 
-CLAUDE_ARGS=()
+TOOL_ARGS=()
 if [ "$YOLO" -eq 1 ]; then
-    CLAUDE_ARGS+=(--dangerously-skip-permissions)
+    case "$CAGE_TOOL" in
+        claude) TOOL_ARGS+=(--dangerously-skip-permissions) ;;
+        codex)  TOOL_ARGS+=(--full-auto) ;;
+    esac
 fi
 
 if [ "$NET_MODE" = "gate" ]; then
     # Cannot use exec: need cleanup_proxy to run via trap EXIT
-    docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} "$@"
+    docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
 else
-    exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} "$@"
+    exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
 fi

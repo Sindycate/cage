@@ -2,6 +2,9 @@
   "domains": [
     "*.amazonaws.com",
     "*.amazontrust.com",
-    "*.cloudfront.net"
+    "*.cloudfront.net",
+    "*.openai.com",
+    "*.oaiusercontent.com",
+    "*.oaistatic.com"
   ]
 }

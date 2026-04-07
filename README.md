@@ -1,22 +1,23 @@
 # cage
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in a Docker container so it can only touch the repo you point it at — nothing else on your machine.
+Run AI coding assistants ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex)) in Docker containers so they can only touch the repo you point them at — nothing else on your machine.
 
 Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 ## What it does
 
-- Runs Claude Code inside a hardened Docker container (all capabilities dropped, no privilege escalation)
+- Runs Claude Code or Codex CLI inside a hardened Docker container (all capabilities dropped, no privilege escalation)
 - Only the target repo is mounted read-write — the sole blast radius
-- AWS credentials and Claude settings are mounted read-only
+- Auth credentials and tool settings are mounted read-only
 - Per-repo persistent state via Docker volumes (sessions, onboarding survive restarts)
-- Reuses your host `~/.claude/settings.json` automatically
+- Reuses your host settings automatically
 
 ## Requirements
 
 - macOS with [Colima](https://github.com/abiosoft/colima) (or Docker Desktop)
 - Docker + Docker Compose
-- AWS Bedrock credentials in `~/.aws/credentials`
+- **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
+- **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
 
 Start Colima with enough memory (Claude Code needs 4GB+):
 
@@ -29,20 +30,32 @@ colima start --cpu 4 --memory 8 --disk 100
 ```bash
 git clone git@github.com:Sindycate/cage.git ~/cage
 cd ~/cage
-docker compose build
+docker compose build        # builds both Claude Code and Codex images
 chmod +x cage
 ln -sf ~/cage/cage ~/.local/bin/cage
+```
+
+To build only one image:
+
+```bash
+docker compose build claude   # just Claude Code
+docker compose build codex    # just Codex CLI
 ```
 
 ## Usage
 
 ```bash
-# Run Claude Code against a repo
+# Run Claude Code against a repo (default)
 cage ~/projects/myapp
+cage claude ~/projects/myapp     # explicit
+
+# Run Codex CLI against a repo
+cage codex ~/projects/myapp
 
 # Yolo mode — skip all permission prompts (safe because containerized)
 # Automatically enables domain-gated networking
 cage -y ~/projects/myapp
+cage codex -y ~/projects/myapp
 
 # Explicit network gating (prompts for each new domain)
 cage --net gate ~/projects/myapp
@@ -50,7 +63,7 @@ cage --net gate ~/projects/myapp
 # No network at all
 cage --net off ~/projects/myapp
 
-# Pass any claude args through
+# Pass any tool args through
 cage ~/projects/myapp --resume
 cage ~/projects/myapp -p "fix the failing tests"
 
@@ -59,22 +72,61 @@ cage ~/repo-a   # terminal 1
 cage ~/repo-b   # terminal 2
 ```
 
+### Default tool
+
+By default, `cage ~/repo` runs Claude Code. Override with `CAGE_DEFAULT` in your config:
+
+```bash
+# ~/.claude/cage.conf
+CAGE_DEFAULT=codex
+```
+
+### Authentication
+
+**Claude Code** supports two auth modes, set via `CLAUDE_AUTH` in `cage.conf`:
+
+```bash
+# ~/.claude/cage.conf
+
+# Option 1: API key (simple — set ANTHROPIC_API_KEY in your shell env)
+CLAUDE_AUTH=api-key
+
+# Option 2: AWS Bedrock (default)
+CLAUDE_AUTH=bedrock
+AWS_PROFILE=your-profile
+AWS_REGION=us-east-1
+```
+
+**Codex CLI** authenticates via `~/.codex/` (sign in on host first with `codex`), or `OPENAI_API_KEY` env var.
+
 ## How it works
 
-`cage` is a small bash script that runs `docker run` with:
+`cage` is a small bash script that runs `docker run` with hardened security. Mounts vary by tool:
+
+**Claude Code** (`cage claude ~/repo`):
 
 | Mount | Path in container | Access |
 |-------|-------------------|--------|
 | Your repo | `/workspace` | **read-write** |
-| `~/.aws/credentials` | `/home/claude/.aws/credentials` | read-only |
+| `~/.aws/credentials` *(bedrock only)* | `/home/claude/.aws/credentials` | read-only |
 | `~/.claude` | `/host-claude` | read-only |
 | Docker volume (per-repo) | `/home/claude/.claude` | read-write |
 | SSH key (from `cage.conf`) | `/home/claude/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/claude/.ssh/known_hosts` | read-only |
 
+**Codex CLI** (`cage codex ~/repo`):
+
+| Mount | Path in container | Access |
+|-------|-------------------|--------|
+| Your repo | `/workspace` | **read-write** |
+| `~/.codex` | `/host-codex` | read-only |
+| Docker volume (per-repo) | `/home/codex/.codex` | read-write |
+| SSH key (from `cage.conf`) | `/home/codex/.ssh/id` | read-only |
+| `~/.ssh/known_hosts` | `/home/codex/.ssh/known_hosts` | read-only |
+
 Everything else — your home directory, OS config, other repos — is not accessible to the container.
 
-On each start, `entrypoint.sh` copies your host `settings.json` into the container's writable volume and symlinks `CLAUDE.md` and `agents/` if present. This means changes to your host Claude settings propagate automatically.
+On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in.
 
 ## Git commit & push
 
@@ -102,11 +154,13 @@ SSH_KEY="~/.ssh/other_key"
 - Git push over SSH bypasses `--net gate` (raw TCP, not HTTP)
 - With `--net off`, push is blocked entirely (no network)
 
-## Updating Claude Code
+## Updating
 
 ```bash
 cd ~/cage
-docker compose build --no-cache
+docker compose build --no-cache           # rebuild both images
+docker compose build --no-cache claude     # just Claude Code
+docker compose build --no-cache codex      # just Codex CLI
 ```
 
 ## Managing state
@@ -114,12 +168,15 @@ docker compose build --no-cache
 ```bash
 # List active containers
 docker ps --filter "name=claude-"
+docker ps --filter "name=codex-"
 
 # List per-repo state volumes
 docker volume ls --filter "name=claude-state-"
+docker volume ls --filter "name=codex-state-"
 
 # Reset state for a repo
 docker volume rm claude-state-<name>
+docker volume rm codex-state-<name>
 ```
 
 ## Network gating
@@ -133,7 +190,7 @@ With `--net gate`, all outbound HTTP/HTTPS from the container routes through a h
 4. You choose: **Allow (project)**, **Allow (always)**, or **Deny**
 5. The connection is held open during the prompt — no failed first request
 
-**Pre-allowed domains:** AWS infrastructure (`*.amazonaws.com`, `*.amazontrust.com`, `*.cloudfront.net`) is always allowed since Claude Code needs Bedrock API access.
+**Pre-allowed domains:** AWS infrastructure (`*.amazonaws.com`, `*.amazontrust.com`, `*.cloudfront.net`) and OpenAI API (`*.openai.com`, `*.oaiusercontent.com`, `*.oaistatic.com`) are always allowed.
 
 **Allowlist storage:**
 - Global (all projects): `~/.claude/netgate/global.json`
