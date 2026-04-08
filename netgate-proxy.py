@@ -2,8 +2,9 @@
 """
 netgate-proxy.py — Domain-gating forward proxy for cage.
 
-Runs on the macOS host. Container traffic routes through it via HTTP_PROXY/HTTPS_PROXY.
-For each unknown domain, shows a macOS dialog and holds the connection until the user decides.
+Runs on the host. Container traffic routes through it via HTTP_PROXY/HTTPS_PROXY.
+For each unknown domain, prompts the user (macOS dialog or terminal prompt on Linux)
+and holds the connection until the user decides.
 """
 
 import argparse
@@ -11,6 +12,7 @@ import fcntl
 import http.server
 import json
 import os
+import platform
 import select
 import signal
 import socket
@@ -19,6 +21,8 @@ import subprocess
 import sys
 import threading
 import urllib.parse
+
+IS_MACOS = platform.system() == "Darwin"
 
 # --- Global state for prompt deduplication ---
 _pending_lock = threading.Lock()
@@ -94,7 +98,18 @@ def check_domain(hostname: str) -> str:
 
 
 def prompt_user(hostname: str) -> str:
-    """Show macOS dialog for domain approval. Returns 'project', 'always', or 'deny'."""
+    """Prompt user for domain approval. Returns 'project', 'always', or 'deny'.
+
+    On macOS: shows a native dialog via osascript.
+    On Linux: prompts in the terminal via /dev/tty.
+    """
+    if IS_MACOS:
+        return _prompt_osascript(hostname)
+    return _prompt_terminal(hostname)
+
+
+def _prompt_osascript(hostname: str) -> str:
+    """macOS: native dialog via osascript."""
     script = (
         f'display dialog "Network access requested" & return & return '
         f'& "Domain: {hostname}" & return '
@@ -118,6 +133,33 @@ def prompt_user(hostname: str) -> str:
             return "deny"
     except (subprocess.TimeoutExpired, OSError):
         return "deny"
+
+
+def _prompt_terminal(hostname: str) -> str:
+    """Linux/other: prompt via terminal (/dev/tty)."""
+    try:
+        tty = open("/dev/tty", "r+")
+    except OSError:
+        log(f"Cannot open /dev/tty for prompt, denying {hostname}")
+        return "deny"
+    try:
+        tty.write(f"\n[netgate] Network access requested\n")
+        tty.write(f"  Domain:    {hostname}\n")
+        tty.write(f"  Container: {CONFIG['container_name']}\n")
+        tty.write(f"\n  1) Deny\n  2) Allow (this project)\n  3) Allow (always)\n")
+        tty.write(f"\nChoice [1]: ")
+        tty.flush()
+        choice = tty.readline().strip()
+        if choice == "3":
+            return "always"
+        elif choice == "2":
+            return "project"
+        else:
+            return "deny"
+    except (OSError, EOFError):
+        return "deny"
+    finally:
+        tty.close()
 
 
 def save_decision(hostname: str, decision: str):

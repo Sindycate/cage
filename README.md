@@ -14,12 +14,13 @@ Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 ## Requirements
 
-- macOS with [Colima](https://github.com/abiosoft/colima) (or Docker Desktop)
-- Docker + Docker Compose
+- macOS or Linux (Ubuntu, etc.)
+- Docker + Docker Compose (macOS: [Colima](https://github.com/abiosoft/colima) or Docker Desktop)
+- Python 3 (for network gating)
 - **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
 - **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
 
-Start Colima with enough memory (Claude Code needs 4GB+):
+Start Colima with enough memory (macOS, Claude Code needs 4GB+):
 
 ```bash
 colima start --cpu 4 --memory 8 --disk 100
@@ -27,19 +28,37 @@ colima start --cpu 4 --memory 8 --disk 100
 
 ## Install
 
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sindycate/cage/main/install.sh | bash
+```
+
+This downloads the latest release, installs to `~/.local/share/cage/`, and symlinks `cage` to `~/.local/bin/`.
+
+### From source
+
 ```bash
 git clone git@github.com:Sindycate/cage.git ~/cage
 cd ~/cage
-docker compose build        # builds both Claude Code and Codex images
+make install     # installs to ~/.local/bin/cage
+```
+
+### Manual
+
+```bash
+git clone git@github.com:Sindycate/cage.git ~/cage
+cd ~/cage
 chmod +x cage
 ln -sf ~/cage/cage ~/.local/bin/cage
 ```
 
-To build only one image:
+Docker images are built automatically on first run. To pre-build:
 
 ```bash
-docker compose build claude   # just Claude Code
-docker compose build codex    # just Codex CLI
+docker compose build              # both images
+docker compose build claude       # just Claude Code
+docker compose build codex        # just Codex CLI
 ```
 
 ## Usage
@@ -156,11 +175,46 @@ SSH_KEY="~/.ssh/other_key"
 
 ## Updating
 
+Check your current version:
+
+```bash
+cage --version
+```
+
+### Installed via one-liner
+
+Re-run the install script — it downloads the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sindycate/cage/main/install.sh | bash
+```
+
+### Installed from source
+
 ```bash
 cd ~/cage
+git pull
+make install
+```
+
+Docker images are rebuilt automatically on the next `cage` run after a version bump (the new versioned tag triggers a build).
+
+To force-rebuild Docker images (e.g., to pick up new tool versions):
+
+```bash
 docker compose build --no-cache           # rebuild both images
 docker compose build --no-cache claude     # just Claude Code
 docker compose build --no-cache codex      # just Codex CLI
+```
+
+### Uninstall
+
+```bash
+# If installed via one-liner:
+curl -fsSL https://raw.githubusercontent.com/Sindycate/cage/main/install.sh | bash -s -- --uninstall
+
+# If installed via make:
+cd ~/cage && make uninstall
 ```
 
 ## Managing state
@@ -201,6 +255,6 @@ With `--net gate`, all outbound HTTP/HTTPS from the container routes through a h
 
 ## Limitations
 
-- macOS-only (`md5 -q` in the launcher, `osascript` for network gate dialogs)
+- Network gating dialogs use native macOS popups (`osascript`); on Linux, prompts appear in the terminal
 - Network gating only covers HTTP/HTTPS via proxy env vars — raw TCP, SSH, and DNS bypass the proxy
 - The mounted repo is still fully writable — but it's git-tracked, so worst case you `git checkout .`

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-A Docker-based isolation wrapper for running AI coding assistants (Claude Code, OpenAI Codex CLI) in containers on macOS with Colima. Limits the blast radius so the tool can only write to the mounted repo, not the rest of the host filesystem.
+A Docker-based isolation wrapper for running AI coding assistants (Claude Code, OpenAI Codex CLI) in containers on macOS and Linux. Limits the blast radius so the tool can only write to the mounted repo, not the rest of the host filesystem.
 
 ## Build and Run
 
@@ -56,7 +56,7 @@ cage --net off ~/path/to/repo
   - Per-repo named Docker volume for persistent state
   - SSH key read-only for git push (if `SSH_KEY` configured)
   - `~/.ssh/known_hosts` read-only (if exists)
-- Uses `md5 -q` (macOS-specific) for hashing — not portable to Linux
+- Uses `md5 -q` (macOS) or `md5sum` (Linux) for hashing — auto-detected
 
 **`entrypoint.sh`** (runs inside Claude Code container on every start):
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
@@ -82,12 +82,27 @@ cage --net off ~/path/to/repo
 **`netgate-proxy.py`** (host-side, runs when `--net gate` is active):
 - Python3 forward proxy that gates outbound HTTP/HTTPS by domain
 - Handles HTTPS via CONNECT method (sees hostname without TLS decryption)
-- Holds unknown domains' connections open while showing a macOS `osascript` dialog
+- Holds unknown domains' connections open while prompting the user (macOS `osascript` dialog, or terminal prompt on Linux)
 - Saves user decisions to allowlist files in `~/.claude/netgate/`
 - Pre-allows AWS and OpenAI domains via `netgate/defaults.json`
 - Concurrent requests to the same unknown domain show only one dialog (deduplication via threading.Event)
 
 **`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, OpenAI API). Loaded on every proxy start.
+
+**`Makefile`**: Install/uninstall targets. `make install` copies files to `~/.local/share/cage/` and symlinks to `~/.local/bin/cage`.
+
+**`install.sh`**: Curl-pipe-bash installer. Downloads the latest GitHub Release tarball, verifies checksum, extracts to `~/.local/share/cage/`, and symlinks the binary. Also supports `--uninstall`.
+
+**`.github/workflows/release.yml`**: Creates a GitHub Release with tarball and SHA-256 checksum when a `v*` tag is pushed. Verifies that the tag matches `CAGE_VERSION` in the cage script.
+
+## Versioning
+
+- Version is defined in `CAGE_VERSION` at the top of the `cage` script (e.g., `CAGE_VERSION="0.1.0"`)
+- `cage --version` prints the current version
+- Git tags use `v` prefix: `v0.1.0`, `v0.2.0`, etc.
+- Docker images are tagged with the version (`claude-code:0.1.0`) plus `:latest`
+- Upgrading cage triggers automatic Docker image rebuilds (the new versioned tag doesn't exist yet)
+- Releases are automated via GitHub Actions on tag push
 
 ## Key Constraints
 
@@ -95,7 +110,7 @@ cage --net off ~/path/to/repo
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume
 - Claude auth is configured via `CLAUDE_AUTH` in `cage.conf`: `bedrock` (mounts `~/.aws/credentials`) or `api-key` (passes `ANTHROPIC_API_KEY` env var)
 - Codex auth uses `~/.codex/` directory (sign in on host first) or `OPENAI_API_KEY` env var. Set `CODEX_COPY_AUTH=0` in `cage.conf` to skip copying `auth.json` (for non-OpenAI providers like zllm)
-- The `md5 -q` command in cage is macOS-only; use `md5sum | cut -c1-8` for Linux
+- Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
 - Git push requires `cage.conf` with `SSH_KEY` pointing to an unencrypted private key (passphrase-protected keys need ssh-agent, which is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`

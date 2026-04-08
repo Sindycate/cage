@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          SCRIPT_VER="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
+          if [ "$TAG" != "$SCRIPT_VER" ]; then
+            echo "ERROR: Tag v${TAG} does not match CAGE_VERSION=\"${SCRIPT_VER}\" in cage script"
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+
+      - name: Create tarball
+        run: |
+          DIST="cage-${VERSION}"
+          mkdir "$DIST"
+          cp cage netgate-proxy.py docker-compose.yml \
+             Dockerfile Dockerfile.codex \
+             entrypoint.sh entrypoint-codex.sh \
+             install.sh Makefile README.md \
+             "$DIST/"
+          cp -r netgate "$DIST/"
+          tar czf "${DIST}.tar.gz" "$DIST"
+          shasum -a 256 "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DIST="cage-${VERSION}"
+          gh release create "v${VERSION}" \
+            --title "cage ${VERSION}" \
+            --generate-notes \
+            "${DIST}.tar.gz" \
+            "${DIST}.tar.gz.sha256"

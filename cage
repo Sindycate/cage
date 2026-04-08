@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+CAGE_VERSION="0.1.0"
+
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
 AWS_CREDS="$HOME/.aws/credentials"
@@ -13,6 +15,12 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR"
+
+# Top-level flags (before subcommand)
+case "${1:-}" in
+    --version|-V) echo "cage $CAGE_VERSION"; exit 0 ;;
+    --help|-h)    set -- ;;  # clear args to trigger usage below
+esac
 
 # Subcommand detection: cage [claude|codex] [options] /path/to/repo [tool-args...]
 CAGE_TOOL=""
@@ -71,6 +79,8 @@ if [ $# -lt 1 ]; then
     echo "  --net open         Full network access (default without --yolo)"
     echo "  --net gate         Domain-gated network via proxy (default with --yolo)"
     echo "  --net off          No network access at all"
+    echo "  --version, -V      Show version and exit"
+    echo "  --help, -h         Show this help and exit"
     echo ""
     echo "Examples:"
     echo "  cage ~/projects/myapp"
@@ -104,7 +114,7 @@ esac
 # Tool-specific variables
 case "$CAGE_TOOL" in
     claude)
-        IMAGE="claude-code:latest"
+        IMAGE="claude-code:${CAGE_VERSION}"
         CONTAINER_PREFIX="claude"
         VOLUME_PREFIX="claude-state"
         CONTAINER_HOME="/home/claude"
@@ -112,7 +122,7 @@ case "$CAGE_TOOL" in
         DOCKERFILE="Dockerfile"
         ;;
     codex)
-        IMAGE="codex:latest"
+        IMAGE="codex:${CAGE_VERSION}"
         CONTAINER_PREFIX="codex"
         VOLUME_PREFIX="codex-state"
         CONTAINER_HOME="/home/codex"
@@ -122,14 +132,18 @@ case "$CAGE_TOOL" in
 esac
 
 REPO_BASENAME="$(basename "$REPO_PATH")"
-REPO_HASH="$(echo -n "$REPO_PATH" | md5 -q | cut -c1-8)"
+if command -v md5 &>/dev/null; then
+    REPO_HASH="$(echo -n "$REPO_PATH" | md5 -q | cut -c1-8)"
+else
+    REPO_HASH="$(echo -n "$REPO_PATH" | md5sum | cut -c1-8)"
+fi
 CONTAINER_NAME="${CONTAINER_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
 VOLUME_NAME="${VOLUME_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
 
 # Auto-build if image missing
 if ! docker image inspect "$IMAGE" &>/dev/null; then
     echo "Image $IMAGE not found. Building..."
-    docker build -t "$IMAGE" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
+    docker build -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
 fi
 
 YOLO_LABEL=""
