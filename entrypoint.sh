@@ -13,6 +13,15 @@ ln -sfn "$PREFS_STORE" "$HOME/.claude.json"
 # Copy host settings (read-only mount → writable volume)
 [ -f /host-claude/settings.json ] && cp -f /host-claude/settings.json "$CLAUDE_DIR/settings.json"
 
+# Symlink statusLine script from host if settings.json references one in ~/.claude/
+if [ -f "$CLAUDE_DIR/settings.json" ]; then
+    _sl_cmd=$(jq -r '.statusLine.command // empty' "$CLAUDE_DIR/settings.json" 2>/dev/null)
+    _sl_file="${_sl_cmd/#\~\/\.claude\//}"
+    if [ "$_sl_file" != "$_sl_cmd" ] && [ -f "/host-claude/$_sl_file" ]; then
+        ln -sfn "/host-claude/$_sl_file" "$CLAUDE_DIR/$_sl_file"
+    fi
+fi
+
 # Symlink optional host files (read-only is fine, claude only reads these)
 [ -f /host-claude/CLAUDE.md ]  && ln -sfn /host-claude/CLAUDE.md "$CLAUDE_DIR/CLAUDE.md"
 [ -d /host-claude/agents ]     && ln -sfn /host-claude/agents "$CLAUDE_DIR/agents"
