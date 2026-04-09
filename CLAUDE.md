@@ -98,7 +98,7 @@ cage --net off ~/path/to/repo
 
 **`.github/workflows/release.yml`**: Creates a GitHub Release with tarball and SHA-256 checksum when a `v*` tag is pushed. Verifies that the tag matches `CAGE_VERSION` in the cage script.
 
-## Versioning
+## Versioning & Release Flow
 
 - Version is defined in `CAGE_VERSION` at the top of the `cage` script (e.g., `CAGE_VERSION="0.1.0"`)
 - `cage --version` prints the current version
@@ -106,6 +106,8 @@ cage --net off ~/path/to/repo
 - Docker images are tagged with the version (`claude-code:0.1.0`) plus `:latest`
 - Upgrading cage triggers automatic Docker image rebuilds (the new versioned tag doesn't exist yet)
 - Releases are automated via GitHub Actions on tag push
+- **Release flow:** bump `CAGE_VERSION` → commit → push → `git tag v{version}` → `git push origin v{version}`. Never skip tagging — releases only trigger on `v*` tag push
+- **Every pushed commit gets its own version.** Never push multiple commits under the same version — if a follow-up fix is needed, bump again
 
 ## Key Constraints
 
