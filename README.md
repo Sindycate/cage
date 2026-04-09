@@ -76,6 +76,9 @@ cage codex ~/projects/myapp
 cage -y ~/projects/myapp
 cage codex -y ~/projects/myapp
 
+# Yolo mode with full network access (no domain gating)
+cage -y --net open ~/projects/myapp
+
 # Explicit network gating (prompts for each new domain)
 cage --net gate ~/projects/myapp
 
