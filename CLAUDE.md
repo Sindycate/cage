@@ -66,7 +66,7 @@ cage --net off ~/path/to/repo
 - Sets `git safe.directory` to handle UID mismatch between host and container
 - Sets `user.name`/`user.email` from env vars (passed from `cage.conf`)
 - Writes `~/.ssh/config` with SSH host alias if `SSH_HOST` is set
-- Copies GitHub CLI config from `/host-gh` into writable `~/.config/gh/` (skipped when `GH_TOKEN` is set)
+- Copies GitHub CLI config from `/host-gh` into writable `~/.config/gh/` (non-auth settings like git_protocol)
 
 **`entrypoint-codex.sh`** (runs inside Codex container on every start):
 - Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume
@@ -113,7 +113,7 @@ cage --net off ~/path/to/repo
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume
 - Claude auth is configured via `CLAUDE_AUTH` in `cage.conf`: `bedrock` (mounts `~/.aws/credentials`) or `api-key` (passes `ANTHROPIC_API_KEY` env var)
 - Codex auth uses `~/.codex/` directory (sign in on host first) or `OPENAI_API_KEY` env var. Set `CODEX_COPY_AUTH=0` in `cage.conf` to skip copying `auth.json` (for non-OpenAI providers like Azure OpenAI)
-- GitHub CLI auth is **off by default**. Set `GH_AUTH=1` in `cage.conf` to enable. When enabled: `GH_TOKEN` or `GITHUB_TOKEN` env var is passed through, and `~/.config/gh/` is mounted read-only
+- GitHub CLI auth is **off by default**. Set `GH_AUTH=1` in `cage.conf` to enable. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `GH_ACCOUNT` in `.cage.conf` for per-project account selection
 - Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
 - Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.4.0"
+CAGE_VERSION="0.5.0"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -103,7 +103,7 @@ shift
 
 # Load config: global first, then per-project override
 GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
-CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH=""
+CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
 [ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
 [ -f "$REPO_PATH/.cage.conf" ]      && source "$REPO_PATH/.cage.conf"
 
@@ -322,14 +322,6 @@ if [ -n "$SSH_HOST" ]; then
     DOCKER_ARGS+=(-e "SSH_HOST=$SSH_HOST")
 fi
 
-# GitHub CLI auth (opt-in via GH_AUTH=1 in cage.conf)
-if [ "${GH_AUTH:-0}" = "1" ]; then
-    HOST_GH_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
-    if [ -d "$HOST_GH_DIR" ]; then
-        DOCKER_ARGS+=(-v "$HOST_GH_DIR:/host-gh:ro")
-    fi
-fi
-
 # Extra env vars from cage.conf
 for varname in $EXTRA_ENV; do
     if [ -n "${!varname:-}" ]; then
@@ -337,8 +329,24 @@ for varname in $EXTRA_ENV; do
     fi
 done
 
-# GitHub CLI token (only when GH_AUTH=1)
+# GitHub CLI auth (opt-in via GH_AUTH=1 in cage.conf)
 if [ "${GH_AUTH:-0}" = "1" ]; then
+    HOST_GH_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gh"
+    if [ -d "$HOST_GH_DIR" ]; then
+        DOCKER_ARGS+=(-v "$HOST_GH_DIR:/host-gh:ro")
+    fi
+
+    # Auto-extract token from host gh if no explicit token
+    if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+        if command -v gh &>/dev/null; then
+            if [ -n "${GH_ACCOUNT:-}" ]; then
+                GH_TOKEN="$(gh auth token -u "$GH_ACCOUNT" 2>/dev/null)" || true
+            else
+                GH_TOKEN="$(gh auth token 2>/dev/null)" || true
+            fi
+        fi
+    fi
+
     if [ -n "${GH_TOKEN:-}" ]; then
         DOCKER_ARGS+=(-e "GH_TOKEN=$GH_TOKEN")
     elif [ -n "${GITHUB_TOKEN:-}" ]; then
