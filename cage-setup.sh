@@ -90,6 +90,18 @@ _detect_ssh_keys() {
     done
 }
 
+_detect_gh_accounts() {
+    _GH_ACCOUNTS=()
+    command -v gh &>/dev/null || return 0
+    local line
+    while IFS= read -r line; do
+        # gh auth status lines like: "✓ Logged in to github.com account USERNAME (keyring)"
+        if [[ "$line" =~ account[[:space:]]+([^[:space:]]+) ]]; then
+            _GH_ACCOUNTS+=("${BASH_REMATCH[1]}")
+        fi
+    done < <(gh auth status 2>&1)
+}
+
 # ---------------------------------------------------------------------------
 # Main wizard
 # ---------------------------------------------------------------------------
@@ -133,7 +145,7 @@ _run_setup() {
                 # Clear all values so we start from scratch (env detection only)
                 GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
                 CAGE_DEFAULT="" CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION=""
-                EXTRA_ENV="" CODEX_COPY_AUTH=""
+                EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
                 ;;
             2)
                 EDIT_MODE=1
@@ -274,7 +286,59 @@ _run_setup() {
         fi
     fi
 
-    # --- Phase 5: Git identity ----------------------------------------------
+    # --- Phase 5: GitHub CLI -------------------------------------------------
+
+    _header "GitHub CLI"
+
+    local cfg_GH_AUTH="" cfg_GH_ACCOUNT=""
+
+    _detect_gh_accounts
+
+    if [ ${#_GH_ACCOUNTS[@]} -eq 0 ]; then
+        if command -v gh &>/dev/null; then
+            _dim "gh is installed but no accounts found. Run 'gh auth login' first."
+        else
+            _dim "gh CLI not found on host. Install it to enable GitHub integration."
+        fi
+        _dim "Skipping GitHub CLI setup."
+    else
+        _dim "GitHub CLI auth gives the container access to create PRs, manage issues, etc."
+        _dim "This is opt-in — the container has no GitHub access unless you enable it here."
+        echo ""
+
+        local gh_default_yn="N"
+        [ "$EDIT_MODE" -eq 1 ] && [ "${GH_AUTH:-}" = "1" ] && gh_default_yn="Y"
+
+        if _prompt_yn "Enable GitHub CLI auth in containers?" "$gh_default_yn"; then
+            cfg_GH_AUTH="1"
+
+            if [ ${#_GH_ACCOUNTS[@]} -eq 1 ]; then
+                _ok "Account: ${_GH_ACCOUNTS[0]}"
+                cfg_GH_ACCOUNT="${_GH_ACCOUNTS[0]}"
+            else
+                echo ""
+                _dim "Multiple accounts found. Pick the default (override per-project in .cage.conf):"
+                local acct_choice
+                local default_acct=1
+                if [ "$EDIT_MODE" -eq 1 ] && [ -n "${GH_ACCOUNT:-}" ]; then
+                    local i
+                    for i in "${!_GH_ACCOUNTS[@]}"; do
+                        if [ "${_GH_ACCOUNTS[$i]}" = "$GH_ACCOUNT" ]; then
+                            default_acct=$((i+1))
+                            break
+                        fi
+                    done
+                fi
+                _prompt_choice acct_choice "$default_acct" "${_GH_ACCOUNTS[@]}"
+                cfg_GH_ACCOUNT="${_GH_ACCOUNTS[$((acct_choice-1))]}"
+                _ok "Selected: ${cfg_GH_ACCOUNT}"
+            fi
+        else
+            _dim "Skipping GitHub CLI setup."
+        fi
+    fi
+
+    # --- Phase 6: Git identity ----------------------------------------------
 
     _header "Git Identity"
 
@@ -295,7 +359,7 @@ _run_setup() {
     _prompt_value "Git user name" "$default_name" cfg_GIT_USER_NAME
     _prompt_value "Git user email" "$default_email" cfg_GIT_USER_EMAIL
 
-    # --- Phase 6: SSH key ---------------------------------------------------
+    # --- Phase 7: SSH key ---------------------------------------------------
 
     _header "SSH Key (for git push)"
 
@@ -349,7 +413,7 @@ _run_setup() {
         _prompt_value "SSH_HOST" "${SSH_HOST:-}" cfg_SSH_HOST
     fi
 
-    # --- Phase 7: Extra env vars --------------------------------------------
+    # --- Phase 8: Extra env vars --------------------------------------------
 
     _header "Extra Environment Variables"
 
@@ -358,7 +422,7 @@ _run_setup() {
     _dim "Example: MY_TOKEN CUSTOM_VAR"
     _prompt_value "EXTRA_ENV" "${EXTRA_ENV:-}" cfg_EXTRA_ENV
 
-    # --- Phase 8: summary & confirm -----------------------------------------
+    # --- Phase 9: summary & confirm -----------------------------------------
 
     _header "Configuration Summary"
 
@@ -415,6 +479,16 @@ _run_setup() {
 
     _add_line "# Extra env vars to pass through (space-separated names)"
     [ -n "$cfg_EXTRA_ENV" ] && _add_line "EXTRA_ENV=\"$cfg_EXTRA_ENV\"" || _add_line "# EXTRA_ENV="
+    _add_line ""
+
+    _add_line "# GitHub CLI (opt-in, gives container access to PRs/issues)"
+    if [ "$cfg_GH_AUTH" = "1" ]; then
+        _add_line "GH_AUTH=1"
+        [ -n "$cfg_GH_ACCOUNT" ] && _add_line "GH_ACCOUNT=$cfg_GH_ACCOUNT" || _add_line "# GH_ACCOUNT="
+    else
+        _add_line "# GH_AUTH=1"
+        _add_line "# GH_ACCOUNT="
+    fi
 
     # Display summary
     echo "$summary" | while IFS= read -r line; do
@@ -429,7 +503,7 @@ _run_setup() {
         return 0
     fi
 
-    # --- Phase 9: write config ----------------------------------------------
+    # --- Phase 10: write config ----------------------------------------------
 
     mkdir -p "$CAGE_CONFIG_DIR"
     printf '%s' "$summary" > "$CONF_FILE"
