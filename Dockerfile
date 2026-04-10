@@ -21,7 +21,6 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 RUN useradd -m -s /bin/bash claude && \
     mkdir -p /home/claude/.local/bin /home/claude/.claude /home/claude/.ssh && \
-    chmod 700 /home/claude/.ssh && \
     chown -R claude:claude /home/claude
 
 COPY entrypoint.sh /home/claude/entrypoint.sh
@@ -33,7 +32,11 @@ ENV PATH=/home/claude/.local/bin:$PATH
 ENV HISTFILE=/dev/null
 
 WORKDIR /tmp
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Make home dir writable by any UID for --user compatibility
+# (container is sandboxed: cap_drop ALL, no-new-privileges, read-only host mounts)
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    chmod -R a+rwX /home/claude
 
 WORKDIR /home/claude
+
 ENTRYPOINT ["/home/claude/entrypoint.sh"]
