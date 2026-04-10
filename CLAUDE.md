@@ -121,4 +121,4 @@ cage --net off ~/path/to/repo
 - Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
 - When `--net gate` is active, cage does NOT use `exec docker run` (needs shell alive for proxy cleanup)
-- **Codex security:** Codex containers add `apparmor=unconfined` so bubblewrap can create user namespaces for tool sandboxing (Ubuntu 24.04 AppArmor blocks this by default). `--cap-drop ALL` and `no-new-privileges` still apply. Claude containers retain full lockdown
+- **Codex security:** Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for tool sandboxing. `no-new-privileges` is also omitted for Codex. `--cap-drop ALL` still applies. Claude containers retain full lockdown (`no-new-privileges`, default seccomp + AppArmor)

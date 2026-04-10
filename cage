@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.7.1"
+CAGE_VERSION="0.7.2"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -249,7 +249,6 @@ DOCKER_ARGS=(
     --user "$(id -u):$(id -g)"
     --name "$CONTAINER_NAME"
     --hostname "$CONTAINER_NAME"
-    --security-opt no-new-privileges:true
     --cap-drop ALL
     --tmpfs /tmp
     --tmpfs /run
@@ -261,6 +260,7 @@ DOCKER_ARGS=(
 case "$CAGE_TOOL" in
     claude)
         DOCKER_ARGS+=(
+            --security-opt no-new-privileges:true
             -v "$VOLUME_NAME:${CONTAINER_HOME}/.claude"
             -v "$HOST_CLAUDE_DIR:/host-claude:ro"
         )
@@ -291,9 +291,10 @@ case "$CAGE_TOOL" in
     codex)
         DOCKER_ARGS+=(
             # Codex CLI uses bubblewrap to sandbox tool calls (apply_patch, rg, etc).
-            # bwrap needs user namespaces, which Ubuntu 24.04 AppArmor blocks by default.
+            # bwrap needs user namespaces, which Docker's seccomp/AppArmor block by default.
             # The container itself is the security boundary, so this is safe to relax.
             --security-opt apparmor=unconfined
+            --security-opt seccomp=unconfined
             -v "$VOLUME_NAME:${CONTAINER_HOME}/.codex"
         )
         if [ -d "$HOME/.codex" ]; then

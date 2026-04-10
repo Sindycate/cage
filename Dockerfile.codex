@@ -43,7 +43,7 @@ ENV HISTFILE=/dev/null
 WORKDIR /home/codex
 
 # Make home dir writable by any UID for --user compatibility
-# (container is sandboxed: cap_drop ALL, no-new-privileges, apparmor=unconfined for bwrap, read-only host mounts)
+# (container is sandboxed: cap_drop ALL, seccomp/apparmor unconfined for bwrap, read-only host mounts)
 RUN chmod -R a+rwX /home/codex
 
 ENTRYPOINT ["/home/codex/entrypoint.sh"]
