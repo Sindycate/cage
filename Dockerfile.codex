@@ -25,19 +25,24 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Codex CLI globally (as root, before user switch)
-RUN npm install -g @openai/codex
-
+# Create user before installing Codex so npm global prefix is user-writable
+# (allows Codex's built-in self-update to work without root)
 RUN useradd -m -s /bin/bash codex && \
-    mkdir -p /home/codex/.local/bin /home/codex/.codex /home/codex/.ssh && \
+    mkdir -p /home/codex/.local/bin /home/codex/.codex /home/codex/.ssh \
+             /home/codex/.npm-global && \
     chown -R codex:codex /home/codex
+
+# Install Codex CLI into user-writable npm prefix so self-updates work
+ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global
+RUN npm install -g @openai/codex && \
+    chown -R codex:codex /home/codex/.npm-global
 
 COPY entrypoint-codex.sh /home/codex/entrypoint.sh
 RUN chown codex:codex /home/codex/entrypoint.sh && chmod 755 /home/codex/entrypoint.sh
 
 USER codex
 ENV HOME=/home/codex
-ENV PATH=/home/codex/.local/bin:$PATH
+ENV PATH=/home/codex/.npm-global/bin:/home/codex/.local/bin:$PATH
 ENV HISTFILE=/dev/null
 
 WORKDIR /home/codex
