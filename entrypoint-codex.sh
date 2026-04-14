@@ -44,6 +44,16 @@ if [ -d /host-codex ]; then
     done
 fi
 
+# Inject cage container context into instructions.md
+cat > "$CODEX_DIR/instructions.md" <<'CAGE_EOF'
+# Container Environment (cage)
+You are running inside a Docker container managed by cage.
+- You have passwordless `sudo` access — use `sudo apt-get install -y <package>` to install any system packages you need (e.g., playwright, build tools, native libraries)
+- Python 3, Node.js (LTS), and npm are pre-installed
+- Only the workspace directory is writable on the host filesystem
+- `pip install` and `npm install` work without sudo
+CAGE_EOF
+
 # Restore workspace trust if it was previously granted but lost by the copy
 if [ "$WAS_TRUSTED" -eq 1 ] && ! grep -q "projects\\.\"${WORK_DIR}\"" "$CODEX_DIR/config.toml" 2>/dev/null; then
     printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$WORK_DIR" >> "$CODEX_DIR/config.toml"

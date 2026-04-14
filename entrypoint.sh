@@ -32,8 +32,20 @@ if [ "$_sl_file" != "$_sl_cmd" ] && [[ "$_sl_file" != *..* ]] && [ -f "/host-cla
     ln -sfn "/host-claude/$_sl_file" "$CLAUDE_DIR/$_sl_file"
 fi
 
-# Symlink optional host files (read-only is fine, claude only reads these)
-[ -f /host-claude/CLAUDE.md ]  && ln -sfn /host-claude/CLAUDE.md "$CLAUDE_DIR/CLAUDE.md"
+# Inject cage container context into CLAUDE.md, append host's CLAUDE.md if present
+cat > "$CLAUDE_DIR/CLAUDE.md" <<'CAGE_EOF'
+# Container Environment (cage)
+You are running inside a Docker container managed by cage.
+- You have passwordless `sudo` access — use `sudo apt-get install -y <package>` to install any system packages you need (e.g., playwright, build tools, native libraries)
+- Python 3, Node.js (LTS), and npm are pre-installed
+- Only the workspace directory is writable on the host filesystem
+- `pip install` and `npm install` work without sudo
+CAGE_EOF
+if [ -f /host-claude/CLAUDE.md ]; then
+    printf '\n' >> "$CLAUDE_DIR/CLAUDE.md"
+    cat /host-claude/CLAUDE.md >> "$CLAUDE_DIR/CLAUDE.md"
+fi
+
 [ -d /host-claude/agents ]     && ln -sfn /host-claude/agents "$CLAUDE_DIR/agents"
 
 # Use WORKSPACE_DIR so each project gets a unique identity in Claude Code
