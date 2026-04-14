@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.7.12"
+CAGE_VERSION="0.7.13"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -255,9 +255,10 @@ DOCKER_ARGS=(
     --name "$CONTAINER_NAME"
     --hostname "$CONTAINER_NAME"
     --cap-drop ALL
-    --cap-add SETUID
-    --cap-add SETGID
     --cap-add CHOWN
+    --cap-add DAC_OVERRIDE
+    --cap-add SETGID
+    --cap-add SETUID
     --tmpfs /tmp
     --tmpfs /run
     -v "$REPO_PATH:/workspace/$REPO_BASENAME"
