@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.7.7"
+CAGE_VERSION="0.7.8"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -162,6 +162,9 @@ if ! docker image inspect "$IMAGE" &>/dev/null; then
     echo "Image $IMAGE not found. Building..."
     docker build -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
 fi
+
+# Fix stale volume permissions from older images (runs as image's default UID which owns the files)
+docker run --rm -v "$VOLUME_NAME:/vol" --entrypoint chmod "$IMAGE" -R a+rwX /vol 2>/dev/null || true
 
 YOLO_LABEL=""
 if [ "$YOLO" -eq 1 ]; then
