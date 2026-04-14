@@ -47,7 +47,7 @@ cage --net off ~/path/to/repo
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool; defaults to `claude` (overridable via `CAGE_DEFAULT` in `cage.conf`)
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
-- Loads config from `~/.config/cage/cage.conf` (global) then `<repo>/.cage.conf` (per-project override)
+- Loads config in layers: `~/.config/cage/cage.conf` (global) → `profiles/<name>.conf` (named profile) → `<repo>/.cage.conf` (per-project override)
 - Runs `docker run` with security hardening (cap_drop ALL, no-new-privileges) and tool-specific mounts:
   - Repo at `/workspace/{reponame}` (read-write) — the only writable host path; unique path gives each project its own identity in Claude Code
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
@@ -112,6 +112,26 @@ cage --net off ~/path/to/repo
 - Releases are automated via GitHub Actions on tag push
 - **Release flow:** bump `CAGE_VERSION` → commit → push → `git tag v{version}` → `git push origin v{version}`. Never skip tagging — releases only trigger on `v*` tag push
 - **Every pushed commit gets its own version.** Never push multiple commits under the same version — if a follow-up fix is needed, bump again
+
+## Profiles
+
+Named profiles allow switching between configurations (e.g., work vs personal) without editing files per-repo.
+
+**Storage:** `~/.config/cage/profiles/<name>.conf` — same format as `cage.conf`. Created via `cage setup --profile <name>`.
+
+**Config loading order:** `cage.conf` (global defaults) → `profiles/<name>.conf` (profile overrides) → `.cage.conf` (per-project override, always wins). Users with no profiles get the original two-layer loading unchanged.
+
+**Profile resolution priority:**
+1. `--profile <name>` CLI flag (one-shot, not persisted)
+2. `CAGE_PROFILE=<name>` in repo's `.cage.conf` (peeked via grep before full source)
+3. Lookup in `~/.config/cage/folder-profiles` (persistent folder→profile mapping)
+4. Interactive prompt (if 2+ profiles exist, TTY, and no mapping yet — choice is saved)
+
+**`folder-profiles`** file: flat `<absolute-path>=<profile-name>` lines. `_none_` means "no profile, don't prompt again".
+
+**`cage-profiles.sh`** (sourced for `cage profiles` subcommand): list profiles + mappings, show a profile, set/reset folder mappings.
+
+**Profile name validation:** `[a-zA-Z0-9_-]` only.
 
 ## Key Constraints
 

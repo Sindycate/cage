@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.7.13"
+CAGE_VERSION="0.7.14"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -20,7 +20,15 @@ BUILD_DIR="$SCRIPT_DIR"
 case "${1:-}" in
     --version|-V) echo "cage $CAGE_VERSION"; exit 0 ;;
     --help|-h)    set -- ;;  # clear args to trigger usage below
-    setup|--setup) source "$SCRIPT_DIR/cage-setup.sh"; exit $? ;;
+    setup|--setup)
+        # Forward --profile to the setup wizard via env var
+        if [ "${2:-}" = "--profile" ] && [ -n "${3:-}" ]; then
+            export CAGE_SETUP_PROFILE="$3"
+        fi
+        source "$SCRIPT_DIR/cage-setup.sh"; exit $? ;;
+    profiles|--profiles)
+        shift
+        source "$SCRIPT_DIR/cage-profiles.sh"; exit $? ;;
 esac
 
 # Subcommand detection: cage [claude|codex] [options] /path/to/repo [tool-args...]
@@ -32,6 +40,7 @@ fi
 
 YOLO=0
 NET_MODE=""  # empty = not explicitly set
+CAGE_PROFILE_FLAG=""
 
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
@@ -45,6 +54,17 @@ while [[ "${1:-}" == -* ]]; do
             ;;
         --net=*)
             NET_MODE="${1#--net=}"
+            shift
+            ;;
+        --profile)
+            CAGE_PROFILE_FLAG="${2:-}"
+            [ -z "$CAGE_PROFILE_FLAG" ] && { echo "Missing profile name after --profile" >&2; exit 1; }
+            [[ "$CAGE_PROFILE_FLAG" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Invalid profile name: '$CAGE_PROFILE_FLAG' (use only letters, digits, hyphens, underscores)" >&2; exit 1; }
+            shift 2
+            ;;
+        --profile=*)
+            CAGE_PROFILE_FLAG="${1#--profile=}"
+            [[ "$CAGE_PROFILE_FLAG" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Invalid profile name: '$CAGE_PROFILE_FLAG' (use only letters, digits, hyphens, underscores)" >&2; exit 1; }
             shift
             ;;
         *)
@@ -69,16 +89,22 @@ case "$NET_MODE" in
 esac
 
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [claude|codex] [-y|--yolo] [--net open|gate|off] /path/to/repo [tool-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [--profile NAME] [--net open|gate|off] /path/to/repo [tool-args...]"
     echo ""
     echo "Tools:"
     echo "  claude    Run Claude Code (default)"
     echo "  codex     Run OpenAI Codex CLI"
     echo ""
     echo "Commands:"
-    echo "  setup              Run interactive configuration wizard"
+    echo "  setup                     Run interactive configuration wizard"
+    echo "  setup --profile NAME      Create/edit a named profile"
+    echo "  profiles                  List profiles and folder mappings"
+    echo "  profiles show NAME        Show a profile's configuration"
+    echo "  profiles set PATH NAME    Assign a profile to a folder"
+    echo "  profiles reset PATH       Remove a folder's profile mapping"
     echo ""
     echo "Options:"
+    echo "  --profile NAME     Use a named config profile (one-shot override)"
     echo "  -y, --yolo         Skip all permission prompts"
     echo "  --net open         Full network access (default without --yolo)"
     echo "  --net gate         Domain-gated network via proxy (default with --yolo)"
@@ -88,7 +114,9 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Examples:"
     echo "  cage setup"
+    echo "  cage setup --profile work"
     echo "  cage ~/projects/myapp"
+    echo "  cage --profile work ~/projects/myapp"
     echo "  cage codex ~/projects/myapp"
     echo "  cage codex -y ~/projects/myapp"
     echo "  cage -y ~/projects/myapp"
@@ -101,23 +129,98 @@ fi
 REPO_PATH="$(cd "$1" && pwd -P)"
 shift
 
-# Load config: global first, then per-project override
-GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
-CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
-[ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
-[ -f "$REPO_PATH/.cage.conf" ]      && source "$REPO_PATH/.cage.conf"
+# Load config: global → profile → per-project override
+PROFILES_DIR="$CAGE_CONFIG_DIR/profiles"
+FOLDER_PROFILES_FILE="$CAGE_CONFIG_DIR/folder-profiles"
+
+_init_config_vars() {
+    GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
+    CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
+    CAGE_PROFILE=""
+}
+
+_resolve_profile() {
+    # Priority 1: CLI flag
+    if [ -n "${CAGE_PROFILE_FLAG:-}" ]; then
+        echo "$CAGE_PROFILE_FLAG"; return
+    fi
+    # Priority 2: CAGE_PROFILE in per-project .cage.conf (peek without full source)
+    if [ -f "$REPO_PATH/.cage.conf" ]; then
+        local proj_profile
+        proj_profile="$(grep -m1 '^CAGE_PROFILE=' "$REPO_PATH/.cage.conf" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+        if [ -n "$proj_profile" ]; then
+            echo "$proj_profile"; return
+        fi
+    fi
+    # Priority 3: folder-profiles mapping
+    if [ -f "$FOLDER_PROFILES_FILE" ]; then
+        local mapped
+        mapped="$(grep -m1 "^${REPO_PATH}=" "$FOLDER_PROFILES_FILE" 2>/dev/null | cut -d= -f2-)" || true
+        if [ -n "$mapped" ]; then
+            [ "$mapped" = "_none_" ] && return  # explicit "no profile"
+            echo "$mapped"; return
+        fi
+    fi
+    # Priority 4: interactive prompt (if 2+ profiles exist and TTY)
+    if [ -t 0 ] && [ -d "$PROFILES_DIR" ]; then
+        local profiles=()
+        for f in "$PROFILES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            profiles+=("$(basename "${f%.conf}")")
+        done
+        if [ ${#profiles[@]} -ge 2 ]; then
+            # Use >&2 for display since stdout is captured by $()
+            echo "" >&2
+            echo "Multiple profiles available. Which one for $REPO_PATH?" >&2
+            local i=1
+            for p in "${profiles[@]}"; do
+                echo "  ${i}) ${p}" >&2
+                i=$((i + 1))
+            done
+            echo "  ${i}) (none — use global defaults only)" >&2
+            local choice
+            read -rp "  Choice [${i}]: " choice
+            choice="${choice:-$i}"
+            if [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -lt "$i" ] 2>/dev/null; then
+                local selected="${profiles[$((choice - 1))]}"
+                mkdir -p "$CAGE_CONFIG_DIR"
+                echo "${REPO_PATH}=${selected}" >> "$FOLDER_PROFILES_FILE"
+                echo "$selected"; return
+            else
+                mkdir -p "$CAGE_CONFIG_DIR"
+                echo "${REPO_PATH}=_none_" >> "$FOLDER_PROFILES_FILE"
+                return
+            fi
+        fi
+    fi
+}
+
+_load_config() {
+    _init_config_vars
+    # Step 1: global defaults
+    [ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
+    # Step 2: resolve and load profile
+    CAGE_PROFILE="$(_resolve_profile)"
+    if [ -n "$CAGE_PROFILE" ]; then
+        local profile_file="$PROFILES_DIR/${CAGE_PROFILE}.conf"
+        if [ -f "$profile_file" ]; then
+            source "$profile_file"
+        else
+            echo "Warning: profile '${CAGE_PROFILE}' not found at ${profile_file}" >&2
+        fi
+    fi
+    # Step 3: per-project override (always wins)
+    [ -f "$REPO_PATH/.cage.conf" ] && source "$REPO_PATH/.cage.conf"
+}
 
 # Auto-trigger setup wizard on first run (interactive terminal only)
 if [ ! -f "$CAGE_CONFIG_DIR/cage.conf" ] && [ -t 0 ]; then
     echo "No configuration found. Running first-time setup..."
     echo ""
     source "$SCRIPT_DIR/cage-setup.sh"
-    # Re-load config after setup
-    GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
-    CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH=""
-    [ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
-    [ -f "$REPO_PATH/.cage.conf" ]      && source "$REPO_PATH/.cage.conf"
 fi
+
+_load_config
 
 # Resolve tool: explicit subcommand > CAGE_DEFAULT from config > "claude"
 if [ -z "$CAGE_TOOL" ]; then
@@ -244,6 +347,7 @@ fi
 
 echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL} ==="
 echo "  Repo:      $REPO_PATH"
+[ -n "$CAGE_PROFILE" ] && echo "  Profile:   $CAGE_PROFILE"
 echo "  Container: $CONTAINER_NAME"
 echo "  Volume:    $VOLUME_NAME"
 echo "=============================="

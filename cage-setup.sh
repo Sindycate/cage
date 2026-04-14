@@ -109,11 +109,24 @@ _detect_gh_accounts() {
 _run_setup() {
     _setup_colors
 
-    echo "${BOLD}cage setup${RESET} — interactive configuration wizard"
+    # Determine target: global cage.conf or a named profile
+    local PROFILE_NAME="${CAGE_SETUP_PROFILE:-}"
+    local CONF_FILE
+    if [ -n "$PROFILE_NAME" ]; then
+        # Validate profile name
+        if ! [[ "$PROFILE_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            _err "Invalid profile name: '$PROFILE_NAME' (use only letters, digits, hyphens, underscores)"
+            return 1
+        fi
+        CONF_FILE="$CAGE_CONFIG_DIR/profiles/${PROFILE_NAME}.conf"
+        echo "${BOLD}cage setup${RESET} — configuring profile: ${CYAN}${PROFILE_NAME}${RESET}"
+    else
+        CONF_FILE="$CAGE_CONFIG_DIR/cage.conf"
+        echo "${BOLD}cage setup${RESET} — interactive configuration wizard"
+    fi
 
     # --- Phase 0: existing config -------------------------------------------
 
-    local CONF_FILE="$CAGE_CONFIG_DIR/cage.conf"
     local EDIT_MODE=0
 
     if [ -f "$CONF_FILE" ]; then
@@ -505,7 +518,7 @@ _run_setup() {
 
     # --- Phase 10: write config ----------------------------------------------
 
-    mkdir -p "$CAGE_CONFIG_DIR"
+    mkdir -p "$(dirname "$CONF_FILE")"
     printf '%s' "$summary" > "$CONF_FILE"
 
     echo ""
