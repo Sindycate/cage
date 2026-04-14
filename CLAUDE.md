@@ -60,6 +60,8 @@ cage --net off ~/path/to/repo
 - Uses `md5 -q` (macOS) or `md5sum` (Linux) for hashing — auto-detected
 
 **`entrypoint.sh`** (runs inside Claude Code container on every start):
+- Runs as root; remaps the `claude` user's UID/GID to match the host user (`HOST_UID`/`HOST_GID` env vars) for correct file ownership in the mounted repo
+- Fixes ownership on home dir and volume after UID remapping
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
 - Copies `settings.json` from host read-only mount into writable volume
 - Symlinks `CLAUDE.md` and `agents/` from host if present
@@ -67,8 +69,10 @@ cage --net off ~/path/to/repo
 - Sets `user.name`/`user.email` from env vars (passed from `cage.conf`)
 - Writes `~/.ssh/config` with SSH host alias if `SSH_HOST` is set
 - Copies GitHub CLI config from `/host-gh` into writable `~/.config/gh/` (non-auth settings like git_protocol)
+- Switches to the target user via `gosu` before exec'ing `claude`
 
 **`entrypoint-codex.sh`** (runs inside Codex container on every start):
+- Same root→user pattern as Claude entrypoint (UID/GID remapping via `gosu`)
 - Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume
 - Skips `auth.json` when `CODEX_COPY_AUTH=0` (for non-OpenAI providers like Azure OpenAI)
 - Preserves workspace trust across restarts (saves and restores `[projects]` entries in `config.toml`)
@@ -76,9 +80,9 @@ cage --net off ~/path/to/repo
 - Copies GitHub CLI config from `/host-gh` (same as Claude entrypoint)
 - Execs `codex` instead of `claude`
 
-**`Dockerfile`**: Ubuntu 24.04, installs GitHub CLI, bubblewrap (for subprocess isolation), and Claude Code via official installer, runs as non-root `claude` user. `jq` is required by the statusLine command in the host's `settings.json`.
+**`Dockerfile`**: Ubuntu 24.04, installs Python 3, Node.js LTS, GitHub CLI, bubblewrap, sudo, gosu, and Claude Code via official installer. Entrypoint runs as root (switches to host UID via gosu). `jq` is required by the statusLine command in the host's `settings.json`.
 
-**`Dockerfile.codex`**: Ubuntu 24.04 + GitHub CLI + Node.js LTS, installs Codex CLI via `npm install -g @openai/codex`, runs as non-root `codex` user.
+**`Dockerfile.codex`**: Ubuntu 24.04 + Python 3 + GitHub CLI + Node.js LTS, installs Codex CLI via `npm install -g @openai/codex`. Same root→gosu pattern as Claude.
 
 **`docker-compose.yml`**: Build-only helper — tags images as `claude-code:latest` and `codex:latest`. Not used for running containers (that's `cage`'s job).
 
@@ -121,4 +125,4 @@ cage --net off ~/path/to/repo
 - Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
 - When `--net gate` is active, cage does NOT use `exec docker run` (needs shell alive for proxy cleanup)
-- **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `no-new-privileges` is omitted. `--cap-drop ALL` still applies. The container itself is the security boundary
+- **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

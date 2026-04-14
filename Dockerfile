@@ -6,11 +6,21 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     git \
+    gosu \
     jq \
     less \
     procps \
+    python3 \
+    python3-pip \
+    python3-venv \
     ripgrep \
+    sudo \
  && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -22,21 +32,22 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 RUN useradd -m -s /bin/bash claude && \
     mkdir -p /home/claude/.local/bin /home/claude/.claude /home/claude/.ssh && \
-    chown -R claude:claude /home/claude
+    chown -R claude:claude /home/claude && \
+    echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 
 COPY entrypoint.sh /home/claude/entrypoint.sh
-RUN chown claude:claude /home/claude/entrypoint.sh && chmod 755 /home/claude/entrypoint.sh
+RUN chmod 755 /home/claude/entrypoint.sh
 
-USER claude
 ENV HOME=/home/claude
 ENV PATH=/home/claude/.local/bin:$PATH
 ENV HISTFILE=/dev/null
 
+# Install Claude Code as the claude user, then make home writable for UID remapping
 WORKDIR /tmp
-# Make home dir writable by any UID for --user compatibility
-# (container is sandboxed: cap_drop ALL, no-new-privileges, read-only host mounts)
-RUN curl -fsSL https://claude.ai/install.sh | bash && \
-    chmod -R a+rwX /home/claude
+USER claude
+RUN curl -fsSL https://claude.ai/install.sh | bash
+USER root
+RUN chmod -R a+rwX /home/claude
 
 WORKDIR /home/claude
 

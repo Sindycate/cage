@@ -6,10 +6,15 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     git \
+    gosu \
     jq \
     less \
     procps \
+    python3 \
+    python3-pip \
+    python3-venv \
     ripgrep \
+    sudo \
  && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -30,7 +35,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
 RUN useradd -m -s /bin/bash codex && \
     mkdir -p /home/codex/.local/bin /home/codex/.codex /home/codex/.ssh \
              /home/codex/.npm-global && \
-    chown -R codex:codex /home/codex
+    chown -R codex:codex /home/codex && \
+    echo "codex ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/codex
 
 # Install Codex CLI into user-writable npm prefix so self-updates work
 ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global
@@ -38,17 +44,13 @@ RUN npm install -g @openai/codex && \
     chown -R codex:codex /home/codex/.npm-global
 
 COPY entrypoint-codex.sh /home/codex/entrypoint.sh
-RUN chown codex:codex /home/codex/entrypoint.sh && chmod 755 /home/codex/entrypoint.sh
+RUN chmod 755 /home/codex/entrypoint.sh
 
-USER codex
 ENV HOME=/home/codex
 ENV PATH=/home/codex/.npm-global/bin:/home/codex/.local/bin:$PATH
 ENV HISTFILE=/dev/null
 
 WORKDIR /home/codex
-
-# Make home dir writable by any UID for --user compatibility
-# (container is sandboxed: cap_drop ALL, seccomp/apparmor unconfined for bwrap, read-only host mounts)
 RUN chmod -R a+rwX /home/codex
 
 ENTRYPOINT ["/home/codex/entrypoint.sh"]

@@ -1,6 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
+# Match container user to host UID/GID for correct file ownership
+TARGET_USER="claude"
+if [ -n "${HOST_UID:-}" ] && [ "$(id -u "$TARGET_USER")" != "$HOST_UID" ]; then
+    usermod -u "$HOST_UID" "$TARGET_USER" 2>/dev/null || true
+fi
+if [ -n "${HOST_GID:-}" ] && [ "$(id -g "$TARGET_USER")" != "$HOST_GID" ]; then
+    groupmod -g "$HOST_GID" "$TARGET_USER" 2>/dev/null || true
+fi
+
+# Ensure home dir and volume are owned by the (possibly remapped) user
+chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true
+
 CLAUDE_DIR="$HOME/.claude"
 mkdir -p "$CLAUDE_DIR"
 
@@ -53,4 +65,4 @@ if [ -d /host-gh ]; then
 fi
 
 cd "$WORK_DIR"
-exec claude "$@"
+exec gosu "$TARGET_USER" claude "$@"
