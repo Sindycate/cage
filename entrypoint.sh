@@ -11,7 +11,7 @@ PREFS_STORE="$CLAUDE_DIR/.claude.json"
 ln -sfn "$PREFS_STORE" "$HOME/.claude.json"
 
 # Copy host settings (read-only mount → writable volume)
-[ -f /host-claude/settings.json ] && cp -f /host-claude/settings.json "$CLAUDE_DIR/settings.json"
+[ -f /host-claude/settings.json ] && { rm -f "$CLAUDE_DIR/settings.json" 2>/dev/null; cp /host-claude/settings.json "$CLAUDE_DIR/settings.json"; }
 
 # statusLine.command may reference a script in ~/.claude/ which is read-only in-container
 _sl_cmd=$(jq -r '.statusLine.command // empty' "$CLAUDE_DIR/settings.json" 2>/dev/null)
