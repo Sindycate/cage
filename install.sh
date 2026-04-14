@@ -45,7 +45,16 @@ if [ -n "${CAGE_VERSION:-}" ]; then
     info "Using pinned version: $VERSION"
 else
     info "Fetching latest release..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    GH_AUTH_HEADER=()
+    if [ -n "${GH_TOKEN:-}" ]; then
+        GH_AUTH_HEADER=(-H "Authorization: token $GH_TOKEN")
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+        GH_AUTH_HEADER=(-H "Authorization: token $GITHUB_TOKEN")
+    elif command -v gh &>/dev/null; then
+        _token="$(gh auth token 2>/dev/null)" || true
+        [ -n "${_token:-}" ] && GH_AUTH_HEADER=(-H "Authorization: token $_token")
+    fi
+    VERSION=$(curl -fsSL "${GH_AUTH_HEADER[@]}" "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' | head -1 | cut -d'"' -f4 | sed 's/^v//')
     if [ -z "$VERSION" ]; then
         error "Could not determine latest version. Set CAGE_VERSION to install a specific version."
