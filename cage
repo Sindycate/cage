@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.7.14"
+CAGE_VERSION="0.7.15"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -200,7 +200,7 @@ _load_config() {
     # Step 1: global defaults
     [ -f "$CAGE_CONFIG_DIR/cage.conf" ] && source "$CAGE_CONFIG_DIR/cage.conf"
     # Step 2: resolve and load profile
-    CAGE_PROFILE="$(_resolve_profile)"
+    CAGE_PROFILE="$(_resolve_profile)" || true
     if [ -n "$CAGE_PROFILE" ]; then
         local profile_file="$PROFILES_DIR/${CAGE_PROFILE}.conf"
         if [ -f "$profile_file" ]; then
@@ -210,7 +210,7 @@ _load_config() {
         fi
     fi
     # Step 3: per-project override (always wins)
-    [ -f "$REPO_PATH/.cage.conf" ] && source "$REPO_PATH/.cage.conf"
+    [ -f "$REPO_PATH/.cage.conf" ] && source "$REPO_PATH/.cage.conf" || true
 }
 
 # Auto-trigger setup wizard on first run (interactive terminal only)
