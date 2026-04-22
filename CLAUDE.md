@@ -43,6 +43,10 @@ cage --net gate ~/path/to/repo
 
 # No network at all
 cage --net off ~/path/to/repo
+
+# MCP bridge — forward host-side MCP servers into the container
+# In cage.conf or .cage.conf:
+#   MCP_SERVERS="myserver=some-tool --mcp-proxy https://example.com/mcp"
 ```
 
 ## Architecture
@@ -99,6 +103,18 @@ cage --net off ~/path/to/repo
 - Concurrent requests to the same unknown domain show only one dialog (deduplication via threading.Event)
 
 **`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, GitHub, OpenAI API). Loaded on every proxy start.
+
+**`mcp-bridge.py`** (host-side, runs when `MCP_SERVERS` is configured):
+- Python3 TCP relay that bridges host-side MCP commands into the container
+- For each configured server, listens on a random TCP port on 127.0.0.1
+- On incoming connection (from container via `host.docker.internal`), spawns the configured command and relays bidirectionally between TCP and subprocess stdio
+- Auth tokens are resolved on the host at connection time — handles token expiry naturally
+- Startup protocol: prints `SERVER:name=PORT:N` per server, then `READY` (same pattern as netgate-proxy.py)
+
+**`mcp-relay`** (runs inside container, installed at `/usr/local/bin/mcp-relay`):
+- Tiny Python script that connects container stdio to the host MCP bridge via TCP
+- Usage: `mcp-relay <server-name>` — reads `MCP_BRIDGE_HOST` and `MCP_BRIDGE_PORT_<NAME>` env vars
+- Configured as the MCP server command in Claude Code's `settings.json` by the entrypoint
 
 **`Makefile`**: Install/uninstall targets. `make install` copies files to `~/.local/share/cage/` and symlinks to `~/.local/bin/cage`.
 
@@ -157,5 +173,6 @@ Named profiles allow switching between configurations (e.g., work vs personal) w
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
 - Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
-- When `--net gate` is active, cage does NOT use `exec docker run` (needs shell alive for proxy cleanup)
+- When `--net gate` or MCP bridge is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)
+- MCP bridge (`MCP_SERVERS` in cage.conf) runs host commands and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
 - **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

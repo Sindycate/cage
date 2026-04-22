@@ -32,6 +32,24 @@ if [ "$_sl_file" != "$_sl_cmd" ] && [[ "$_sl_file" != *..* ]] && [ -f "/host-cla
     ln -sfn "/host-claude/$_sl_file" "$CLAUDE_DIR/$_sl_file"
 fi
 
+# Merge MCP bridge servers into settings.json
+if [ -n "${CAGE_MCP_SERVERS:-}" ]; then
+    python3 -c "
+import json, os
+servers = json.loads(os.environ['CAGE_MCP_SERVERS'])
+p = os.path.expanduser('~/.claude/settings.json')
+try:
+    s = json.load(open(p))
+except (FileNotFoundError, json.JSONDecodeError):
+    s = {}
+mcp = s.setdefault('mcpServers', {})
+for name in servers:
+    mcp[name] = {'command': 'mcp-relay', 'args': [name]}
+with open(p, 'w') as f:
+    json.dump(s, f, indent=2)
+"
+fi
+
 # Inject cage container context into CLAUDE.md, append host's CLAUDE.md if present
 cat > "$CLAUDE_DIR/CLAUDE.md" <<'CAGE_EOF'
 # Container Environment (cage)

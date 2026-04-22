@@ -39,7 +39,8 @@ RUN useradd -m -s /bin/bash claude && \
     echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 
 COPY entrypoint.sh /home/claude/entrypoint.sh
-RUN chmod 755 /home/claude/entrypoint.sh
+COPY mcp-relay /usr/local/bin/mcp-relay
+RUN chmod 755 /home/claude/entrypoint.sh /usr/local/bin/mcp-relay
 
 ENV HOME=/home/claude
 ENV PATH=/home/claude/.local/bin:$PATH

@@ -28,7 +28,8 @@ jobs:
         run: |
           DIST="cage-${VERSION}"
           mkdir "$DIST"
-          cp cage cage-setup.sh cage-profiles.sh cage-netgate.sh netgate-proxy.py docker-compose.yml \
+          cp cage cage-setup.sh cage-profiles.sh cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay \
+             docker-compose.yml \
              Dockerfile Dockerfile.codex \
              entrypoint.sh entrypoint-codex.sh \
              install.sh Makefile README.md \
