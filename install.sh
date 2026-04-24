@@ -93,7 +93,7 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 tar xzf "$TARBALL" -C "$INSTALL_DIR" --strip-components=1
 
-chmod +x "$INSTALL_DIR/cage" "$INSTALL_DIR/cage-setup.sh" "$INSTALL_DIR/cage-profiles.sh" "$INSTALL_DIR/cage-netgate.sh" "$INSTALL_DIR/netgate-proxy.py" "$INSTALL_DIR/mcp-bridge.py" "$INSTALL_DIR/mcp-relay"
+chmod +x "$INSTALL_DIR/cage" "$INSTALL_DIR/cage-setup.sh" "$INSTALL_DIR/cage-profiles.sh" "$INSTALL_DIR/cage-netgate.sh" "$INSTALL_DIR/netgate-proxy.py" "$INSTALL_DIR/mcp-bridge.py" "$INSTALL_DIR/mcp-relay" "$INSTALL_DIR/host-cmd-bridge.py" "$INSTALL_DIR/host-cmd-relay"
 ln -sf "$INSTALL_DIR/cage" "$BIN_DIR/cage"
 
 mkdir -p "$HOME/.config/cage"

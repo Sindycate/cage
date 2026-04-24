@@ -47,6 +47,10 @@ cage --net off ~/path/to/repo
 # MCP bridge — forward host-side MCP servers into the container
 # In cage.conf or .cage.conf:
 #   MCP_SERVERS="myserver=some-tool --mcp-proxy https://example.com/mcp"
+
+# Host command bridge — expose host commands (e.g. token minters) inside the container
+# In cage.conf or .cage.conf:
+#   HOST_COMMANDS="ztoken=ztoken token -n codex"
 ```
 
 ## Architecture
@@ -117,6 +121,16 @@ cage --net off ~/path/to/repo
 - Configured as the MCP server command in Claude Code's `settings.json` by the entrypoint
 - If the repo has `.mcp.json` with matching server names, cage patches it before launch and restores the original on exit
 
+**`host-cmd-bridge.py`** (host-side, runs when `HOST_COMMANDS` is configured):
+- Same pattern as `mcp-bridge.py`: per-command TCP listener on `127.0.0.1`, spawns the host command on each incoming connection, relays stdio bidirectionally
+- Unlike MCP bridge, subprocess stderr is forwarded to the bridge's own stderr so command errors surface in the cage terminal (MCP bridge sends to DEVNULL to protect JSON-RPC framing)
+- Startup protocol: prints `COMMAND:name=PORT:N` per command, then `READY`
+- Use case: token-refresh commands that need host keychain/auth context (e.g. `HOST_COMMANDS="ztoken=ztoken token -n codex"` so Codex's `auth.command = "ztoken"` config keeps working inside the container across indefinite sessions)
+
+**`host-cmd-relay`** (runs inside container, installed at `/usr/local/bin/host-cmd-relay`):
+- Container-side stdio-to-TCP relay — reads `HOST_CMD_BRIDGE_HOST` and `HOST_CMD_BRIDGE_PORT_<NAME>`
+- Per-command shims are written to `/usr/local/bin/<name>` by the entrypoint (two-line wrappers that `exec host-cmd-relay <name> "$@"`), so tools inside the container find the command by name in `PATH`
+
 **`Makefile`**: Install/uninstall targets. `make install` copies files to `~/.local/share/cage/` and symlinks to `~/.local/bin/cage`.
 
 **`install.sh`**: Curl-pipe-bash installer. Downloads the latest GitHub Release tarball, verifies checksum, extracts to `~/.local/share/cage/`, and symlinks the binary. Also supports `--uninstall`.
@@ -175,6 +189,7 @@ Named profiles allow switching between configurations (e.g., work vs personal) w
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
 - Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
-- When `--net gate`, MCP bridge, or session sync is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)
+- When `--net gate`, MCP bridge, host command bridge, or session sync is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)
 - MCP bridge (`MCP_SERVERS` in cage.conf) runs host commands and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
+- Host command bridge (`HOST_COMMANDS` in cage.conf) is the same mechanism for non-MCP commands: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
 - **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

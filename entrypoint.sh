@@ -95,5 +95,19 @@ if [ -d /host-gh ]; then
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$GH_CONFIG_DIR" 2>/dev/null || true
 fi
 
+# Host command bridge shims: write /usr/local/bin/<name> for each entry in
+# CAGE_HOST_COMMANDS (space-separated). The shim delegates to host-cmd-relay,
+# which tunnels stdio over TCP to host-cmd-bridge.py on the host.
+if [ -n "${CAGE_HOST_COMMANDS:-}" ]; then
+    for _name in $CAGE_HOST_COMMANDS; do
+        _shim="/usr/local/bin/$_name"
+        cat > "$_shim" <<SHIM_EOF
+#!/bin/sh
+exec host-cmd-relay $_name "\$@"
+SHIM_EOF
+        chmod 755 "$_shim"
+    done
+fi
+
 cd "$WORK_DIR"
 exec gosu "$TARGET_USER" claude "$@"

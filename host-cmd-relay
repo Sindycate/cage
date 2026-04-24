@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Relay stdin/stdout to the host command bridge on the host.
+
+Unlike mcp-relay, this relay is used for one-shot commands that may not
+read stdin. When stdin closes, we must NOT exit — we keep draining the
+socket so the command's stdout reaches the caller before we terminate.
+"""
+import os
+import select
+import socket
+import sys
+
+BUFSIZE = 65536
+
+name = sys.argv[1].upper().replace("-", "_")
+host = os.environ["HOST_CMD_BRIDGE_HOST"]
+port = int(os.environ[f"HOST_CMD_BRIDGE_PORT_{name}"])
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((host, port))
+sock.setblocking(False)
+
+stdin_fd = sys.stdin.buffer.fileno()
+stdout = sys.stdout.buffer
+stdin_open = True
+
+try:
+    while True:
+        watch = [sock]
+        if stdin_open:
+            watch.append(stdin_fd)
+        readable, _, _ = select.select(watch, [], [])
+        for fd in readable:
+            if fd is sock:
+                data = sock.recv(BUFSIZE)
+                if not data:
+                    sys.exit(0)
+                stdout.write(data)
+                stdout.flush()
+            else:
+                data = os.read(stdin_fd, BUFSIZE)
+                if not data:
+                    stdin_open = False
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                else:
+                    sock.sendall(data)
+except (BrokenPipeError, ConnectionResetError, OSError):
+    pass
+finally:
+    sock.close()

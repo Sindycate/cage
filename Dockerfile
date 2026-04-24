@@ -40,7 +40,8 @@ RUN useradd -m -s /bin/bash claude && \
 
 COPY entrypoint.sh /home/claude/entrypoint.sh
 COPY mcp-relay /usr/local/bin/mcp-relay
-RUN chmod 755 /home/claude/entrypoint.sh /usr/local/bin/mcp-relay
+COPY host-cmd-relay /usr/local/bin/host-cmd-relay
+RUN chmod 755 /home/claude/entrypoint.sh /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
 
 ENV HOME=/home/claude
 ENV PATH=/home/claude/.local/bin:$PATH

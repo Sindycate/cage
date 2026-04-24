@@ -47,7 +47,9 @@ RUN npm install -g @openai/codex && \
     chown -R codex:codex /home/codex/.npm-global
 
 COPY entrypoint-codex.sh /home/codex/entrypoint.sh
-RUN chmod 755 /home/codex/entrypoint.sh
+COPY mcp-relay /usr/local/bin/mcp-relay
+COPY host-cmd-relay /usr/local/bin/host-cmd-relay
+RUN chmod 755 /home/codex/entrypoint.sh /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
 
 ENV HOME=/home/codex
 ENV PATH=/home/codex/.npm-global/bin:/home/codex/.local/bin:$PATH

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.8.3"
+CAGE_VERSION="0.9.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -162,7 +162,7 @@ FOLDER_PROFILES_FILE="$CAGE_CONFIG_DIR/folder-profiles"
 _init_config_vars() {
     GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
-    CAGE_PROFILE="" MCP_SERVERS="" SESSION_SYNC=""
+    CAGE_PROFILE="" MCP_SERVERS="" HOST_COMMANDS="" SESSION_SYNC=""
 }
 
 _resolve_profile() {
@@ -494,6 +494,93 @@ if changed:
     fi
 fi
 
+# --- Host command bridge lifecycle ------------------------------------------
+# For each HOST_COMMANDS entry "name=host cmd", run a host-side TCP listener
+# (host-cmd-bridge.py) that spawns the host command on each container
+# connection and relays stdio. A shim written into /usr/local/bin/<name> in
+# the container calls host-cmd-relay, which connects to this listener.
+# Use case: token-refresh commands (e.g. ztoken) that need host keychain
+# access but are referenced by tools inside the container.
+
+HOST_CMD_BRIDGE_PID=""
+HOST_CMD_BRIDGE_ARGS=()
+HOST_CMD_LABEL=""
+HOST_CMD_NAMES=""
+
+cleanup_host_cmd_bridge() {
+    if [ -n "$HOST_CMD_BRIDGE_PID" ] && kill -0 "$HOST_CMD_BRIDGE_PID" 2>/dev/null; then
+        kill "$HOST_CMD_BRIDGE_PID" 2>/dev/null
+        for _ in 1 2 3 4; do
+            kill -0 "$HOST_CMD_BRIDGE_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$HOST_CMD_BRIDGE_PID" 2>/dev/null || true
+        wait "$HOST_CMD_BRIDGE_PID" 2>/dev/null || true
+    fi
+    rm -f "${HOST_CMD_BRIDGE_LOG:-}"
+}
+
+if [ -n "${HOST_COMMANDS:-}" ]; then
+    if [ "$NET_MODE" = "off" ]; then
+        echo "WARNING: HOST_COMMANDS ignored — network is disabled (--net off)" >&2
+    else
+        HOST_CMD_ARGS=()
+        while IFS= read -r line; do
+            line="$(echo "$line" | xargs)"
+            [ -z "$line" ] && continue
+            cmd_name="${line%%=*}"
+            cmd_line="${line#*=}"
+            HOST_CMD_ARGS+=(--command "$cmd_name" "$cmd_line")
+            HOST_CMD_NAMES="${HOST_CMD_NAMES:+$HOST_CMD_NAMES }$cmd_name"
+        done <<< "${HOST_COMMANDS}"
+
+        if [ ${#HOST_CMD_ARGS[@]} -gt 0 ]; then
+            HOST_CMD_BRIDGE_OUTPUT=$(mktemp)
+            HOST_CMD_BRIDGE_LOG=$(mktemp)
+            python3 "$SCRIPT_DIR/host-cmd-bridge.py" "${HOST_CMD_ARGS[@]}" \
+                > "$HOST_CMD_BRIDGE_OUTPUT" 2>"$HOST_CMD_BRIDGE_LOG" &
+            HOST_CMD_BRIDGE_PID=$!
+
+            for _ in $(seq 1 30); do
+                if grep -q "^READY" "$HOST_CMD_BRIDGE_OUTPUT" 2>/dev/null; then break; fi
+                if ! kill -0 "$HOST_CMD_BRIDGE_PID" 2>/dev/null; then break; fi
+                sleep 0.1
+            done
+
+            if ! grep -q "^READY" "$HOST_CMD_BRIDGE_OUTPUT" 2>/dev/null; then
+                echo "ERROR: host command bridge failed to start" >&2
+                cat "$HOST_CMD_BRIDGE_LOG" >&2
+                cleanup_host_cmd_bridge
+                rm -f "$HOST_CMD_BRIDGE_OUTPUT" "$HOST_CMD_BRIDGE_LOG"
+                exit 1
+            fi
+
+            while IFS= read -r cline; do
+                cmd_name=$(echo "$cline" | sed 's/^COMMAND:\(.*\)=PORT:.*/\1/')
+                cmd_port=$(echo "$cline" | sed 's/.*=PORT://')
+                upper_name=$(echo "$cmd_name" | tr '[:lower:]-' '[:upper:]_')
+                HOST_CMD_BRIDGE_ARGS+=(-e "HOST_CMD_BRIDGE_PORT_${upper_name}=${cmd_port}")
+            done < <(grep "^COMMAND:" "$HOST_CMD_BRIDGE_OUTPUT")
+
+            HOST_CMD_BRIDGE_ARGS+=(
+                -e "HOST_CMD_BRIDGE_HOST=host.docker.internal"
+                -e "CAGE_HOST_COMMANDS=${HOST_CMD_NAMES}"
+            )
+
+            # Add host.docker.internal if neither netgate nor MCP bridge already did
+            if [ "$NET_MODE" != "gate" ] && [ -z "$MCP_BRIDGE_PID" ]; then
+                HOST_CMD_BRIDGE_ARGS+=(--add-host host.docker.internal:host-gateway)
+            fi
+
+            rm -f "$HOST_CMD_BRIDGE_OUTPUT"
+
+            HOST_CMD_LABEL=" [HOST-CMD]"
+
+            trap 'cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
+        fi
+    fi
+fi
+
 # --- Session history sync (Claude only) -------------------------------------
 # Two-part flow, always run for Claude (migration is unconditional since the
 # mount path moved; host-sync is gated by SESSION_SYNC):
@@ -649,7 +736,7 @@ cleanup_session_sync() {
         ' >/dev/null 2>&1 || true
 }
 
-echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL}${MCP_LABEL} ==="
+echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL}${MCP_LABEL}${HOST_CMD_LABEL} ==="
 echo "  Repo:      $REPO_PATH"
 [ -n "$CAGE_PROFILE" ] && echo "  Profile:   $CAGE_PROFILE"
 echo "  Container: $CONTAINER_NAME"
@@ -781,6 +868,7 @@ fi
 
 [[ ${#PROXY_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${PROXY_ARGS[@]}")
 [[ ${#MCP_BRIDGE_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${MCP_BRIDGE_ARGS[@]}")
+[[ ${#HOST_CMD_BRIDGE_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${HOST_CMD_BRIDGE_ARGS[@]}")
 
 TOOL_ARGS=()
 if [ "$YOLO" -eq 1 ]; then
@@ -791,9 +879,9 @@ if [ "$YOLO" -eq 1 ]; then
     esac
 fi
 
-if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ]; then
+if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ]; then
     # Cannot use exec: need cleanup traps to run via trap EXIT
-    trap 'cleanup_session_sync; cleanup_mcp_bridge; cleanup_proxy' EXIT
+    trap 'cleanup_session_sync; cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
     docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
 else
     exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
