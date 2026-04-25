@@ -158,7 +158,7 @@ _run_setup() {
                 # Clear all values so we start from scratch (env detection only)
                 GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
                 CAGE_DEFAULT="" CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION=""
-                EXTRA_ENV="" CODEX_COPY_AUTH="" GH_AUTH="" GH_ACCOUNT=""
+                EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" GH_AUTH="" GH_ACCOUNT=""
                 SESSION_SYNC=""
                 ;;
             2)
@@ -292,34 +292,62 @@ _run_setup() {
     # --- Phase 4: Codex auth ------------------------------------------------
 
     local cfg_CODEX_COPY_AUTH=""
+    local cfg_HOST_CODEX_DIR=""
 
     if [ "$USE_CODEX" -eq 1 ]; then
         _header "Codex CLI Authentication"
 
-        _dim "Codex needs auth from ~/.codex/ (sign in on host first) or OPENAI_API_KEY."
+        _dim "Codex reads config + auth from a directory on the host (default ~/.codex)."
+        _dim "Use a different directory here to keep this profile's Codex config"
+        _dim "separate from others (e.g. ~/.codex-personal for a personal profile)."
         echo ""
 
-        if [ -d "$HOME/.codex" ]; then
-            _ok "Found ~/.codex/"
-            echo ""
-            _dim "By default, cage copies auth.json from ~/.codex/ into the container."
-            _dim "If you use a non-OpenAI provider (e.g., Azure OpenAI, custom endpoint), disable this."
-            if _prompt_yn "Copy auth.json into container?" "Y"; then
-                cfg_CODEX_COPY_AUTH="1"
+        local codex_dir=""
+        _prompt_value "Codex config directory for this profile" "~/.codex" codex_dir
+        codex_dir="${codex_dir/#\~/$HOME}"
+
+        if [ ! -d "$codex_dir" ]; then
+            _warn "Directory $codex_dir does not exist"
+            if _prompt_yn "Create it with a minimal config.toml?" "Y"; then
+                mkdir -p "$codex_dir"
+                if [ ! -f "$codex_dir/config.toml" ]; then
+                    local profile_label="${CAGE_SETUP_PROFILE:-default}"
+                    cat > "$codex_dir/config.toml" <<EOF
+# Minimal Codex config scaffolded by cage setup for profile '${profile_label}'.
+# Edit the model as you like. Sign in once on the host:
+#   CODEX_HOME=${codex_dir} codex login
+model = "gpt-5"
+EOF
+                fi
+                _ok "Created $codex_dir"
+                _dim "Sign in once on the host before using this profile:"
+                _dim "  CODEX_HOME=$codex_dir codex login"
             else
-                cfg_CODEX_COPY_AUTH="0"
+                _warn "Skipped — cage will fail to mount this directory until it exists"
             fi
         else
-            _warn "~/.codex/ not found"
-            _dim "Run 'codex' on your host first to sign in, or set OPENAI_API_KEY."
+            _ok "Found $codex_dir"
+        fi
+
+        # Record only if it differs from default (keep profile files clean)
+        if [ "$codex_dir" != "$HOME/.codex" ]; then
+            cfg_HOST_CODEX_DIR="$codex_dir"
+        fi
+
+        echo ""
+        _dim "By default, cage copies auth.json from the Codex dir into the container."
+        _dim "If you use a non-OpenAI provider (e.g. Azure OpenAI, custom endpoint), disable this."
+        if _prompt_yn "Copy auth.json into container?" "Y"; then
             cfg_CODEX_COPY_AUTH="1"
+        else
+            cfg_CODEX_COPY_AUTH="0"
         fi
 
         echo ""
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             _ok "OPENAI_API_KEY is set in your environment (will be passed to container)"
         else
-            _dim "OPENAI_API_KEY is not set — that's fine if you're using ~/.codex/ auth."
+            _dim "OPENAI_API_KEY is not set — that's fine if you're using the Codex dir for auth."
         fi
     fi
 
@@ -504,6 +532,13 @@ _run_setup() {
 
     if [ "$USE_CODEX" -eq 1 ]; then
         _add_line "# Codex CLI auth"
+        if [ -n "$cfg_HOST_CODEX_DIR" ]; then
+            _add_line "# Host Codex config directory (default: ~/.codex)"
+            # Write back with ~ for portability if under $HOME
+            local host_codex_display="$cfg_HOST_CODEX_DIR"
+            [[ "$host_codex_display" == "$HOME"* ]] && host_codex_display="~${host_codex_display#$HOME}"
+            _add_line "HOST_CODEX_DIR=\"$host_codex_display\""
+        fi
         if [ "$cfg_CODEX_COPY_AUTH" = "0" ]; then
             _add_line "CODEX_COPY_AUTH=0"
         else
