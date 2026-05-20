@@ -46,6 +46,15 @@ if [ -d /host-codex ]; then
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 fi
 
+# Copy host ~/.agents/ (npm `skills` CLI registry) into the writable volume so
+# globally-installed skills (e.g. via `npx skills add ... -g`) are visible.
+if [ -d /host-agents ]; then
+    AGENTS_DIR="$HOME/.agents"
+    mkdir -p "$AGENTS_DIR"
+    cp -rf /host-agents/. "$AGENTS_DIR/"
+    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
+fi
+
 # Inject cage container context into instructions.md
 cat > "$CODEX_DIR/instructions.md" <<'CAGE_EOF'
 # Container Environment (cage)
