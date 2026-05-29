@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.11.0"
+CAGE_VERSION="0.12.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -287,6 +287,100 @@ else
 fi
 CONTAINER_NAME="${CONTAINER_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
 VOLUME_NAME="${VOLUME_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
+
+# --- Parallel-instance / collision handling ---------------------------------
+# A container with $CONTAINER_NAME already existing means another cage is
+# already running for this repo (or crashed without --rm cleanup). Prompt the
+# user: spawn parallel instance (suffix -2/-3/...), exec into the running one,
+# remove a stopped leftover, or abort. Parallel instances share VOLUME_NAME by
+# design — session JSONLs are per-UUID and the sync merge converges under
+# concurrent writes; a separate volume per instance would mean fresh state
+# every time, which defeats the point.
+PARALLEL_LABEL=""
+
+_existing_id="$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.ID}}')"
+_running_id="$(docker ps    --filter "name=^${CONTAINER_NAME}$" --format '{{.ID}}')"
+
+if [ -n "$_existing_id" ]; then
+    if [ ! -r /dev/tty ]; then
+        echo "ERROR: container '$CONTAINER_NAME' already exists and stdin is not a tty." >&2
+        echo "Re-run interactively, or 'docker rm -f $CONTAINER_NAME' to clear." >&2
+        exit 1
+    fi
+
+    # Pre-compute the next free suffix so the menu can show the actual name.
+    _next_name=""
+    _parallel_index=""
+    for _i in 2 3 4 5 6 7 8 9; do
+        _cand="${CONTAINER_NAME}-${_i}"
+        if [ -z "$(docker ps -a --filter "name=^${_cand}$" --format '{{.ID}}')" ]; then
+            _next_name="$_cand"; _parallel_index="$_i"; break
+        fi
+    done
+
+    # Build menu dynamically: parallel option only when a free suffix exists,
+    # exec only when the existing container is running, rm only when stopped.
+    _actions=()
+    _labels=()
+    if [ -n "$_next_name" ]; then
+        _actions+=(parallel); _labels+=("Start a parallel instance ($_next_name, shares state)")
+    fi
+    if [ -n "$_running_id" ]; then
+        _actions+=(exec); _labels+=("Open a shell in the existing container")
+    else
+        _actions+=(rm); _labels+=("Remove the stopped container and start fresh")
+    fi
+    _actions+=(abort); _labels+=("Abort")
+
+    _status_word="stopped"
+    [ -n "$_running_id" ] && _status_word="running"
+
+    {
+        echo ""
+        echo "A cage container already exists for this repo:"
+        echo "  Name:   $CONTAINER_NAME"
+        echo "  Status: $_status_word"
+        echo ""
+        echo "What would you like to do?"
+        for _idx in "${!_labels[@]}"; do
+            printf "  %d) %s\n" "$((_idx + 1))" "${_labels[$_idx]}"
+        done
+        echo ""
+        printf "Choice [%d]: " "${#_actions[@]}"
+    } >&2
+
+    read -r _choice </dev/tty || _choice=""
+    [ -z "$_choice" ] && _choice="${#_actions[@]}"
+
+    if ! [[ "$_choice" =~ ^[0-9]+$ ]] || [ "$_choice" -lt 1 ] || [ "$_choice" -gt "${#_actions[@]}" ]; then
+        echo "Invalid choice; aborting." >&2
+        exit 1
+    fi
+
+    _action="${_actions[$((_choice - 1))]}"
+
+    case "$_action" in
+        parallel)
+            CONTAINER_NAME="$_next_name"
+            PARALLEL_LABEL=" (parallel #${_parallel_index})"
+            ;;
+        exec)
+            echo "Attaching to existing container $CONTAINER_NAME (exec). Exit the shell to detach; the original cage session keeps running." >&2
+            if docker exec "$_running_id" sh -c 'command -v bash >/dev/null 2>&1' 2>/dev/null; then
+                exec docker exec -it "$_running_id" bash
+            else
+                exec docker exec -it "$_running_id" sh
+            fi
+            ;;
+        rm)
+            docker rm "$_existing_id" >/dev/null
+            ;;
+        abort)
+            echo "Aborted." >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # Image acquisition: pull from registry, fall back to local build
 if [ "$REBUILD" -eq 1 ]; then
@@ -739,7 +833,7 @@ cleanup_session_sync() {
 echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL}${MCP_LABEL}${HOST_CMD_LABEL} ==="
 echo "  Repo:      $REPO_PATH"
 [ -n "$CAGE_PROFILE" ] && echo "  Profile:   $CAGE_PROFILE"
-echo "  Container: $CONTAINER_NAME"
+echo "  Container: $CONTAINER_NAME${PARALLEL_LABEL}"
 echo "  Volume:    $VOLUME_NAME"
 echo "=============================="
 
