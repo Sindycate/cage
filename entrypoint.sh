@@ -32,6 +32,13 @@ if [ "$_sl_file" != "$_sl_cmd" ] && [[ "$_sl_file" != *..* ]] && [ -f "/host-cla
     ln -sfn "/host-claude/$_sl_file" "$CLAUDE_DIR/$_sl_file"
 fi
 
+# ccstatusline reads ~/.config/ccstatusline/settings.json, not ~/.claude/settings.json
+if [ -d /host-ccstatusline ]; then
+    mkdir -p "$HOME/.config/ccstatusline"
+    cp -rf /host-ccstatusline/. "$HOME/.config/ccstatusline/"
+    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME/.config/ccstatusline" 2>/dev/null || true
+fi
+
 # Merge MCP bridge servers into settings.json
 if [ -n "${CAGE_MCP_SERVERS:-}" ]; then
     python3 -c "

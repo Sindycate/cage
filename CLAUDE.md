@@ -64,6 +64,7 @@ cage --net off ~/path/to/repo
   - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the only writable host path. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
+  - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
   - **Codex:** `~/.codex` (or `HOST_CODEX_DIR` from profile) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. If `~/.agents` (or `HOST_AGENTS_DIR` from profile) exists on the host, it is also mounted read-only at `/host-agents` and copied into the volume so globally-installed skills (`npx skills add … -g`) are visible inside the container
   - **GitHub CLI (both tools, opt-in via `GH_AUTH=1`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
   - Per-repo named Docker volume for persistent state
