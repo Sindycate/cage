@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.13.0"
+CAGE_VERSION="0.14.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -33,6 +33,54 @@ case "${1:-}" in
     netgate|--netgate)
         shift
         source "$SCRIPT_DIR/cage-netgate.sh"; exit $? ;;
+    update|--update)
+        shift
+        # Resolve tool: explicit arg > CAGE_DEFAULT from global cage.conf > "claude"
+        _upd_tool="${1:-}"
+        if [ -z "$_upd_tool" ]; then
+            _upd_tool="$(grep -m1 '^CAGE_DEFAULT=' "$CAGE_CONFIG_DIR/cage.conf" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+            _upd_tool="${_upd_tool:-claude}"
+        fi
+        case "$_upd_tool" in
+            claude)
+                _upd_image="claude-code:${CAGE_VERSION}"
+                _upd_registry="${CAGE_REGISTRY}/claude-code:${CAGE_VERSION}"
+                _upd_dockerfile="Dockerfile"
+                _upd_overlay="FROM claude-code:${CAGE_VERSION}
+USER claude
+RUN curl -fsSL https://claude.ai/install.sh | bash
+USER root
+RUN chmod -R a+rwX /home/claude"
+                ;;
+            codex)
+                _upd_image="codex:${CAGE_VERSION}"
+                _upd_registry="${CAGE_REGISTRY}/codex:${CAGE_VERSION}"
+                _upd_dockerfile="Dockerfile.codex"
+                _upd_overlay="FROM codex:${CAGE_VERSION}
+ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global
+USER codex
+RUN npm install -g @openai/codex@latest
+USER root
+RUN chown -R codex:codex /home/codex/.npm-global && chmod -R a+rwX /home/codex"
+                ;;
+            *)
+                echo "Unknown tool: $_upd_tool (use 'claude' or 'codex')" >&2; exit 1 ;;
+        esac
+        # Ensure the base image exists (pull from registry, fall back to local build)
+        if ! docker image inspect "$_upd_image" &>/dev/null; then
+            echo "Base image $_upd_image not found locally."
+            if docker pull "$_upd_registry" 2>/dev/null; then
+                docker tag "$_upd_registry" "$_upd_image"
+                echo "Pulled $_upd_registry"
+            else
+                echo "Pull failed or unavailable. Building locally..."
+                docker build -t "$_upd_image" -f "$BUILD_DIR/$_upd_dockerfile" "$BUILD_DIR"
+            fi
+        fi
+        echo "Updating $_upd_tool in $_upd_image (re-running installer only)..."
+        printf '%s\n' "$_upd_overlay" | docker build --no-cache -t "$_upd_image" -t "${_upd_image%%:*}:latest" -f - "$BUILD_DIR"
+        echo "Done. $_upd_image now has the latest $_upd_tool."
+        exit 0 ;;
 esac
 
 # Subcommand detection: cage [claude|codex] [options] /path/to/repo [tool-args...]
@@ -117,6 +165,7 @@ if [ $# -lt 1 ]; then
     echo "  netgate deny DOMAIN        Deny a domain (project)"
     echo "  netgate remove DOMAIN      Remove a decision (re-enables prompting)"
     echo "  netgate reset [PATH]       Delete all project decisions"
+    echo "  update [claude|codex]      Refresh the tool binary only (fast; no full rebuild)"
     echo ""
     echo "Options:"
     echo "  --profile NAME     Use a named config profile (one-shot override)"

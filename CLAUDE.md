@@ -22,6 +22,12 @@ docker compose build --no-cache
 # Force rebuild to get latest tool version (pulls fresh from upstream)
 cage --rebuild ~/path/to/repo
 
+# Fast tool refresh — re-run just the installer layer on top of the existing image
+# (seconds, no apt/Node/gh re-run), then re-tag the image cage runs
+cage update          # update the default tool
+cage update claude
+cage update codex
+
 # Run Claude Code against a repo (default)
 cage ~/path/to/repo
 cage claude ~/path/to/repo
@@ -58,6 +64,7 @@ cage --net off ~/path/to/repo
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool; defaults to `claude` (overridable via `CAGE_DEFAULT` in `cage.conf`)
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
+- `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to `CAGE_DEFAULT` (peeked from global `cage.conf`) then `claude`
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Loads config in layers: `~/.config/cage/cage.conf` (global) → `profiles/<name>.conf` (named profile) → `<repo>/.cage.conf` (per-project override)
 - Runs `docker run` with security hardening (cap_drop ALL, no-new-privileges) and tool-specific mounts:
