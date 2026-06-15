@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.14.0"
+CAGE_VERSION="0.15.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -94,6 +94,7 @@ YOLO=0
 REBUILD=0
 NET_MODE=""  # empty = not explicitly set
 CAGE_PROFILE_FLAG=""
+EXTRA_MOUNT_SPECS=()   # entries are "ro<TAB><path>" / "rw<TAB><path>" from CLI flags
 
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
@@ -124,6 +125,20 @@ while [[ "${1:-}" == -* ]]; do
             REBUILD=1
             shift
             ;;
+        --mount-ro)
+            [ -n "${2:-}" ] || { echo "Missing path after --mount-ro" >&2; exit 1; }
+            EXTRA_MOUNT_SPECS+=("ro"$'\t'"$2"); shift 2
+            ;;
+        --mount-ro=*)
+            EXTRA_MOUNT_SPECS+=("ro"$'\t'"${1#--mount-ro=}"); shift
+            ;;
+        --mount-rw)
+            [ -n "${2:-}" ] || { echo "Missing path after --mount-rw" >&2; exit 1; }
+            EXTRA_MOUNT_SPECS+=("rw"$'\t'"$2"); shift 2
+            ;;
+        --mount-rw=*)
+            EXTRA_MOUNT_SPECS+=("rw"$'\t'"${1#--mount-rw=}"); shift
+            ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1
@@ -146,7 +161,7 @@ case "$NET_MODE" in
 esac
 
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [claude|codex] [-y|--yolo] [--rebuild] [--profile NAME] [--net open|gate|off] /path/to/repo [tool-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [--rebuild] [--profile NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] /path/to/repo [tool-args...]"
     echo ""
     echo "Tools:"
     echo "  claude    Run Claude Code (default)"
@@ -173,6 +188,8 @@ if [ $# -lt 1 ]; then
     echo "  --net open         Full network access (default without --yolo)"
     echo "  --net gate         Domain-gated network via proxy (default with --yolo)"
     echo "  --net off          No network access at all"
+    echo "  --mount-ro PATH    Mount a host dir read-only at the same path (repeatable)"
+    echo "  --mount-rw PATH    Mount a host dir read-write at the same path (repeatable)"
     echo "  --rebuild          Force local rebuild (get latest tool version)"
     echo "  --version, -V      Show version and exit"
     echo "  --help, -h         Show this help and exit"
@@ -186,6 +203,7 @@ if [ $# -lt 1 ]; then
     echo "  cage codex -y ~/projects/myapp"
     echo "  cage -y ~/projects/myapp"
     echo "  cage --net gate ~/projects/myapp"
+    echo "  cage --mount-ro ~/code/shared-lib ~/projects/myapp"
     echo "  cage ~/projects/myapp --resume"
     echo "  cage ~/projects/myapp -p 'explain this codebase'"
     exit 1
@@ -194,15 +212,21 @@ fi
 REPO_PATH="$(cd "$1" && pwd -P)"
 shift
 
-# Guard: refuse to mount onto sensitive container paths. The repo is bind-mounted
-# at its real host path inside the container, so these would collide with the
-# container's own filesystem.
-case "$REPO_PATH" in
-    /|/etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/root|/root/*|/home/claude|/home/claude/*|/home/codex|/home/codex/*|/workspace|/workspace/*)
-        echo "ERROR: refusing to mount repo at '$REPO_PATH' — path conflicts with container filesystem" >&2
-        exit 1
-        ;;
-esac
+# Refuse to mount onto sensitive container paths. A host dir is bind-mounted at
+# its real host path inside the container, so these would collide with the
+# container's own filesystem. Returns 0 (success) when the path is reserved.
+_is_reserved_mount_path() {
+    case "$1" in
+        /|/etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/root|/root/*|/home/claude|/home/claude/*|/home/codex|/home/codex/*|/workspace|/workspace/*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+if _is_reserved_mount_path "$REPO_PATH"; then
+    echo "ERROR: refusing to mount repo at '$REPO_PATH' — path conflicts with container filesystem" >&2
+    exit 1
+fi
 
 # Load config: global → profile → per-project override
 PROFILES_DIR="$CAGE_CONFIG_DIR/profiles"
@@ -211,7 +235,7 @@ FOLDER_PROFILES_FILE="$CAGE_CONFIG_DIR/folder-profiles"
 _init_config_vars() {
     GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST="" CAGE_DEFAULT=""
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" HOST_AGENTS_DIR="" GH_AUTH="" GH_ACCOUNT=""
-    CAGE_PROFILE="" MCP_SERVERS="" HOST_COMMANDS="" SESSION_SYNC=""
+    CAGE_PROFILE="" MCP_SERVERS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
 }
 
 _resolve_profile() {
@@ -327,6 +351,51 @@ case "$CAGE_TOOL" in
         DOCKERFILE="Dockerfile.codex"
         ;;
 esac
+
+# --- Extra named mounts -----------------------------------------------------
+# Bind-mount additional host dirs at their same absolute host path (like the
+# repo mount), read-only by default. Sources: EXTRA_MOUNTS config + CLI flags.
+EXTRA_MOUNT_ARGS=()
+_EXTRA_MOUNT_SEEN=()
+
+_add_extra_mount() {           # $1 = ro|rw, $2 = raw path
+    local mode="$1" raw="$2" path real existing seen_mode seen_path
+    path="${raw/#\~/$HOME}"    # tilde expansion (same idiom as SSH_KEY)
+    if [ ! -d "$path" ]; then
+        echo "WARNING: extra mount skipped — '$raw' is not an existing directory" >&2; return
+    fi
+    real="$(cd "$path" && pwd -P)" || { echo "WARNING: extra mount skipped — cannot resolve '$raw'" >&2; return; }
+    if _is_reserved_mount_path "$real"; then
+        echo "ERROR: refusing extra mount '$real' — path conflicts with container filesystem" >&2; exit 1
+    fi
+    if [ "$real" = "$REPO_PATH" ] || [[ "$real" == "$REPO_PATH"/* ]] || [[ "$REPO_PATH" == "$real"/* ]]; then
+        echo "WARNING: extra mount skipped — '$real' overlaps the repo mount ($REPO_PATH)" >&2; return
+    fi
+    for existing in "${_EXTRA_MOUNT_SEEN[@]+"${_EXTRA_MOUNT_SEEN[@]}"}"; do
+        seen_mode="${existing%%$'\t'*}"; seen_path="${existing#*$'\t'}"
+        if [ "$seen_path" = "$real" ]; then
+            [ "$seen_mode" != "$mode" ] && echo "WARNING: '$real' requested both ro and rw — keeping first ($seen_mode)" >&2
+            return   # already mounted, first-wins
+        fi
+    done
+    _EXTRA_MOUNT_SEEN+=("$mode"$'\t'"$real")
+    if [ "$mode" = "rw" ]; then EXTRA_MOUNT_ARGS+=(-v "$real:$real")
+    else EXTRA_MOUNT_ARGS+=(-v "$real:$real:ro"); fi
+}
+
+if [ -n "${EXTRA_MOUNTS:-}" ]; then    # config (newline-delimited, like MCP_SERVERS)
+    while IFS= read -r line; do
+        line="$(echo "$line" | xargs)"; [ -z "$line" ] && continue
+        case "$line" in
+            rw=*) _add_extra_mount rw "${line#rw=}" ;;
+            ro=*) _add_extra_mount ro "${line#ro=}" ;;
+            *)    _add_extra_mount ro "$line" ;;
+        esac
+    done <<< "${EXTRA_MOUNTS}"
+fi
+for spec in "${EXTRA_MOUNT_SPECS[@]+"${EXTRA_MOUNT_SPECS[@]}"}"; do   # CLI flags
+    _add_extra_mount "${spec%%$'\t'*}" "${spec#*$'\t'}"
+done
 
 REPO_BASENAME="$(basename "$REPO_PATH")"
 if command -v md5 &>/dev/null; then
@@ -1032,6 +1101,7 @@ fi
 [[ ${#PROXY_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${PROXY_ARGS[@]}")
 [[ ${#MCP_BRIDGE_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${MCP_BRIDGE_ARGS[@]}")
 [[ ${#HOST_CMD_BRIDGE_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${HOST_CMD_BRIDGE_ARGS[@]}")
+[[ ${#EXTRA_MOUNT_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${EXTRA_MOUNT_ARGS[@]}")
 
 TOOL_ARGS=()
 if [ "$YOLO" -eq 1 ]; then
