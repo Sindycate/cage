@@ -62,9 +62,15 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 #   rw=~/scratch/output
 #   "
 
-# MCP bridge — forward host-side MCP servers into the container
+# MCP bridge — forward host-side STDIO MCP servers into the container
 # In cage.conf or .cage.conf:
 #   MCP_SERVERS="myserver=some-tool --mcp-proxy https://example.com/mcp"
+
+# Remote (HTTP) MCP servers — e.g. Linear — use a NATIVE config in each tool
+# plus an env-forwarded API key (no bridge, no cage-specific rewrite; the same
+# config works inside and outside the container). See "Remote HTTP MCP servers
+# (Linear)" below.
+#   EXTRA_ENV="LINEAR_API_KEY"
 
 # Host command bridge — expose host commands (e.g. token minters) inside the container
 # In cage.conf or .cage.conf:
@@ -95,6 +101,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Runs as root; remaps the `claude` user's UID/GID to match the host user (`HOST_UID`/`HOST_GID` env vars) for correct file ownership in the mounted repo
 - Fixes ownership on home dir and volume after UID remapping
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
+- Merges the `mcpServers` key from host `/host-claude-json` (read-only) and from the stdio bridge into the volume's `~/.claude.json`, expanding `${VAR}` refs from the env (servers with unset, defaultless vars are skipped with a warning)
 - Copies `settings.json` from host read-only mount into writable volume
 - Symlinks `CLAUDE.md` and `agents/` from host if present
 - Sets `git safe.directory` to handle UID mismatch between host and container
@@ -127,7 +134,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Pre-allows AWS and OpenAI domains via `netgate/defaults.json`
 - Concurrent requests to the same unknown domain show only one dialog (deduplication via threading.Event)
 
-**`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, GitHub, OpenAI API). Loaded on every proxy start.
+**`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, GitHub, Linear, OpenAI API). Loaded on every proxy start.
 
 **`mcp-bridge.py`** (host-side, runs when `MCP_SERVERS` is configured):
 - Python3 TCP relay that bridges host-side MCP commands into the container
@@ -139,7 +146,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 **`mcp-relay`** (runs inside container, installed at `/usr/local/bin/mcp-relay`):
 - Tiny Python script that connects container stdio to the host MCP bridge via TCP
 - Usage: `mcp-relay <server-name>` — reads `MCP_BRIDGE_HOST` and `MCP_BRIDGE_PORT_<NAME>` env vars
-- Configured as the MCP server command in Claude Code's `settings.json` by the entrypoint
+- Configured as the MCP server command in Claude Code's `~/.claude.json` (the file Claude reads `mcpServers` from) by the entrypoint
 - If the repo has `.mcp.json` with matching server names, cage patches it before launch and restores the original on exit
 
 **`host-cmd-bridge.py`** (host-side, runs when `HOST_COMMANDS` is configured):
@@ -198,10 +205,39 @@ Named profiles allow switching between configurations (e.g., work vs personal) w
 
 **`cage-netgate.sh`** (sourced for `cage netgate` subcommand): list rules, allow/deny domains, remove decisions, reset files. Uses `python3 -c` for JSON manipulation (no jq dependency). Hash computation mirrors the main cage script (`md5 -q` on macOS, `md5sum` on Linux, first 8 chars).
 
+## Remote HTTP MCP servers (Linear)
+
+The stdio bridge (`MCP_SERVERS`) is for **local stdio** MCP servers. A **remote streamable-HTTP** server like Linear (`https://mcp.linear.app/mcp`) is instead configured **natively in each tool** and authenticated with an **API key forwarded via env var**. The server definition is byte-identical inside and outside cage — there is no cage-specific rewrite (this is the deliberate contrast with the stdio bridge, which rewrites the command to `mcp-relay`).
+
+**How it works:**
+- The API key is forwarded with the existing `EXTRA_ENV` mechanism — add `EXTRA_ENV="LINEAR_API_KEY"` to `cage.conf` and `export LINEAR_API_KEY=…` in your host shell. The secret is never stored in a cage config file.
+- `*.linear.app` is pre-allowed in `netgate/defaults.json`, so `--net gate` works without an interactive prompt. (Unlike the stdio bridge, remote MCP makes real HTTPS calls from inside the container, so the domain must be allowlisted. Still incompatible with `--net off`.)
+
+**Codex** — add to host `~/.codex/config.toml`; the entrypoint copies it verbatim into the container (no Codex-side code):
+```toml
+[features]
+experimental_use_rmcp_client = true
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+bearer_token_env_var = "LINEAR_API_KEY"
+```
+
+**Claude** — Claude reads MCP servers from `~/.claude.json` (user/local scope) or a repo `.mcp.json`, **not** from `settings.json`. cage mounts host `~/.claude.json` read-only at `/host-claude-json` and the entrypoint copies **only** its `mcpServers` key into the writable volume copy (`PREFS_STORE`), expanding `${VAR}`/`${VAR:-default}` references from the container env (so `${LINEAR_API_KEY}` becomes a real token). Onboarding/account/history from the host file are not carried in. Configure once on the host (user scope):
+```jsonc
+// ~/.claude.json → "mcpServers"
+"linear": {
+  "type": "http",
+  "url": "https://mcp.linear.app/mcp",
+  "headers": { "Authorization": "Bearer ${LINEAR_API_KEY}" }
+}
+```
+If a referenced env var is unset **and** has no default, that server is **skipped with a warning** rather than registered with an empty token. (Note: the same merge path also delivers the stdio bridge's servers into `~/.claude.json` — the earlier `settings.json` injection was a no-op since Claude never read `mcpServers` from there.)
+
 ## Key Constraints
 
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back
-- `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume
+- `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume. The host file is also mounted read-only at `/host-claude-json`; the entrypoint copies **only** its `mcpServers` key into the volume copy (with `${VAR}` expansion), so user-scope MCP servers (e.g. Linear) work in-container while onboarding/account/history stay isolated. This is also where stdio-bridge servers (`MCP_SERVERS`) land — Claude reads `mcpServers` from here, not `settings.json`
 - **Session history sync** (Claude, default on): cage mirrors the entire `~/.claude/projects/-<repo-slug>/` subtree between host and per-repo Docker volume on entry/exit — session JSONLs, `memory/` (persistent memory), per-session `subagents/` and `tool-results/`. All host-side writes happen from the host cage script running as the host user; the container's read-only `/host-claude` mount is unchanged. Merge rules: `*.jsonl` uses size-based "larger wins" (append-only invariant); all other files use mtime-based "newer wins". First-run migration copies the pre-existing `-workspace-<name>/` subtree into the new slug with `cwd` rewritten in every JSONL (including `*/subagents/*.jsonl`), leaving the legacy dir intact as a fallback. Disable with `SESSION_SYNC=0` in `cage.conf`
 - Claude auth is configured via `CLAUDE_AUTH` in `cage.conf`: `bedrock` (mounts `~/.aws/credentials`) or `api-key` (passes `ANTHROPIC_API_KEY` env var)
 - Codex auth uses `~/.codex/` directory (sign in on host first) or `OPENAI_API_KEY` env var. Set `CODEX_COPY_AUTH=0` in `cage.conf` to skip copying `auth.json` (for non-OpenAI providers like Azure OpenAI)

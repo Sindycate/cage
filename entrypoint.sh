@@ -22,6 +22,59 @@ PREFS_STORE="$CLAUDE_DIR/.claude.json"
 [ ! -f "$PREFS_STORE" ] && echo '{}' > "$PREFS_STORE"
 ln -sfn "$PREFS_STORE" "$HOME/.claude.json"
 
+# Carry user/local-scope MCP servers from the host's read-only ~/.claude.json
+# (mounted at /host-claude-json) into the writable volume copy. Only the
+# mcpServers key is copied — onboarding/account/history stay isolated to the
+# container. ${VAR}/${VAR:-default} references (e.g. a Bearer token) are
+# expanded from the container env, which includes vars forwarded via EXTRA_ENV.
+if [ -f /host-claude-json ]; then
+    python3 -c "
+import json, os, re, sys
+store = '$PREFS_STORE'
+try:
+    cur = json.load(open(store))
+except Exception:
+    cur = {}
+try:
+    host = json.load(open('/host-claude-json'))
+except Exception:
+    host = {}
+missing = []
+def expand(v):
+    if isinstance(v, str):
+        def sub(m):
+            name, default = m.group(1), m.group(2)
+            if name in os.environ:
+                return os.environ[name]
+            if default is not None:
+                return default
+            missing.append(name)
+            return m.group(0)
+        return re.sub(r'\\\${(\w+)(?::-([^}]*))?}', sub, v)
+    if isinstance(v, dict):
+        return {k: expand(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [expand(x) for x in v]
+    return v
+servers = host.get('mcpServers') or {}
+out = cur.setdefault('mcpServers', {})
+changed = False
+for name, conf in servers.items():
+    missing.clear()
+    expanded = expand(conf)
+    if missing:
+        sys.stderr.write(
+            'cage: skipping MCP server %r — unset env var(s): %s\n'
+            % (name, ', '.join(sorted(set(missing)))))
+        continue
+    out[name] = expanded
+    changed = True
+if changed:
+    with open(store, 'w') as f:
+        json.dump(cur, f, indent=2)
+"
+fi
+
 # Copy host settings (read-only mount → writable volume)
 [ -f /host-claude/settings.json ] && { rm -f "$CLAUDE_DIR/settings.json" 2>/dev/null; cp /host-claude/settings.json "$CLAUDE_DIR/settings.json"; chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CLAUDE_DIR/settings.json" 2>/dev/null || true; }
 
@@ -39,23 +92,27 @@ if [ -d /host-ccstatusline ]; then
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME/.config/ccstatusline" 2>/dev/null || true
 fi
 
-# Merge MCP bridge servers into settings.json
+# Merge MCP bridge (stdio) servers into ~/.claude.json — the file Claude reads
+# MCP config from. (settings.json does NOT carry mcpServers.)
 if [ -n "${CAGE_MCP_SERVERS:-}" ]; then
     python3 -c "
 import json, os
 servers = json.loads(os.environ['CAGE_MCP_SERVERS'])
-p = os.path.expanduser('~/.claude/settings.json')
+p = '$PREFS_STORE'
 try:
     s = json.load(open(p))
 except (FileNotFoundError, json.JSONDecodeError):
     s = {}
 mcp = s.setdefault('mcpServers', {})
 for name in servers:
-    mcp[name] = {'command': 'mcp-relay', 'args': [name]}
+    mcp[name] = {'type': 'stdio', 'command': 'mcp-relay', 'args': [name]}
 with open(p, 'w') as f:
     json.dump(s, f, indent=2)
 "
 fi
+
+# The MCP merges above run as root; re-own so the target user can write its prefs
+chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$PREFS_STORE" 2>/dev/null || true
 
 # Inject cage container context into CLAUDE.md, append host's CLAUDE.md if present
 cat > "$CLAUDE_DIR/CLAUDE.md" <<'CAGE_EOF'

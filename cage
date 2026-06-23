@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.15.0"
+CAGE_VERSION="0.16.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -991,6 +991,13 @@ case "$CAGE_TOOL" in
             -v "$VOLUME_NAME:${CONTAINER_HOME}/.claude"
             -v "$HOST_CLAUDE_DIR:/host-claude:ro"
         )
+        # Host ~/.claude.json holds user/local-scope MCP servers (the file Claude
+        # actually reads MCP config from — settings.json does not carry mcpServers).
+        # Mount read-only at a separate path; the entrypoint copies ONLY the
+        # mcpServers key into the writable volume copy, never writing back here.
+        if [ -f "$HOME/.claude.json" ]; then
+            DOCKER_ARGS+=(-v "$HOME/.claude.json:/host-claude-json:ro")
+        fi
         # ccstatusline keeps its own config separate from settings.json
         CCSL_HOST_PATH="$HOME/.config/ccstatusline"
         if [ -d "$CCSL_HOST_PATH" ]; then

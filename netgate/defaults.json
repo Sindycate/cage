@@ -5,6 +5,7 @@
     "*.cloudfront.net",
     "*.github.com",
     "*.githubusercontent.com",
+    "*.linear.app",
     "*.openai.com",
     "*.oaiusercontent.com",
     "*.oaistatic.com"
