@@ -134,7 +134,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Pre-allows AWS and OpenAI domains via `netgate/defaults.json`
 - Concurrent requests to the same unknown domain show only one dialog (deduplication via threading.Event)
 
-**`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, GitHub, Linear, OpenAI API). Loaded on every proxy start.
+**`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, Dash0, GitHub, Linear, OpenAI API). Loaded on every proxy start.
 
 **`mcp-bridge.py`** (host-side, runs when `MCP_SERVERS` is configured):
 - Python3 TCP relay that bridges host-side MCP commands into the container
@@ -205,13 +205,13 @@ Named profiles allow switching between configurations (e.g., work vs personal) w
 
 **`cage-netgate.sh`** (sourced for `cage netgate` subcommand): list rules, allow/deny domains, remove decisions, reset files. Uses `python3 -c` for JSON manipulation (no jq dependency). Hash computation mirrors the main cage script (`md5 -q` on macOS, `md5sum` on Linux, first 8 chars).
 
-## Remote HTTP MCP servers (Linear)
+## Remote HTTP MCP servers (Linear, Dash0)
 
-The stdio bridge (`MCP_SERVERS`) is for **local stdio** MCP servers. A **remote streamable-HTTP** server like Linear (`https://mcp.linear.app/mcp`) is instead configured **natively in each tool** and authenticated with an **API key forwarded via env var**. The server definition is byte-identical inside and outside cage — there is no cage-specific rewrite (this is the deliberate contrast with the stdio bridge, which rewrites the command to `mcp-relay`).
+The stdio bridge (`MCP_SERVERS`) is for **local stdio** MCP servers. A **remote streamable-HTTP** server like Linear (`https://mcp.linear.app/mcp`) or Dash0 (`https://api.<region>.aws.dash0.com/mcp`) is instead configured **natively in each tool** and authenticated with a **token forwarded via env var**. The server definition is byte-identical inside and outside cage — there is no cage-specific rewrite (this is the deliberate contrast with the stdio bridge, which rewrites the command to `mcp-relay`). The cage plumbing is generic (mount `~/.claude.json` → merge `mcpServers` with `${VAR}` expansion; copy `~/.codex/config.toml` verbatim); adding another such server is just host config + an `EXTRA_ENV` entry + a netgate allowlist domain.
 
 **How it works:**
-- The API key is forwarded with the existing `EXTRA_ENV` mechanism — add `EXTRA_ENV="LINEAR_API_KEY"` to `cage.conf` and `export LINEAR_API_KEY=…` in your host shell. The secret is never stored in a cage config file.
-- `*.linear.app` is pre-allowed in `netgate/defaults.json`, so `--net gate` works without an interactive prompt. (Unlike the stdio bridge, remote MCP makes real HTTPS calls from inside the container, so the domain must be allowlisted. Still incompatible with `--net off`.)
+- The token is forwarded with the existing `EXTRA_ENV` mechanism — add the var name(s) to `EXTRA_ENV` in `cage.conf` (space-separated, e.g. `EXTRA_ENV="LINEAR_API_KEY DASH0_AUTH_TOKEN"`) and `export` them in your host shell. The secret is never stored in a cage config file.
+- `*.linear.app` and `*.dash0.com` are pre-allowed in `netgate/defaults.json`, so `--net gate` works without an interactive prompt. (Unlike the stdio bridge, remote MCP makes real HTTPS calls from inside the container, so the domain must be allowlisted. Still incompatible with `--net off`.)
 
 **Codex** — add to host `~/.codex/config.toml`; the entrypoint copies it verbatim into the container (no Codex-side code):
 ```toml
@@ -233,6 +233,22 @@ bearer_token_env_var = "LINEAR_API_KEY"
 }
 ```
 If a referenced env var is unset **and** has no default, that server is **skipped with a warning** rather than registered with an empty token. (Note: the same merge path also delivers the stdio bridge's servers into `~/.claude.json` — the earlier `settings.json` injection was a no-op since Claude never read `mcpServers` from there.)
+
+**Dash0** follows the identical pattern; only the URL, token var, and header differ. Dash0's MCP endpoint is **region-specific and per-org** — copy yours from the Dash0 app under **Endpoints → MCP** (e.g. `https://api.eu-central-1.aws.dash0.com/mcp`), and create a token under **Auth Tokens** with All-permissions on your datasets. Set `EXTRA_ENV="… DASH0_AUTH_TOKEN"` and `export DASH0_AUTH_TOKEN=…` on the host.
+```toml
+# ~/.codex/config.toml  (experimental_use_rmcp_client = true under [features])
+[mcp_servers.dash0]
+url = "https://api.eu-central-1.aws.dash0.com/mcp"
+bearer_token_env_var = "DASH0_AUTH_TOKEN"
+```
+```jsonc
+// ~/.claude.json → "mcpServers"
+"dash0": {
+  "type": "http",
+  "url": "https://api.eu-central-1.aws.dash0.com/mcp",
+  "headers": { "Authorization": "Bearer ${DASH0_AUTH_TOKEN}" }
+}
+```
 
 ## Key Constraints
 
