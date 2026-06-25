@@ -1,0 +1,128 @@
+import os
+import stat
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CAGE = ROOT / "cage"
+
+
+def write_fake_docker(path: Path) -> None:
+    path.write_text(
+        """#!/bin/sh
+case "$1" in
+  ps) exit 0 ;;
+  image) exit 0 ;;
+  run) echo "fake docker run"; exit 0 ;;
+  build|pull|tag|volume) exit 0 ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+class CageLauncherTests(unittest.TestCase):
+    def test_launch_requires_central_config(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+            env["HOME"] = str(tmp_path / "home")
+            result = subprocess.run(
+                [str(CAGE), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("central config not found", result.stderr)
+        self.assertIn("cage config init", result.stderr)
+
+    def test_legacy_files_are_not_read(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            bin_dir = tmp_path / "bin"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            bin_dir.mkdir(parents=True)
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            write_fake_docker(bin_dir / "docker")
+
+            (cage_dir / "cage.conf").write_text("exit 99\n", encoding="utf-8")
+            (cage_dir / "profiles").mkdir()
+            (repo / ".cage.conf").write_text("exit 99\n", encoding="utf-8")
+            (cage_dir / "config.toml").write_text(
+                '\n'.join(
+                    [
+                        'version = 1',
+                        'default_preset = "codex-test"',
+                        '[auth.codex-test]',
+                        'tool = "codex"',
+                        'copy_auth = false',
+                        '[presets.codex-test]',
+                        'tool = "codex"',
+                        'auth = "codex-test"',
+                        'net = "open"',
+                        '',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env.pop("OPENAI_API_KEY", None)
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_TOKEN", None)
+
+            result = subprocess.run(
+                [str(CAGE), str(repo), "--version"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Preset:    codex-test", result.stdout)
+        self.assertIn("fake docker run", result.stdout)
+
+    def test_profile_option_is_removed(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+            env["HOME"] = str(tmp_path / "home")
+            result = subprocess.run(
+                [str(CAGE), "--profile", "work", str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown option: --profile", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

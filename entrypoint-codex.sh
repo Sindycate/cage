@@ -46,6 +46,109 @@ if [ -d /host-codex ]; then
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 fi
 
+# Add MCP servers selected by cage's central config into the writable container
+# config only. Host ~/.codex/config.toml remains untouched.
+if [ -n "${CAGE_MCP_SERVERS:-}" ] || [ -n "${CAGE_REMOTE_MCP_SERVERS:-}" ]; then
+    CODEX_CONFIG_PATH="$CODEX_DIR/config.toml" python3 - <<'PY'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(os.environ["CODEX_CONFIG_PATH"])
+text = path.read_text() if path.exists() else ""
+
+def q(value):
+    return json.dumps(str(value))
+
+def table_name(name):
+    return '[mcp_servers.%s]' % q(name)
+
+def existing_mcp_names(src):
+    names = set()
+    for match in re.finditer(r'(?m)^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*(?:#.*)?$', src):
+        names.add(match.group(1))
+    for match in re.finditer(r'(?m)^\s*\[mcp_servers\."([^"]+)"\]\s*(?:#.*)?$', src):
+        names.add(match.group(1))
+    return names
+
+def ensure_rmcp_feature(src):
+    if 'experimental_use_rmcp_client' in src:
+        return src
+    feature_match = re.search(r'(?m)^\s*\[features\]\s*$', src)
+    if not feature_match:
+        suffix = '' if not src or src.endswith('\n') else '\n'
+        return src + suffix + '\n[features]\nexperimental_use_rmcp_client = true\n'
+    insert_at = feature_match.end()
+    return src[:insert_at] + '\nexperimental_use_rmcp_client = true' + src[insert_at:]
+
+new_servers = []
+if os.environ.get('CAGE_MCP_SERVERS'):
+    try:
+        bridged = json.loads(os.environ['CAGE_MCP_SERVERS'])
+    except Exception as exc:
+        sys.stderr.write('cage: invalid CAGE_MCP_SERVERS: %s\n' % exc)
+        sys.exit(1)
+    for name in bridged:
+        new_servers.append({
+            'name': name,
+            'kind': 'stdio',
+            'command': 'mcp-relay',
+            'args': [name],
+        })
+
+if os.environ.get('CAGE_REMOTE_MCP_SERVERS'):
+    try:
+        remote = json.loads(os.environ['CAGE_REMOTE_MCP_SERVERS'])
+    except Exception as exc:
+        sys.stderr.write('cage: invalid CAGE_REMOTE_MCP_SERVERS: %s\n' % exc)
+        sys.exit(1)
+    for srv in remote:
+        new_servers.append({
+            'name': srv.get('name'),
+            'kind': 'http',
+            'url': srv.get('url'),
+            'bearer_token_env_var': srv.get('bearer_token_env_var'),
+        })
+
+existing = existing_mcp_names(text)
+seen = set()
+for srv in new_servers:
+    name = srv.get('name')
+    if not name:
+        continue
+    if name in seen:
+        sys.stderr.write('cage: duplicate generated Codex MCP server: %s\n' % name)
+        sys.exit(1)
+    seen.add(name)
+    if name in existing:
+        sys.stderr.write('cage: Codex config already defines MCP server %r; remove it or choose a preset without that server\n' % name)
+        sys.exit(1)
+
+if new_servers:
+    text = ensure_rmcp_feature(text)
+    if text and not text.endswith('\n'):
+        text += '\n'
+    for srv in new_servers:
+        name = srv.get('name')
+        if not name:
+            continue
+        text += '\n' + table_name(name) + '\n'
+        if srv['kind'] == 'stdio':
+            text += 'command = %s\n' % q(srv['command'])
+            text += 'args = [%s]\n' % ', '.join(q(arg) for arg in srv.get('args', []))
+        else:
+            text += 'url = %s\n' % q(srv.get('url') or '')
+            if srv.get('bearer_token_env_var'):
+                text += 'bearer_token_env_var = %s\n' % q(srv['bearer_token_env_var'])
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(text)
+PY
+    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
+fi
+
 # Copy host ~/.agents/ (npm `skills` CLI registry) into the writable volume so
 # globally-installed skills (e.g. via `npx skills add ... -g`) are visible.
 if [ -d /host-agents ]; then
@@ -81,7 +184,7 @@ fi
 # Prevent git "dubious ownership" errors from UID mismatch
 git config --global --add safe.directory "$WORK_DIR"
 
-# Git identity (from cage.conf via env vars)
+# Git identity from resolved cage config
 [ -n "${GIT_USER_NAME:-}" ]  && git config --global user.name "$GIT_USER_NAME"
 [ -n "${GIT_USER_EMAIL:-}" ] && git config --global user.email "$GIT_USER_EMAIL"
 

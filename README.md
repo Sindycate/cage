@@ -16,7 +16,7 @@ Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 - macOS or Linux (Ubuntu, etc.)
 - Docker + Docker Compose (macOS: [Colima](https://github.com/abiosoft/colima) or Docker Desktop)
-- Python 3 (for network gating)
+- Python 3.11+ (for central config parsing; also used by network gating)
 - **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
 - **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
 
@@ -71,6 +71,13 @@ cage claude ~/projects/myapp     # explicit
 # Run Codex CLI against a repo
 cage codex ~/projects/myapp
 
+# Run a named central preset
+cage --preset codex-company ~/projects/myapp
+
+# Inspect what will run before launching
+cage config explain ~/projects/myapp
+cage config doctor --preset codex-company ~/projects/myapp
+
 # Yolo mode — skip all permission prompts (safe because containerized)
 # Automatically enables domain-gated networking
 cage -y ~/projects/myapp
@@ -94,32 +101,123 @@ cage ~/repo-a   # terminal 1
 cage ~/repo-b   # terminal 2
 ```
 
-### Default tool
+### Central configuration
 
-By default, `cage ~/repo` runs Claude Code. Override with `CAGE_DEFAULT` in your config:
+Create a single TOML config with reusable presets, auth blocks, identities, MCP packs, and project mappings:
 
 ```bash
-# ~/.config/cage/cage.conf
-CAGE_DEFAULT=codex
+cage config init
+cage config edit
+cage config list
+cage config explain ~/projects/myapp
+cage config doctor --preset codex-company ~/projects/myapp
+```
+
+`~/.config/cage/config.toml` is required for launches. `cage config explain` shows exactly which preset, auth block, MCP packs, env vars, mounts, and identity will be used.
+
+```toml
+version = 1
+default_preset = "codex-work"
+
+[defaults]
+net = "gate"
+
+[auth.codex-work]
+tool = "codex"
+host_codex_dir = "~/.codex-work"
+host_agents_dir = "~/.agents-work"
+copy_auth = true
+
+[auth.codex-company-proxy]
+tool = "codex"
+host_codex_dir = "~/.codex-company"
+copy_auth = false
+env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
+
+[identities.work]
+git_user_name = "Your Name"
+git_user_email = "you@example.com"
+gh_auth = true
+gh_account = "work"
+
+[mcp_packs.linear]
+env = ["LINEAR_API_KEY"]
+servers = [
+  { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
+]
+
+[mcp_packs.local-tools]
+servers = [
+  { name = "jira", type = "stdio", command = "npx -y @company/jira-mcp" },
+]
+
+[presets.codex-work]
+tool = "codex"
+auth = "codex-work"
+identity = "work"
+mcp_packs = ["linear", "local-tools"]
+net = "gate"
+
+[presets.codex-company-debug]
+tool = "codex"
+auth = "codex-company-proxy"
+identity = "work"
+mcp_packs = ["linear"]
+net = "gate"
+
+[projects]
+"/Users/me/projects/myapp" = "codex-work"
+```
+
+Use project defaults or override per run:
+
+```bash
+cage ~/projects/myapp
+cage --preset codex-company-debug ~/projects/myapp
 ```
 
 ### Authentication
 
-**Claude Code** supports two auth modes, set via `CLAUDE_AUTH` in `cage.conf`:
+Authentication is selected by the preset's `auth` reference. Secrets stay in environment variables or existing tool auth directories; `config.toml` stores only paths and env var names.
 
-```bash
-# ~/.config/cage/cage.conf
+Claude Bedrock:
 
-# Option 1: API key (simple — set ANTHROPIC_API_KEY in your shell env)
-CLAUDE_AUTH=api-key
-
-# Option 2: AWS Bedrock (default)
-CLAUDE_AUTH=bedrock
-AWS_PROFILE=your-profile
-AWS_REGION=us-east-1
+```toml
+[auth.claude-bedrock]
+tool = "claude"
+mode = "bedrock"
+aws_profile = "your-profile"
+aws_region = "us-east-1"
 ```
 
-**Codex CLI** authenticates via `~/.codex/` (sign in on host first with `codex`), or `OPENAI_API_KEY` env var.
+Claude API key:
+
+```toml
+[auth.claude-api]
+tool = "claude"
+mode = "api-key"
+env = ["ANTHROPIC_API_KEY"]
+```
+
+Codex using a separate host config directory:
+
+```toml
+[auth.codex-work]
+tool = "codex"
+host_codex_dir = "~/.codex-work"
+host_agents_dir = "~/.agents-work"
+copy_auth = true
+```
+
+Codex with a custom OpenAI-compatible proxy:
+
+```toml
+[auth.codex-proxy]
+tool = "codex"
+host_codex_dir = "~/.codex-company"
+copy_auth = false
+env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
+```
 
 ## How it works
 
@@ -133,7 +231,7 @@ AWS_REGION=us-east-1
 | `~/.aws/credentials` *(bedrock only)* | `/home/claude/.aws/credentials` | read-only |
 | `~/.claude` | `/host-claude` | read-only |
 | Docker volume (per-repo) | `/home/claude/.claude` | read-write |
-| SSH key (from `cage.conf`) | `/home/claude/.ssh/id` | read-only |
+| SSH key (from preset identity) | `/home/claude/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/claude/.ssh/known_hosts` | read-only |
 
 **Codex CLI** (`cage codex ~/repo`):
@@ -141,9 +239,9 @@ AWS_REGION=us-east-1
 | Mount | Path in container | Access |
 |-------|-------------------|--------|
 | Your repo | same absolute path as on host | **read-write** |
-| `~/.codex` | `/host-codex` | read-only |
+| Codex host directory from preset auth | `/host-codex` | read-only |
 | Docker volume (per-repo) | `/home/codex/.codex` | read-write |
-| SSH key (from `cage.conf`) | `/home/codex/.ssh/id` | read-only |
+| SSH key (from preset identity) | `/home/codex/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/codex/.ssh/known_hosts` | read-only |
 
 Everything else — your home directory, OS config, other repos — is not accessible to the container.
@@ -152,23 +250,21 @@ On each start, the entrypoint copies host settings into the container's writable
 
 ## Git commit & push
 
-To enable git commit and push inside the container, create a config file:
+To enable git commit and push inside the container, define an identity and attach it to a preset:
 
-```bash
-# ~/.config/cage/cage.conf (global defaults)
-GIT_USER_NAME="Your Name"
-GIT_USER_EMAIL="you@example.com"
-SSH_KEY="~/.ssh/id_ed25519"
-SSH_HOST="github-alias=github.com"   # optional: resolve SSH host aliases
-```
+```toml
+[identities.work]
+git_user_name = "Your Name"
+git_user_email = "you@example.com"
+ssh_key = "~/.ssh/id_ed25519"
+ssh_host = "github-alias=github.com" # optional
+gh_auth = true
+gh_account = "work"
 
-Per-project overrides: place a `.cage.conf` in the repo root (same format). Values override the global config.
-
-```bash
-# ~/my-repo/.cage.conf (per-project)
-GIT_USER_NAME="DifferentName"
-GIT_USER_EMAIL="other@example.com"
-SSH_KEY="~/.ssh/other_key"
+[presets.codex-work]
+tool = "codex"
+auth = "codex-work"
+identity = "work"
 ```
 
 **Limitations:**

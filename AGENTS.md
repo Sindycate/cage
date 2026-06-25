@@ -39,6 +39,15 @@ cage codex ~/path/to/repo
 cage ~/path/to/repo --resume
 cage ~/path/to/repo -p "do something"
 
+# Central configuration — one TOML file for presets, auth, MCP packs, identities,
+# host commands, extra mounts, and project mappings. It is required for launches.
+cage config init
+cage config edit
+cage config list
+cage config explain ~/path/to/repo
+cage config doctor --preset codex-company ~/path/to/repo
+cage --preset codex-company ~/path/to/repo
+
 # Yolo mode — skip all permission prompts (safe because containerized)
 # Yolo defaults to --net gate (domain-gated networking)
 cage -y ~/path/to/repo
@@ -55,45 +64,53 @@ cage --net off ~/path/to/repo
 # Per-invocation:
 cage --mount-ro ~/code/shared-lib ~/path/to/repo
 cage --mount-rw ~/scratch/output ~/path/to/repo
-# Or in cage.conf / profile / .cage.conf (newline-delimited; bare line = read-only,
-# 'rw=' prefix = read-write):
-#   EXTRA_MOUNTS="
-#   /Users/me/code/shared-lib
-#   rw=~/scratch/output
-#   "
+# Or in config.toml:
+#   [presets.codex-company]
+#   extra_mounts = [
+#     "~/code/shared-lib",
+#     { path = "~/scratch/output", mode = "rw" },
+#   ]
 
 # MCP bridge — forward host-side STDIO MCP servers into the container
-# In cage.conf or .cage.conf:
-#   MCP_SERVERS="myserver=some-tool --mcp-proxy https://example.com/mcp"
+# In config.toml:
+#   [mcp_packs.local-tools]
+#   servers = [
+#     { name = "myserver", type = "stdio", command = "some-tool --mcp-proxy https://example.com/mcp" },
+#   ]
 
-# Remote (HTTP) MCP servers — e.g. Linear — use a NATIVE config in each tool
-# plus an env-forwarded API key (no bridge, no cage-specific rewrite; the same
-# config works inside and outside the container). See "Remote HTTP MCP servers
-# (Linear)" below.
-#   EXTRA_ENV="LINEAR_API_KEY"
+# Remote (HTTP) MCP servers — e.g. Linear — are generated as native tool
+# config inside the container, with token env vars forwarded by name.
+#   [mcp_packs.linear]
+#   env = ["LINEAR_API_KEY"]
+#   servers = [
+#     { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
+#   ]
 
 # Host command bridge — expose host commands (e.g. token minters) inside the container
-# In cage.conf or .cage.conf:
-#   HOST_COMMANDS="ztoken=ztoken token -n codex"
+# In config.toml:
+#   [host_commands.ztoken]
+#   command = "ztoken token -n codex"
+#   [presets.codex-company]
+#   host_commands = ["ztoken"]
 ```
 
 ## Architecture
 
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
-- Accepts optional subcommand (`cage claude` or `cage codex`) to select tool; defaults to `claude` (overridable via `CAGE_DEFAULT` in `cage.conf`)
+- Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
+- Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
-- `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to `CAGE_DEFAULT` (peeked from global `cage.conf`) then `claude`
+- `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
-- Loads config in layers: `~/.config/cage/cage.conf` (global) → `profiles/<name>.conf` (named profile) → `<repo>/.cage.conf` (per-project override)
 - Runs `docker run` with security hardening (cap_drop ALL, no-new-privileges) and tool-specific mounts:
   - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the only writable host path. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
   - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
-  - **Codex:** `~/.codex` (or `HOST_CODEX_DIR` from profile) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. If `~/.agents` (or `HOST_AGENTS_DIR` from profile) exists on the host, it is also mounted read-only at `/host-agents` and copied into the volume so globally-installed skills (`npx skills add … -g`) are visible inside the container
-  - **GitHub CLI (both tools, opt-in via `GH_AUTH=1`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
+  - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. If the selected auth block names a host agents directory, it is mounted read-only at `/host-agents` and copied into the volume so globally-installed skills (`npx skills add … -g`) are visible inside the container
+  - **GitHub CLI (both tools, opt-in via preset identity `gh_auth = true`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
   - Per-repo named Docker volume for persistent state
-  - SSH key read-only for git push (if `SSH_KEY` configured)
+  - SSH key read-only for git push (if the preset identity configures `ssh_key`)
   - `~/.ssh/known_hosts` read-only (if exists)
 - Uses `md5 -q` (macOS) or `md5sum` (Linux) for hashing — auto-detected
 
@@ -101,12 +118,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Runs as root; remaps the `claude` user's UID/GID to match the host user (`HOST_UID`/`HOST_GID` env vars) for correct file ownership in the mounted repo
 - Fixes ownership on home dir and volume after UID remapping
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
-- Merges the `mcpServers` key from host `/host-claude-json` (read-only) and from the stdio bridge into the volume's `~/.claude.json`, expanding `${VAR}` refs from the env (servers with unset, defaultless vars are skipped with a warning)
+- Merges the `mcpServers` key from host `/host-claude-json` (read-only), central-config HTTP MCP definitions, and the stdio bridge into the volume's `~/.claude.json`, expanding `${VAR}` refs from the env (servers with unset, defaultless vars are skipped with a warning)
 - Copies `settings.json` from host read-only mount into writable volume
 - Symlinks `CLAUDE.md` and `agents/` from host if present
 - Sets `git safe.directory` to handle UID mismatch between host and container
-- Sets `user.name`/`user.email` from env vars (passed from `cage.conf`)
-- Writes `~/.ssh/config` with SSH host alias if `SSH_HOST` is set
+- Sets `user.name`/`user.email` from env vars resolved from the preset identity
+- Writes `~/.ssh/config` with SSH host alias if the preset identity sets `ssh_host`
 - Copies GitHub CLI config from `/host-gh` into writable `~/.config/gh/` (non-auth settings like git_protocol)
 - Switches to the target user via `gosu` before exec'ing `claude`
 
@@ -114,7 +131,8 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Same root→user pattern as Claude entrypoint (UID/GID remapping via `gosu`)
 - Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume
 - Copies `/host-agents` (read-only mount of `~/.agents/`, the npm `skills` CLI registry) into writable volume if present, so globally-installed skills work inside the container
-- Skips `auth.json` when `CODEX_COPY_AUTH=0` (for non-OpenAI providers like Azure OpenAI)
+- Appends central-config MCP servers to the writable container `~/.codex/config.toml` only. Stdio servers use `mcp-relay`; HTTP servers use native Codex `mcp_servers` entries. Duplicate server names already present in host config fail clearly rather than silently overriding
+- Skips `auth.json` when the selected auth block has `copy_auth = false` (for non-OpenAI providers like Azure OpenAI)
 - Preserves workspace trust across restarts (saves and restores `[projects]` entries in `config.toml`)
 - Sets `git safe.directory`, git identity, SSH config (same as Claude entrypoint)
 - Copies GitHub CLI config from `/host-gh` (same as Claude entrypoint)
@@ -136,7 +154,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`netgate/defaults.json`**: Pre-allowed domain patterns (AWS infrastructure, Dash0, GitHub, Linear, OpenAI API). Loaded on every proxy start.
 
-**`mcp-bridge.py`** (host-side, runs when `MCP_SERVERS` is configured):
+**`mcp-bridge.py`** (host-side, runs when selected `mcp_packs` include stdio servers):
 - Python3 TCP relay that bridges host-side MCP commands into the container
 - For each configured server, listens on a random TCP port on 127.0.0.1
 - On incoming connection (from container via `host.docker.internal`), spawns the configured command and relays bidirectionally between TCP and subprocess stdio
@@ -149,11 +167,11 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Configured as the MCP server command in Claude Code's `~/.claude.json` (the file Claude reads `mcpServers` from) by the entrypoint
 - If the repo has `.mcp.json` with matching server names, cage patches it before launch and restores the original on exit
 
-**`host-cmd-bridge.py`** (host-side, runs when `HOST_COMMANDS` is configured):
+**`host-cmd-bridge.py`** (host-side, runs when selected presets include `host_commands`):
 - Same pattern as `mcp-bridge.py`: per-command TCP listener on `127.0.0.1`, spawns the host command on each incoming connection, relays stdio bidirectionally
 - Unlike MCP bridge, subprocess stderr is forwarded to the bridge's own stderr so command errors surface in the cage terminal (MCP bridge sends to DEVNULL to protect JSON-RPC framing)
 - Startup protocol: prints `COMMAND:name=PORT:N` per command, then `READY`
-- Use case: token-refresh commands that need host keychain/auth context (e.g. `HOST_COMMANDS="ztoken=ztoken token -n codex"` so Codex's `auth.command = "ztoken"` config keeps working inside the container across indefinite sessions)
+- Use case: token-refresh commands that need host keychain/auth context (e.g. `[host_commands.ztoken] command = "ztoken token -n codex"` so Codex's `auth.command = "ztoken"` config keeps working inside the container across indefinite sessions)
 
 **`host-cmd-relay`** (runs inside container, installed at `/usr/local/bin/host-cmd-relay`):
 - Container-side stdio-to-TCP relay — reads `HOST_CMD_BRIDGE_HOST` and `HOST_CMD_BRIDGE_PORT_<NAME>`
@@ -177,26 +195,6 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - **Release flow:** bump `CAGE_VERSION` → commit → push → `git tag v{version}` → `git push origin v{version}`. Never skip tagging — releases only trigger on `v*` tag push
 - **Every pushed commit gets its own version.** Never push multiple commits under the same version — if a follow-up fix is needed, bump again
 
-## Profiles
-
-Named profiles allow switching between configurations (e.g., work vs personal) without editing files per-repo.
-
-**Storage:** `~/.config/cage/profiles/<name>.conf` — same format as `cage.conf`. Created via `cage setup --profile <name>`.
-
-**Config loading order:** `cage.conf` (global defaults) → `profiles/<name>.conf` (profile overrides) → `.cage.conf` (per-project override, always wins). Users with no profiles get the original two-layer loading unchanged.
-
-**Profile resolution priority:**
-1. `--profile <name>` CLI flag (one-shot, not persisted)
-2. `CAGE_PROFILE=<name>` in repo's `.cage.conf` (peeked via grep before full source)
-3. Lookup in `~/.config/cage/folder-profiles` (persistent folder→profile mapping)
-4. Interactive prompt (if 2+ profiles exist, TTY, and no mapping yet — choice is saved)
-
-**`folder-profiles`** file: flat `<absolute-path>=<profile-name>` lines. `_none_` means "no profile, don't prompt again".
-
-**`cage-profiles.sh`** (sourced for `cage profiles` subcommand): list profiles + mappings, show a profile, set/reset folder mappings.
-
-**Profile name validation:** `[a-zA-Z0-9_-]` only.
-
 ## Netgate Management
 
 `cage netgate` manages domain allow/deny lists used by `--net gate` mode.
@@ -207,65 +205,49 @@ Named profiles allow switching between configurations (e.g., work vs personal) w
 
 ## Remote HTTP MCP servers (Linear, Dash0)
 
-The stdio bridge (`MCP_SERVERS`) is for **local stdio** MCP servers. A **remote streamable-HTTP** server like Linear (`https://mcp.linear.app/mcp`) or Dash0 (`https://api.<region>.aws.dash0.com/mcp`) is instead configured **natively in each tool** and authenticated with a **token forwarded via env var**. The server definition is byte-identical inside and outside cage — there is no cage-specific rewrite (this is the deliberate contrast with the stdio bridge, which rewrites the command to `mcp-relay`). The cage plumbing is generic (mount `~/.claude.json` → merge `mcpServers` with `${VAR}` expansion; copy `~/.codex/config.toml` verbatim); adding another such server is just host config + an `EXTRA_ENV` entry + a netgate allowlist domain.
+The stdio bridge is for **local stdio** MCP servers selected through `mcp_packs`. `mcp_packs` can also define **remote streamable-HTTP** servers like Linear (`https://mcp.linear.app/mcp`) or Dash0 (`https://api.<region>.aws.dash0.com/mcp`). cage forwards the named token env vars and generates tool-native MCP config inside the writable container state only: Claude gets `mcpServers` entries in `~/.claude.json`; Codex gets `[mcp_servers.<name>]` entries in `~/.codex/config.toml`.
 
 **How it works:**
-- The token is forwarded with the existing `EXTRA_ENV` mechanism — add the var name(s) to `EXTRA_ENV` in `cage.conf` (space-separated, e.g. `EXTRA_ENV="LINEAR_API_KEY DASH0_AUTH_TOKEN"`) and `export` them in your host shell. The secret is never stored in a cage config file.
+- The token is forwarded by naming the env var in `mcp_packs.<name>.env` and/or `bearer_token_env_var`, then exporting it in your host shell. The secret is never stored in `config.toml`.
 - `*.linear.app` and `*.dash0.com` are pre-allowed in `netgate/defaults.json`, so `--net gate` works without an interactive prompt. (Unlike the stdio bridge, remote MCP makes real HTTPS calls from inside the container, so the domain must be allowlisted. Still incompatible with `--net off`.)
 
-**Codex** — add to host `~/.codex/config.toml`; the entrypoint copies it verbatim into the container (no Codex-side code):
+**Linear**:
 ```toml
-[features]
-experimental_use_rmcp_client = true
-
-[mcp_servers.linear]
-url = "https://mcp.linear.app/mcp"
-bearer_token_env_var = "LINEAR_API_KEY"
+[mcp_packs.linear]
+env = ["LINEAR_API_KEY"]
+servers = [
+  { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
+]
 ```
 
-**Claude** — Claude reads MCP servers from `~/.claude.json` (user/local scope) or a repo `.mcp.json`, **not** from `settings.json`. cage mounts host `~/.claude.json` read-only at `/host-claude-json` and the entrypoint copies **only** its `mcpServers` key into the writable volume copy (`PREFS_STORE`), expanding `${VAR}`/`${VAR:-default}` references from the container env (so `${LINEAR_API_KEY}` becomes a real token). Onboarding/account/history from the host file are not carried in. Configure once on the host (user scope):
-```jsonc
-// ~/.claude.json → "mcpServers"
-"linear": {
-  "type": "http",
-  "url": "https://mcp.linear.app/mcp",
-  "headers": { "Authorization": "Bearer ${LINEAR_API_KEY}" }
-}
-```
-If a referenced env var is unset **and** has no default, that server is **skipped with a warning** rather than registered with an empty token. (Note: the same merge path also delivers the stdio bridge's servers into `~/.claude.json` — the earlier `settings.json` injection was a no-op since Claude never read `mcpServers` from there.)
-
-**Dash0** follows the identical pattern; only the URL, token var, and header differ. Dash0's MCP endpoint is **region-specific and per-org** — copy yours from the Dash0 app under **Endpoints → MCP** (e.g. `https://api.eu-central-1.aws.dash0.com/mcp`), and create a token under **Auth Tokens** with All-permissions on your datasets. Set `EXTRA_ENV="… DASH0_AUTH_TOKEN"` and `export DASH0_AUTH_TOKEN=…` on the host.
+**Dash0** follows the identical pattern; only the URL, token var, and header differ. Dash0's MCP endpoint is **region-specific and per-org** — copy yours from the Dash0 app under **Endpoints → MCP** (e.g. `https://api.eu-central-1.aws.dash0.com/mcp`), and create a token under **Auth Tokens** with All-permissions on your datasets.
 ```toml
-# ~/.codex/config.toml  (experimental_use_rmcp_client = true under [features])
-[mcp_servers.dash0]
-url = "https://api.eu-central-1.aws.dash0.com/mcp"
-bearer_token_env_var = "DASH0_AUTH_TOKEN"
-```
-```jsonc
-// ~/.claude.json → "mcpServers"
-"dash0": {
-  "type": "http",
-  "url": "https://api.eu-central-1.aws.dash0.com/mcp",
-  "headers": { "Authorization": "Bearer ${DASH0_AUTH_TOKEN}" }
-}
+[mcp_packs.dash0]
+env = ["DASH0_AUTH_TOKEN"]
+servers = [
+  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", bearer_token_env_var = "DASH0_AUTH_TOKEN" },
+]
 ```
 
 ## Key Constraints
 
+- Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
+- Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
+- Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
+- `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`, profiles, folder mappings, or repo `.cage.conf`
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume. The host file is also mounted read-only at `/host-claude-json`; the entrypoint copies **only** its `mcpServers` key into the volume copy (with `${VAR}` expansion), so user-scope MCP servers (e.g. Linear) work in-container while onboarding/account/history stay isolated. This is also where stdio-bridge servers (`MCP_SERVERS`) land — Claude reads `mcpServers` from here, not `settings.json`
-- **Session history sync** (Claude, default on): cage mirrors the entire `~/.claude/projects/-<repo-slug>/` subtree between host and per-repo Docker volume on entry/exit — session JSONLs, `memory/` (persistent memory), per-session `subagents/` and `tool-results/`. All host-side writes happen from the host cage script running as the host user; the container's read-only `/host-claude` mount is unchanged. Merge rules: `*.jsonl` uses size-based "larger wins" (append-only invariant); all other files use mtime-based "newer wins". First-run migration copies the pre-existing `-workspace-<name>/` subtree into the new slug with `cwd` rewritten in every JSONL (including `*/subagents/*.jsonl`), leaving the legacy dir intact as a fallback. Disable with `SESSION_SYNC=0` in `cage.conf`
-- Claude auth is configured via `CLAUDE_AUTH` in `cage.conf`: `bedrock` (mounts `~/.aws/credentials`) or `api-key` (passes `ANTHROPIC_API_KEY` env var)
-- Codex auth uses `~/.codex/` directory (sign in on host first) or `OPENAI_API_KEY` env var. Set `CODEX_COPY_AUTH=0` in `cage.conf` to skip copying `auth.json` (for non-OpenAI providers like Azure OpenAI)
-- Per-profile Codex config: set `HOST_CODEX_DIR="~/.codex-<name>"` in a profile to mount a separate host Codex directory instead of `~/.codex` (lets one machine keep distinct work/personal Codex configs and `auth.json`s). `cage setup --profile <name>` prompts for it and can scaffold a minimal directory; sign in once with `CODEX_HOME=<path> codex login`
-- Per-profile npm-skills directory: set `HOST_AGENTS_DIR="~/.agents-<name>"` in a profile to mount an alternate skills registry instead of `~/.agents/`. Mount is conditional on the host directory existing — users who never installed skills see no behavior change
-- GitHub CLI auth is **off by default**. Set `GH_AUTH=1` in `cage.conf` to enable. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `GH_ACCOUNT` in `.cage.conf` for per-project account selection
+- **Session history sync** (Claude, default on): cage mirrors the entire `~/.claude/projects/-<repo-slug>/` subtree between host and per-repo Docker volume on entry/exit — session JSONLs, `memory/` (persistent memory), per-session `subagents/` and `tool-results/`. All host-side writes happen from the host cage script running as the host user; the container's read-only `/host-claude` mount is unchanged. Merge rules: `*.jsonl` uses size-based "larger wins" (append-only invariant); all other files use mtime-based "newer wins". First-run migration copies the pre-existing `-workspace-<name>/` subtree into the new slug with `cwd` rewritten in every JSONL (including `*/subagents/*.jsonl`), leaving that old session-history dir intact as a fallback. Disable with `session_sync = false` in central config defaults or preset
+- Claude auth is configured in central `auth` blocks: `mode = "bedrock"` mounts `~/.aws/credentials`; `mode = "api-key"` passes `ANTHROPIC_API_KEY`
+- Codex auth uses `host_codex_dir` in the selected auth block, or `~/.codex` when omitted. Set `copy_auth = false` to skip copying `auth.json` for non-OpenAI providers like Azure OpenAI
+- Per-preset npm skills directory: set `host_agents_dir` in the selected Codex auth block to mount an alternate skills registry instead of `~/.agents/`. Mount is conditional on the host directory existing
+- GitHub CLI auth is off by default. Set `gh_auth = true` in the selected identity. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `gh_account` in the identity for account selection
 - Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
-- Git push requires `cage.conf` with `SSH_KEY` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
+- Git push requires the selected identity to set `ssh_key` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
 - When `--net gate`, MCP bridge, host command bridge, or session sync is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)
-- MCP bridge (`MCP_SERVERS` in cage.conf) runs host commands and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
-- Host command bridge (`HOST_COMMANDS` in cage.conf) is the same mechanism for non-MCP commands: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
-- Extra named mounts (`EXTRA_MOUNTS` in config, or `--mount-ro`/`--mount-rw` flags) bind-mount additional host directories at their **same absolute host path** inside the container (mirroring the repo mount), read-only by default; prefix a config line with `rw=` or pass `--mount-rw` for read-write. Config is newline-delimited like `MCP_SERVERS`; flags are repeatable and merged on top of config (first-wins de-dupe). Paths are validated against the same reserved-path guard as the repo (`_is_reserved_mount_path`, a shared function); tildes are expanded and relative paths resolve against cage's launch cwd. Non-existent paths and paths overlapping the repo are **warn-and-skipped**; reserved container paths **hard-fail**. Extra mounts do **not** affect the container/volume name hash (derived from `REPO_PATH` only). Per-project `EXTRA_MOUNTS` replaces the global value (like all config vars). Adding a mount requires relaunching cage (Docker fixes bind mounts at `docker run` time). No entrypoint involvement — these are plain bind mounts used in place, not copied into the volume
+- MCP bridge runs stdio MCP commands from selected `mcp_packs` on the host and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
+- Host command bridge uses selected `host_commands`: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
+- Extra named mounts from preset `extra_mounts`, or `--mount-ro`/`--mount-rw` flags, bind-mount additional host directories at their **same absolute host path** inside the container (mirroring the repo mount), read-only by default. Paths are validated against the same reserved-path guard as the repo (`_is_reserved_mount_path`, a shared function); tildes are expanded and relative paths resolve against cage's launch cwd. Non-existent paths and paths overlapping the repo are **warn-and-skipped**; reserved container paths **hard-fail**. Extra mounts do **not** affect the container/volume name hash (derived from `REPO_PATH` only). Adding a mount requires relaunching cage (Docker fixes bind mounts at `docker run` time). No entrypoint involvement — these are plain bind mounts used in place, not copied into the volume
 - **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

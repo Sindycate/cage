@@ -75,6 +75,66 @@ if changed:
 "
 fi
 
+# Merge HTTP MCP servers generated from cage's central config. These are kept
+# separate from host ~/.claude.json so one preset can enable a different MCP set
+# without mutating host Claude configuration.
+if [ -n "${CAGE_REMOTE_MCP_SERVERS:-}" ]; then
+    python3 -c "
+import json, os, re, sys
+store = '$PREFS_STORE'
+try:
+    cur = json.load(open(store))
+except Exception:
+    cur = {}
+try:
+    servers = json.loads(os.environ['CAGE_REMOTE_MCP_SERVERS'])
+except Exception as exc:
+    sys.stderr.write('cage: invalid CAGE_REMOTE_MCP_SERVERS: %s\n' % exc)
+    sys.exit(1)
+
+def expand(v, missing):
+    if isinstance(v, str):
+        def sub(m):
+            name, default = m.group(1), m.group(2)
+            if name in os.environ:
+                return os.environ[name]
+            if default is not None:
+                return default
+            missing.append(name)
+            return m.group(0)
+        return re.sub(r'\\\${(\w+)(?::-([^}]*))?}', sub, v)
+    if isinstance(v, dict):
+        return {k: expand(x, missing) for k, x in v.items()}
+    if isinstance(v, list):
+        return [expand(x, missing) for x in v]
+    return v
+
+mcp = cur.setdefault('mcpServers', {})
+for srv in servers:
+    name = srv.get('name')
+    if not name:
+        continue
+    conf = {'type': 'http', 'url': srv.get('url', '')}
+    headers = dict(srv.get('headers') or {})
+    bearer = srv.get('bearer_token_env_var')
+    if bearer:
+        headers.setdefault('Authorization', 'Bearer \${%s}' % bearer)
+    if headers:
+        conf['headers'] = headers
+    missing = []
+    conf = expand(conf, missing)
+    if missing:
+        sys.stderr.write(
+            'cage: skipping MCP server %r — unset env var(s): %s\n'
+            % (name, ', '.join(sorted(set(missing)))))
+        continue
+    mcp[name] = conf
+
+with open(store, 'w') as f:
+    json.dump(cur, f, indent=2)
+"
+fi
+
 # Copy host settings (read-only mount → writable volume)
 [ -f /host-claude/settings.json ] && { rm -f "$CLAUDE_DIR/settings.json" 2>/dev/null; cp /host-claude/settings.json "$CLAUDE_DIR/settings.json"; chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CLAUDE_DIR/settings.json" 2>/dev/null || true; }
 
@@ -136,7 +196,7 @@ WORK_DIR="${WORKSPACE_DIR:-/workspace}"
 # Prevent git "dubious ownership" errors from UID mismatch
 git config --global --add safe.directory "$WORK_DIR"
 
-# Git identity (from cage.conf via env vars)
+# Git identity from resolved cage config
 [ -n "${GIT_USER_NAME:-}" ]  && git config --global user.name "$GIT_USER_NAME"
 [ -n "${GIT_USER_EMAIL:-}" ] && git config --global user.email "$GIT_USER_EMAIL"
 
