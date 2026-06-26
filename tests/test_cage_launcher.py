@@ -123,6 +123,54 @@ class CageLauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Unknown option: --profile", result.stderr)
 
+    def test_interactive_cannot_be_combined_with_preset(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+            env["HOME"] = str(tmp_path / "home")
+            result = subprocess.run(
+                [str(CAGE), "--interactive", "--preset", "codex-test", str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--interactive cannot be combined with --preset", result.stderr)
+
+    def test_interactive_requires_tty(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            (cage_dir / "config.toml").write_text("version = 1\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+
+            result = subprocess.run(
+                [str(CAGE), "--interactive", str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("interactive mode requires a TTY", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

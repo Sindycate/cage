@@ -74,6 +74,10 @@ cage codex ~/projects/myapp
 # Run a named central preset
 cage --preset codex-company ~/projects/myapp
 
+# Pick an ad-hoc one-shot preset from configured auth/identity/MCP blocks
+cage --interactive ~/projects/myapp
+cage codex -i ~/projects/myapp
+
 # Inspect what will run before launching
 cage config explain ~/projects/myapp
 cage config doctor --preset codex-company ~/projects/myapp
@@ -114,6 +118,8 @@ cage config doctor --preset codex-company ~/projects/myapp
 ```
 
 `~/.config/cage/config.toml` is required for launches. `cage config explain` shows exactly which preset, auth block, MCP packs, env vars, mounts, and identity will be used.
+
+Use `cage --interactive ~/projects/myapp` for a one-shot ad-hoc launch. It prompts for the tool, auth block, identity, MCP packs, host commands, network mode, and Claude session sync from objects already defined in `config.toml`; it does not save or edit the config.
 
 ```toml
 version = 1
@@ -174,6 +180,7 @@ Use project defaults or override per run:
 ```bash
 cage ~/projects/myapp
 cage --preset codex-company-debug ~/projects/myapp
+cage --interactive ~/projects/myapp
 ```
 
 ### Authentication

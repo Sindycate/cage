@@ -47,6 +47,8 @@ cage config list
 cage config explain ~/path/to/repo
 cage config doctor --preset codex-company ~/path/to/repo
 cage --preset codex-company ~/path/to/repo
+cage --interactive ~/path/to/repo
+cage codex -i ~/path/to/repo
 
 # Yolo mode — skip all permission prompts (safe because containerized)
 # Yolo defaults to --net gate (domain-gated networking)
@@ -98,6 +100,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
+- Supports `--interactive`/`-i` for one-shot ad-hoc launches. Interactive mode prompts from existing central config objects (tool, auth, identity, MCP packs, host commands, net mode, Claude session sync), resolves them as an in-memory `interactive` preset, and never writes back to `config.toml`
 - Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
@@ -233,6 +236,7 @@ servers = [
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
 - Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
+- Interactive mode is a one-shot composition layer over central config blocks. It is mutually exclusive with `--preset`, requires a TTY, and must not save selections unless a separate config-authoring feature is explicitly added
 - Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`, profiles, folder mappings, or repo `.cage.conf`
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back

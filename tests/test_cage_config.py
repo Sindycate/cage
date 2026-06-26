@@ -62,6 +62,9 @@ class CageConfigTests(unittest.TestCase):
                     ]
                 },
             },
+            "host_commands": {
+                "ztoken": {"command": "ztoken token -n codex"},
+            },
             "presets": {
                 "codex-main": {
                     "tool": "codex",
@@ -160,6 +163,80 @@ class CageConfigTests(unittest.TestCase):
         self.assertIn('"/new" = "b"', updated)
         self.assertNotIn('"/old" = "a"', updated)
         self.assertIn("[presets.a]", updated)
+
+    def test_interactive_selection_resolves_existing_blocks(self):
+        data = self.base_config()
+        original = json.dumps(data, sort_keys=True)
+        selections = cage_config.InteractiveSelections(
+            tool="codex",
+            auth_name="codex-proxy",
+            identity_name="work",
+            mcp_pack_names=["linear", "local"],
+            host_command_names=["ztoken"],
+            net="gate",
+        )
+
+        resolved = cage_config.resolve_interactive_selection(
+            data,
+            Path("/tmp/config.toml"),
+            "/tmp/project-a",
+            selections,
+        )
+
+        self.assertEqual(resolved.preset_name, "interactive")
+        self.assertEqual(resolved.preset_source, "interactive")
+        self.assertEqual(resolved.tool, "codex")
+        self.assertEqual(resolved.auth_name, "codex-proxy")
+        self.assertEqual(resolved.identity_name, "work")
+        self.assertEqual([server["name"] for server in resolved.remote_mcp], ["linear"])
+        self.assertEqual([server["name"] for server in resolved.stdio_mcp], ["jira"])
+        self.assertEqual(resolved.host_commands[0]["name"], "ztoken")
+        self.assertIn("COMPANY_API_KEY", resolved.extra_env)
+        self.assertEqual(json.dumps(data, sort_keys=True), original)
+
+    def test_interactive_explicit_tool_must_match_selection(self):
+        data = self.base_config()
+        selections = cage_config.InteractiveSelections(
+            tool="codex",
+            auth_name="codex-oauth",
+            net="open",
+        )
+
+        with self.assertRaises(cage_config.ConfigError):
+            cage_config.resolve_interactive_selection(
+                data,
+                Path("/tmp/config.toml"),
+                "/tmp/project-a",
+                selections,
+                explicit_tool="claude",
+            )
+
+    def test_interactive_selection_works_without_default_preset(self):
+        data = {
+            "version": 1,
+            "auth": {
+                "codex-oauth": {
+                    "tool": "codex",
+                    "copy_auth": True,
+                },
+            },
+        }
+        selections = cage_config.InteractiveSelections(
+            tool="codex",
+            auth_name="codex-oauth",
+            net="open",
+        )
+
+        resolved = cage_config.resolve_interactive_selection(
+            data,
+            Path("/tmp/config.toml"),
+            "/tmp/project-a",
+            selections,
+        )
+
+        self.assertEqual(resolved.preset_name, "interactive")
+        self.assertEqual(resolved.tool, "codex")
+        self.assertEqual(resolved.codex_copy_auth, "1")
 
 
 if __name__ == "__main__":
