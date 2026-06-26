@@ -972,7 +972,13 @@ def command_edit(args: argparse.Namespace) -> int:
     if not args.config.exists():
         command_init(argparse.Namespace(config=args.config, force=False))
     editor = os.environ.get("EDITOR") or "vi"
-    return subprocess.call([editor, str(args.config)])
+    try:
+        editor_args = shlex.split(editor)
+    except ValueError as exc:
+        raise ConfigError(f"invalid EDITOR value: {exc}") from exc
+    if not editor_args:
+        editor_args = ["vi"]
+    return subprocess.call(editor_args + [str(args.config)])
 
 
 def toml_quote(value: str) -> str:

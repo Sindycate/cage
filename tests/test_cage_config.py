@@ -1,9 +1,12 @@
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -237,6 +240,32 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(resolved.preset_name, "interactive")
         self.assertEqual(resolved.tool, "codex")
         self.assertEqual(resolved.codex_copy_auth, "1")
+
+    def test_config_edit_splits_editor_with_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text("version = 1\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"EDITOR": "code -w"}),
+                patch.object(cage_config.subprocess, "call", return_value=0) as call,
+            ):
+                result = cage_config.command_edit(SimpleNamespace(config=config))
+
+        self.assertEqual(result, 0)
+        call.assert_called_once_with(["code", "-w", str(config)])
+
+    def test_config_edit_rejects_invalid_editor_quoting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text("version = 1\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"EDITOR": "'code -w"}),
+                patch.object(cage_config.subprocess, "call") as call,
+            ):
+                with self.assertRaisesRegex(cage_config.ConfigError, "invalid EDITOR value"):
+                    cage_config.command_edit(SimpleNamespace(config=config))
+
+        call.assert_not_called()
 
 
 if __name__ == "__main__":
