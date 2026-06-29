@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import pty
 import sys
 import tempfile
 import unittest
@@ -396,6 +397,24 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(resolved.preset_name, "interactive")
         self.assertEqual(resolved.tool, "codex")
         self.assertEqual(resolved.codex_copy_auth, "1")
+
+    def test_open_tty_uses_nonseekable_device(self):
+        master_fd, slave_fd = pty.openpty()
+        read_fd = os.dup(slave_fd)
+        write_fd = os.dup(slave_fd)
+
+        try:
+            with patch.object(cage_config.os, "open", side_effect=[read_fd, write_fd]):
+                with cage_config.open_tty() as tty:
+                    tty.write("hello")
+                    tty.flush()
+                    self.assertEqual(os.read(master_fd, 5), b"hello")
+
+                    os.write(master_fd, b"answer\n")
+                    self.assertEqual(tty.readline(), "answer\n")
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
 
     def test_config_edit_splits_editor_with_args(self):
         with tempfile.TemporaryDirectory() as tmp:

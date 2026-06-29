@@ -9,6 +9,7 @@ into shell-safe assignments.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import copy
 import json
 import os
@@ -259,9 +260,37 @@ def default_session_sync(data: dict[str, Any], seed_preset: dict[str, Any]) -> b
 
 def open_tty():
     try:
-        return open("/dev/tty", "r+", encoding="utf-8")
+        read_fd = os.open("/dev/tty", os.O_RDONLY)
+        try:
+            write_fd = os.open("/dev/tty", os.O_WRONLY)
+        except OSError:
+            os.close(read_fd)
+            raise
     except OSError as exc:
         raise ConfigError("interactive mode requires a TTY") from exc
+
+    @contextmanager
+    def tty_context():
+        with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
+            with os.fdopen(write_fd, "w", buffering=1, encoding="utf-8") as writer:
+                yield TtyIO(reader, writer)
+
+    return tty_context()
+
+
+class TtyIO:
+    def __init__(self, reader, writer):
+        self.reader = reader
+        self.writer = writer
+
+    def write(self, value: str) -> int:
+        return self.writer.write(value)
+
+    def flush(self) -> None:
+        self.writer.flush()
+
+    def readline(self) -> str:
+        return self.reader.readline()
 
 
 def prompt_single(tty, title: str, choices: list[tuple[str, str]], default_value: str) -> str:
