@@ -122,6 +122,15 @@ for srv in servers:
     if headers:
         conf['headers'] = headers
     missing = []
+    if srv.get('auth') == 'oauth':
+        client_id = srv.get('oauth_client_id')
+        client_env = srv.get('oauth_client_id_env_var')
+        if client_env:
+            client_id = os.environ.get(client_env)
+            if not client_id:
+                missing.append(client_env)
+        if client_id:
+            conf['oauth'] = {'clientId': client_id}
     conf = expand(conf, missing)
     if missing:
         sys.stderr.write(

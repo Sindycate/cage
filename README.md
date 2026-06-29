@@ -202,6 +202,14 @@ forces Codex's MCP OAuth credential store to file mode for these logins and
 for container launches; this is separate from `auth.json`, so auth blocks with
 `copy_auth = false` still skip the main Codex login cache.
 
+For Claude OAuth MCP servers, select the same central MCP pack from a Claude
+preset and authenticate inside the cage session with Claude's `/mcp` command.
+No container port publishing is required for this first version; if the browser
+callback cannot reach the container, use Claude's fallback flow to paste the
+callback URL. Claude generation uses the server URL plus optional client ID;
+shared Codex fields such as `oauth_resource` and `oauth_scopes` may stay in the
+central pack.
+
 ### Authentication
 
 Authentication is selected by the preset's `auth` reference. Secrets stay in environment variables or existing tool auth directories; `config.toml` stores only paths and env var names.

@@ -691,8 +691,6 @@ def resolve_config(
                     )
                     env.append(out["bearer_token_env_var"])
                 if server_auth == "oauth":
-                    if tool != "codex":
-                        raise ConfigError("OAuth MCP servers are supported for Codex presets only")
                     out["auth"] = "oauth"
                     oauth_resource = optional_str(
                         server.get("oauth_resource"),

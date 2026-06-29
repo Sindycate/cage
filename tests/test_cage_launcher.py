@@ -182,6 +182,55 @@ class CageLauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("interactive mode requires a TTY", result.stderr)
 
+    def test_config_explain_shows_claude_oauth_mcp_server(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            (cage_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "[auth.claude-bedrock]",
+                        'tool = "claude"',
+                        'mode = "bedrock"',
+                        "[mcp_packs.dash0]",
+                        "servers = [",
+                        '  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },',
+                        "]",
+                        "[presets.claude-dash0]",
+                        'tool = "claude"',
+                        'auth = "claude-bedrock"',
+                        'mcp_packs = ["dash0"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["DASH0_OAUTH_CLIENT_ID"] = "client-public-id"
+
+            result = subprocess.run(
+                [str(CAGE), "config", "explain", "--preset", "claude-dash0", str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Tool:   claude", result.stdout)
+        self.assertIn("dash0 (http https://api.eu-central-1.aws.dash0.com/mcp oauth)", result.stdout)
+        self.assertIn("DASH0_OAUTH_CLIENT_ID: set", result.stdout)
+
     def test_mcp_login_dispatches_without_docker(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             tmp_path = Path(tmp)

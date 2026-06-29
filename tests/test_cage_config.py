@@ -224,7 +224,7 @@ class CageConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(cage_config.ConfigError, "cannot combine OAuth"):
             self.resolve(data)
 
-    def test_oauth_mcp_is_codex_only(self):
+    def test_resolves_claude_oauth_http_mcp_server(self):
         data = self.base_config()
         data["auth"]["claude-bedrock"] = {
             "tool": "claude",
@@ -237,6 +237,9 @@ class CageConfigTests(unittest.TestCase):
                     "type": "http",
                     "url": "https://api.eu-central-1.aws.dash0.com/mcp",
                     "auth": "oauth",
+                    "oauth_resource": "https://api.eu-central-1.aws.dash0.com/mcp",
+                    "oauth_client_id_env_var": "DASH0_OAUTH_CLIENT_ID",
+                    "oauth_scopes": ["read:metrics"],
                 }
             ]
         }
@@ -246,8 +249,16 @@ class CageConfigTests(unittest.TestCase):
             "mcp_packs": ["dash0"],
         }
 
-        with self.assertRaisesRegex(cage_config.ConfigError, "Codex presets only"):
-            cage_config.resolve_config(data, Path("/tmp/config.toml"), "/tmp/project-a", "claude-bedrock")
+        resolved = cage_config.resolve_config(
+            data, Path("/tmp/config.toml"), "/tmp/project-a", "claude-bedrock"
+        )
+
+        self.assertEqual(resolved.tool, "claude")
+        self.assertEqual(resolved.remote_mcp[0]["name"], "dash0")
+        self.assertEqual(resolved.remote_mcp[0]["auth"], "oauth")
+        self.assertEqual(resolved.remote_mcp[0]["oauth_client_id_env_var"], "DASH0_OAUTH_CLIENT_ID")
+        self.assertEqual(resolved.remote_mcp[0]["oauth_scopes"], ["read:metrics"])
+        self.assertIn("DASH0_OAUTH_CLIENT_ID", resolved.extra_env)
 
     def test_mcp_login_invokes_codex_with_oauth_overrides(self):
         with tempfile.TemporaryDirectory() as tmp:
