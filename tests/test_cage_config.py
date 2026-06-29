@@ -159,6 +159,162 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(loaded[0]["bearer_token_env_var"], "LINEAR_API_KEY")
         self.assertIn(" ", cage_config.shell_assign("GIT_USER_NAME", resolved.git_user_name))
 
+    def test_resolves_oauth_http_mcp_server(self):
+        data = self.base_config()
+        data["mcp_packs"]["dash0"] = {
+            "servers": [
+                {
+                    "name": "dash0",
+                    "type": "http",
+                    "url": "https://api.eu-central-1.aws.dash0.com/mcp",
+                    "auth": "oauth",
+                    "oauth_resource": "https://api.eu-central-1.aws.dash0.com/mcp",
+                    "oauth_client_id_env_var": "DASH0_OAUTH_CLIENT_ID",
+                    "oauth_scopes": ["read:metrics", "read:logs"],
+                }
+            ],
+        }
+        data["presets"]["codex-main"]["mcp_packs"] = ["dash0"]
+
+        resolved = self.resolve(data)
+
+        self.assertEqual(resolved.remote_mcp[0]["name"], "dash0")
+        self.assertEqual(resolved.remote_mcp[0]["auth"], "oauth")
+        self.assertEqual(
+            resolved.remote_mcp[0]["oauth_resource"],
+            "https://api.eu-central-1.aws.dash0.com/mcp",
+        )
+        self.assertEqual(resolved.remote_mcp[0]["oauth_client_id_env_var"], "DASH0_OAUTH_CLIENT_ID")
+        self.assertEqual(resolved.remote_mcp[0]["oauth_scopes"], ["read:metrics", "read:logs"])
+        self.assertIn("DASH0_OAUTH_CLIENT_ID", resolved.extra_env)
+
+    def test_oauth_mcp_rejects_stdio_server(self):
+        data = self.base_config()
+        data["mcp_packs"]["bad"] = {
+            "servers": [
+                {
+                    "name": "bad",
+                    "type": "stdio",
+                    "auth": "oauth",
+                    "command": "npx bad",
+                }
+            ]
+        }
+        data["presets"]["codex-main"]["mcp_packs"] = ["bad"]
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "must use type"):
+            self.resolve(data)
+
+    def test_oauth_mcp_rejects_bearer_token(self):
+        data = self.base_config()
+        data["mcp_packs"]["bad"] = {
+            "servers": [
+                {
+                    "name": "bad",
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": "oauth",
+                    "bearer_token_env_var": "TOKEN",
+                }
+            ]
+        }
+        data["presets"]["codex-main"]["mcp_packs"] = ["bad"]
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "cannot combine OAuth"):
+            self.resolve(data)
+
+    def test_oauth_mcp_is_codex_only(self):
+        data = self.base_config()
+        data["auth"]["claude-bedrock"] = {
+            "tool": "claude",
+            "mode": "bedrock",
+        }
+        data["mcp_packs"]["dash0"] = {
+            "servers": [
+                {
+                    "name": "dash0",
+                    "type": "http",
+                    "url": "https://api.eu-central-1.aws.dash0.com/mcp",
+                    "auth": "oauth",
+                }
+            ]
+        }
+        data["presets"]["claude-bedrock"] = {
+            "tool": "claude",
+            "auth": "claude-bedrock",
+            "mcp_packs": ["dash0"],
+        }
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "Codex presets only"):
+            cage_config.resolve_config(data, Path("/tmp/config.toml"), "/tmp/project-a", "claude-bedrock")
+
+    def test_mcp_login_invokes_codex_with_oauth_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            codex_dir = tmp_path / ".codex-dash0"
+            config = tmp_path / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-dash0"',
+                        "[auth.codex-dash0]",
+                        'tool = "codex"',
+                        f'host_codex_dir = "{codex_dir}"',
+                        "[mcp_packs.dash0]",
+                        "servers = [",
+                        '  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID", oauth_scopes = ["read:metrics"] },',
+                        "]",
+                        "[presets.codex-dash0]",
+                        'tool = "codex"',
+                        'auth = "codex-dash0"',
+                        'mcp_packs = ["dash0"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {"DASH0_OAUTH_CLIENT_ID": "client-public-id"}),
+                patch.object(cage_config.subprocess, "call", return_value=0) as call,
+            ):
+                result = cage_config.command_mcp_login(
+                    SimpleNamespace(config=config, preset=None, name="dash0", repo="/tmp/project-a")
+                )
+
+        self.assertEqual(result, 0)
+        args, kwargs = call.call_args
+        self.assertEqual(args[0][:2], ["codex", "-c"])
+        self.assertIn('mcp_oauth_credentials_store="file"', args[0])
+        self.assertIn('mcp_servers.dash0.url="https://api.eu-central-1.aws.dash0.com/mcp"', args[0])
+        self.assertIn('mcp_servers.dash0.oauth_resource="https://api.eu-central-1.aws.dash0.com/mcp"', args[0])
+        self.assertIn('mcp_servers.dash0.oauth.client_id="client-public-id"', args[0])
+        self.assertEqual(args[0][-5:], ["mcp", "login", "--scopes", "read:metrics", "dash0"])
+        self.assertEqual(kwargs["env"]["CODEX_HOME"], str(codex_dir))
+
+    def test_mcp_login_requires_selected_oauth_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-main"',
+                        "[auth.codex-main]",
+                        'tool = "codex"',
+                        "[presets.codex-main]",
+                        'tool = "codex"',
+                        'auth = "codex-main"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(cage_config.ConfigError, "not selected"):
+                cage_config.command_mcp_login(
+                    SimpleNamespace(config=config, preset=None, name="dash0", repo="/tmp/project-a")
+                )
+
     def test_replace_projects_section(self):
         text = "version = 1\n\n[projects]\n\"/old\" = \"a\"\n\n[presets.a]\ntool = \"codex\"\n"
         updated = cage_config.replace_projects_section(text, {"/new": "b"})

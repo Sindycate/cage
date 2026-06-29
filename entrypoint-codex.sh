@@ -25,9 +25,9 @@ if [ -f "$CODEX_DIR/config.toml" ] && grep -q "projects\\.\"${WORK_DIR}\"" "$COD
     WAS_TRUSTED=1
 fi
 
-# Copy host Codex config into writable volume
-# Skip auth.json — it holds provider-specific OAuth tokens that may be expired
-# or irrelevant when using alternative providers (e.g. Azure OpenAI instead of OpenAI)
+# Copy host Codex config into the writable volume. When copy_auth is disabled,
+# only auth.json is skipped; Codex MCP OAuth has its own credential store and is
+# kept separate from the main Codex login cache.
 if [ -d /host-codex ]; then
     for f in /host-codex/*; do
         [ -e "$f" ] || continue
@@ -65,6 +65,9 @@ def q(value):
 def table_name(name):
     return '[mcp_servers.%s]' % q(name)
 
+def oauth_table_name(name):
+    return '[mcp_servers.%s.oauth]' % q(name)
+
 def existing_mcp_names(src):
     names = set()
     for match in re.finditer(r'(?m)^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*(?:#.*)?$', src):
@@ -82,6 +85,18 @@ def ensure_rmcp_feature(src):
         return src + suffix + '\n[features]\nexperimental_use_rmcp_client = true\n'
     insert_at = feature_match.end()
     return src[:insert_at] + '\nexperimental_use_rmcp_client = true' + src[insert_at:]
+
+def set_top_level_key(src, key, value):
+    first_table = re.search(r'(?m)^\s*\[', src)
+    split_at = first_table.start() if first_table else len(src)
+    preamble = src[:split_at]
+    rest = src[split_at:]
+    line = '%s = %s\n' % (key, q(value))
+    pattern = re.compile(r'(?m)^\s*%s\s*=.*(?:\n|$)' % re.escape(key))
+    if pattern.search(preamble):
+        return pattern.sub(line, preamble, count=1) + rest
+    suffix = '' if not preamble or preamble.endswith('\n') else '\n'
+    return preamble + suffix + line + rest
 
 new_servers = []
 if os.environ.get('CAGE_MCP_SERVERS'):
@@ -105,11 +120,23 @@ if os.environ.get('CAGE_REMOTE_MCP_SERVERS'):
         sys.stderr.write('cage: invalid CAGE_REMOTE_MCP_SERVERS: %s\n' % exc)
         sys.exit(1)
     for srv in remote:
+        client_id = srv.get('oauth_client_id')
+        client_env = srv.get('oauth_client_id_env_var')
+        if client_env:
+            client_id = os.environ.get(client_env)
+            if not client_id:
+                sys.stderr.write(
+                    'cage: OAuth MCP server %r requires env var to be set: %s\n'
+                    % (srv.get('name'), client_env))
+                sys.exit(1)
         new_servers.append({
             'name': srv.get('name'),
             'kind': 'http',
             'url': srv.get('url'),
             'bearer_token_env_var': srv.get('bearer_token_env_var'),
+            'auth': srv.get('auth'),
+            'oauth_resource': srv.get('oauth_resource'),
+            'oauth_client_id': client_id,
         })
 
 existing = existing_mcp_names(text)
@@ -127,6 +154,8 @@ for srv in new_servers:
         sys.exit(1)
 
 if new_servers:
+    if any(srv.get('auth') == 'oauth' for srv in new_servers):
+        text = set_top_level_key(text, 'mcp_oauth_credentials_store', 'file')
     text = ensure_rmcp_feature(text)
     if text and not text.endswith('\n'):
         text += '\n'
@@ -140,7 +169,13 @@ if new_servers:
             text += 'args = [%s]\n' % ', '.join(q(arg) for arg in srv.get('args', []))
         else:
             text += 'url = %s\n' % q(srv.get('url') or '')
-            if srv.get('bearer_token_env_var'):
+            if srv.get('auth') == 'oauth':
+                if srv.get('oauth_resource'):
+                    text += 'oauth_resource = %s\n' % q(srv['oauth_resource'])
+                if srv.get('oauth_client_id'):
+                    text += '\n' + oauth_table_name(name) + '\n'
+                    text += 'client_id = %s\n' % q(srv['oauth_client_id'])
+            elif srv.get('bearer_token_env_var'):
                 text += 'bearer_token_env_var = %s\n' % q(srv['bearer_token_env_var'])
 
 path.parent.mkdir(parents=True, exist_ok=True)

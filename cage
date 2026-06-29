@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.20.0"
+CAGE_VERSION="0.21.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -27,6 +27,9 @@ case "${1:-}" in
     config|--config)
         shift
         python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" "$@"; exit $? ;;
+    mcp|--mcp)
+        shift
+        python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" mcp "$@"; exit $? ;;
     netgate|--netgate)
         shift
         source "$SCRIPT_DIR/cage-netgate.sh"; exit $? ;;
@@ -174,6 +177,8 @@ if [ $# -lt 1 ]; then
     echo "  config edit               Edit config.toml in \$EDITOR"
     echo "  config explain PATH       Explain the resolved launch configuration"
     echo "  config doctor PATH        Validate the resolved launch configuration"
+    echo "  mcp login NAME PATH       Authenticate with an OAuth MCP server for a resolved Codex preset"
+    echo "  mcp logout NAME PATH      Remove OAuth MCP authentication for a resolved Codex preset"
     echo "  netgate                    Manage domain allow/deny lists for --net gate"
     echo "  netgate list [PATH]        Show rules (defaults + global + project)"
     echo "  netgate allow DOMAIN       Allow a domain (project or --global)"
@@ -198,6 +203,7 @@ if [ $# -lt 1 ]; then
     echo "Examples:"
     echo "  cage setup"
     echo "  cage config edit"
+    echo "  cage mcp login dash0 ~/projects/myapp"
     echo "  cage ~/projects/myapp"
     echo "  cage --preset codex-company ~/projects/myapp"
     echo "  cage --interactive ~/projects/myapp"

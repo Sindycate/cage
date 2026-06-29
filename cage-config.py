@@ -190,6 +190,14 @@ def collect_env(target: list[str], value: Any, label: str) -> None:
         target.append(require_env_name(env_name, label))
 
 
+def optional_str(value: Any, label: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(f"{label} must be a string")
+    return value
+
+
 def selected_seed_preset(data: dict[str, Any], repo: str) -> tuple[str, dict[str, Any]]:
     repo_path = normalize_project_path(repo)
     presets = as_table(data, "presets")
@@ -625,6 +633,8 @@ def resolve_config(
             seen_servers.add(name)
             server_type = server.get("type", "stdio")
             if server_type == "stdio":
+                if server.get("auth") == "oauth":
+                    raise ConfigError(f"OAuth MCP server {name!r} must use type = \"http\"")
                 command = server.get("command")
                 if not isinstance(command, str) or not command.strip():
                     raise ConfigError(f"stdio MCP server {name!r} requires command")
@@ -636,12 +646,54 @@ def resolve_config(
                 if not isinstance(url, str) or not url:
                     raise ConfigError(f"http MCP server {name!r} requires url")
                 out = {"name": name, "type": "http", "url": url}
+                server_auth = server.get("auth", "")
+                if server_auth is None:
+                    server_auth = ""
+                if not isinstance(server_auth, str):
+                    raise ConfigError(f"mcp server {name}.auth must be a string")
+                if server_auth and server_auth not in {"oauth"}:
+                    raise ConfigError(f"unsupported auth for http MCP server {name!r}: {server_auth}")
                 bearer = server.get("bearer_token_env_var")
+                if server_auth == "oauth" and bearer:
+                    raise ConfigError(f"http MCP server {name!r} cannot combine OAuth and bearer_token_env_var")
                 if bearer:
                     out["bearer_token_env_var"] = require_env_name(
                         bearer, f"mcp server {name}.bearer_token_env_var"
                     )
                     env.append(out["bearer_token_env_var"])
+                if server_auth == "oauth":
+                    if tool != "codex":
+                        raise ConfigError("OAuth MCP servers are supported for Codex presets only")
+                    out["auth"] = "oauth"
+                    oauth_resource = optional_str(
+                        server.get("oauth_resource"),
+                        f"mcp server {name}.oauth_resource",
+                    )
+                    if oauth_resource:
+                        out["oauth_resource"] = oauth_resource
+                    client_id = optional_str(
+                        server.get("oauth_client_id"),
+                        f"mcp server {name}.oauth_client_id",
+                    )
+                    client_env = server.get("oauth_client_id_env_var")
+                    if client_id and client_env:
+                        raise ConfigError(
+                            f"http MCP server {name!r} cannot combine "
+                            "oauth_client_id and oauth_client_id_env_var"
+                        )
+                    if client_id:
+                        out["oauth_client_id"] = client_id
+                    if client_env:
+                        out["oauth_client_id_env_var"] = require_env_name(
+                            client_env, f"mcp server {name}.oauth_client_id_env_var"
+                        )
+                        env.append(out["oauth_client_id_env_var"])
+                    scopes = as_str_list(
+                        server.get("oauth_scopes"),
+                        f"mcp server {name}.oauth_scopes",
+                    )
+                    if scopes:
+                        out["oauth_scopes"] = scopes
                 headers = server.get("headers")
                 if headers is not None:
                     if not isinstance(headers, dict):
@@ -733,6 +785,8 @@ def emit_shell(resolved: ResolvedConfig) -> None:
 
 def format_server(server: dict[str, Any]) -> str:
     if server.get("type") == "http":
+        if server.get("auth") == "oauth":
+            return f"{server['name']} (http {server['url']} oauth)"
         auth = server.get("bearer_token_env_var")
         suffix = f" bearer_env={auth}" if auth else ""
         return f"{server['name']} (http {server['url']}{suffix})"
@@ -844,6 +898,67 @@ def command_doctor(args: argparse.Namespace) -> int:
     data = load_config(args.config)
     resolved = resolve_config(data, args.config, args.repo, args.preset or "", args.tool or "")
     return explain(resolved, doctor=True)
+
+
+def codex_key_segment(name: str) -> str:
+    if re.match(r"^[A-Za-z0-9_-]+$", name):
+        return name
+    return toml_quote(name)
+
+
+def codex_mcp_overrides(server: dict[str, Any], resolve_client_env: bool = True) -> list[str]:
+    name = codex_key_segment(str(server["name"]))
+    prefix = f"mcp_servers.{name}"
+    overrides = [f"{prefix}.url={toml_quote(str(server['url']))}"]
+    if server.get("oauth_resource"):
+        overrides.append(f"{prefix}.oauth_resource={toml_quote(str(server['oauth_resource']))}")
+    client_id = server.get("oauth_client_id") or ""
+    client_env = server.get("oauth_client_id_env_var") or ""
+    if client_env and resolve_client_env:
+        client_id = os.environ.get(str(client_env), "")
+        if not client_id:
+            raise ConfigError(f"env var is unset: {client_env}")
+    if client_id:
+        overrides.append(f"{prefix}.oauth.client_id={toml_quote(str(client_id))}")
+    return overrides
+
+
+def selected_oauth_mcp_server(resolved: ResolvedConfig, name: str) -> dict[str, Any]:
+    for server in resolved.remote_mcp:
+        if server.get("name") == name:
+            if server.get("auth") != "oauth":
+                raise ConfigError(f"MCP server {name!r} is not configured for OAuth")
+            return server
+    raise ConfigError(f"OAuth MCP server not selected by preset: {name}")
+
+
+def command_mcp_auth(args: argparse.Namespace, action: str) -> int:
+    data = load_config(args.config)
+    resolved = resolve_config(data, args.config, args.repo, args.preset or "", "codex")
+    server = selected_oauth_mcp_server(resolved, args.name)
+    codex_home = resolved.host_codex_dir or expand_path_string("~/.codex")
+    Path(codex_home).mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["CODEX_HOME"] = codex_home
+    cmd = ["codex", "-c", 'mcp_oauth_credentials_store="file"']
+    for override in codex_mcp_overrides(server, resolve_client_env=(action == "login")):
+        cmd.extend(["-c", override])
+    cmd.extend(["mcp", action])
+    if action == "login" and server.get("oauth_scopes"):
+        cmd.extend(["--scopes", ",".join(str(scope) for scope in server["oauth_scopes"])])
+    cmd.append(args.name)
+
+    print(f"Codex dir: {codex_home}", flush=True)
+    return subprocess.call(cmd, env=env)
+
+
+def command_mcp_login(args: argparse.Namespace) -> int:
+    return command_mcp_auth(args, "login")
+
+
+def command_mcp_logout(args: argparse.Namespace) -> int:
+    return command_mcp_auth(args, "logout")
 
 
 def command_default_tool(args: argparse.Namespace) -> int:
@@ -1079,6 +1194,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("preset")
     p.set_defaults(func=command_set_project)
+
+    p = sub.add_parser("mcp", help="Manage OAuth MCP authentication")
+    mcp_sub = p.add_subparsers(dest="mcp_command", required=True)
+
+    p_login = mcp_sub.add_parser("login", help="Authenticate with an OAuth MCP server")
+    p_login.add_argument("--preset")
+    p_login.add_argument("name")
+    p_login.add_argument("repo")
+    p_login.set_defaults(func=command_mcp_login)
+
+    p_logout = mcp_sub.add_parser("logout", help="Remove OAuth MCP authentication")
+    p_logout.add_argument("--preset")
+    p_logout.add_argument("name")
+    p_logout.add_argument("repo")
+    p_logout.set_defaults(func=command_mcp_logout)
 
     return parser
 

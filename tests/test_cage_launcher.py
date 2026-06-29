@@ -26,6 +26,17 @@ exit 0
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def write_fake_codex(path: Path) -> None:
+    path.write_text(
+        """#!/bin/sh
+echo "fake codex CODEX_HOME=$CODEX_HOME args=$*"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 class CageLauncherTests(unittest.TestCase):
     def test_launch_requires_central_config(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
@@ -170,6 +181,61 @@ class CageLauncherTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("interactive mode requires a TTY", result.stderr)
+
+    def test_mcp_login_dispatches_without_docker(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            bin_dir = tmp_path / "bin"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            codex_home = tmp_path / "codex-home"
+            bin_dir.mkdir(parents=True)
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            write_fake_codex(bin_dir / "codex")
+            (cage_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-dash0"',
+                        "[auth.codex-dash0]",
+                        'tool = "codex"',
+                        f'host_codex_dir = "{codex_home}"',
+                        "[mcp_packs.dash0]",
+                        "servers = [",
+                        '  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id = "client-public-id" },',
+                        "]",
+                        "[presets.codex-dash0]",
+                        'tool = "codex"',
+                        'auth = "codex-dash0"',
+                        'mcp_packs = ["dash0"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+            result = subprocess.run(
+                [str(CAGE), "mcp", "login", "dash0", str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Codex dir: {codex_home}", result.stdout)
+        self.assertIn(f"fake codex CODEX_HOME={codex_home}", result.stdout)
+        self.assertIn('mcp_oauth_credentials_store="file"', result.stdout)
+        self.assertIn("mcp login dash0", result.stdout)
 
 
 if __name__ == "__main__":

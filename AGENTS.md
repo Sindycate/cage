@@ -87,6 +87,18 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 #   servers = [
 #     { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
 #   ]
+#
+# Codex OAuth MCP servers — e.g. Dash0 when API tokens are not available — are
+# also generated from central config. Authenticate on the host once per Codex
+# auth directory with `cage mcp login NAME PATH`; the browser callback stays on
+# the host and no container callback port is published. cage forces Codex's
+# MCP OAuth credential store to file mode for host login and container launch;
+# this is separate from auth.json, so copy_auth=false still skips only the main
+# Codex login cache.
+#   [mcp_packs.dash0]
+#   servers = [
+#     { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+#   ]
 
 # Host command bridge — expose host commands (e.g. token minters) inside the container
 # In config.toml:
@@ -232,12 +244,29 @@ servers = [
 ]
 ```
 
+If Dash0 requires OAuth instead of an API token, use the Codex-only OAuth shape:
+```toml
+[mcp_packs.dash0]
+servers = [
+  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+]
+```
+Then run `cage mcp login dash0 ~/path/to/repo` (or add `--preset NAME`) on the host.
+The login command resolves the same preset as launch, runs Codex's OAuth flow with
+the resolved host Codex directory as `CODEX_HOME`, and leaves normal cage launches
+to generate the MCP config from central TOML. cage sets Codex's documented
+`mcp_oauth_credentials_store` to `file` for both operations; this is separate
+from `auth.json`, so Codex auth blocks with `copy_auth = false` still skip only
+the main Codex login cache. OAuth MCP support is Codex-only in this version; do
+not wire OAuth MCP packs into Claude presets.
+
 ## Key Constraints
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
 - Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
 - Interactive mode is a one-shot composition layer over central config blocks. It is mutually exclusive with `--preset`, requires a TTY, and must not save selections unless a separate config-authoring feature is explicitly added
 - Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
+- OAuth HTTP MCP servers are supported only for Codex presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` are host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. cage forces `mcp_oauth_credentials_store = "file"` for those flows and for generated container Codex config. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`, profiles, folder mappings, or repo `.cage.conf`
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume. The host file is also mounted read-only at `/host-claude-json`; the entrypoint copies **only** its `mcpServers` key into the volume copy (with `${VAR}` expansion), so user-scope MCP servers (e.g. Linear) work in-container while onboarding/account/history stay isolated. This is also where stdio-bridge servers (`MCP_SERVERS`) land — Claude reads `mcpServers` from here, not `settings.json`

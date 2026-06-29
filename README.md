@@ -152,6 +152,11 @@ servers = [
   { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
 ]
 
+[mcp_packs.dash0]
+servers = [
+  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+]
+
 [mcp_packs.local-tools]
 servers = [
   { name = "jira", type = "stdio", command = "npx -y @company/jira-mcp" },
@@ -161,7 +166,7 @@ servers = [
 tool = "codex"
 auth = "codex-work"
 identity = "work"
-mcp_packs = ["linear", "local-tools"]
+mcp_packs = ["linear", "dash0", "local-tools"]
 net = "gate"
 
 [presets.codex-company-debug]
@@ -182,6 +187,20 @@ cage ~/projects/myapp
 cage --preset codex-company-debug ~/projects/myapp
 cage --interactive ~/projects/myapp
 ```
+
+For Codex OAuth MCP servers such as Dash0, authenticate on the host once per
+Codex auth directory:
+
+```bash
+cage mcp login dash0 ~/projects/myapp
+cage mcp logout dash0 ~/projects/myapp
+```
+
+The browser callback runs on the host, so no container port publishing is
+needed. The central TOML remains the source of the MCP server definition. cage
+forces Codex's MCP OAuth credential store to file mode for these logins and
+for container launches; this is separate from `auth.json`, so auth blocks with
+`copy_auth = false` still skip the main Codex login cache.
 
 ### Authentication
 
