@@ -231,6 +231,74 @@ class CageLauncherTests(unittest.TestCase):
         self.assertIn(f"{agents}:/host-agents:ro", result.stdout)
         self.assertNotIn("/host-agent-skills/", result.stdout)
 
+    def test_codex_oauth_credentials_syncs_outside_main_container(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            bin_dir = tmp_path / "bin"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            codex_home = tmp_path / "codex-home"
+            docker_log = tmp_path / "docker.log"
+            bin_dir.mkdir(parents=True)
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            codex_home.mkdir()
+            (codex_home / ".credentials.json").write_text("{}", encoding="utf-8")
+            docker = bin_dir / "docker"
+            docker.write_text(
+                """#!/bin/sh
+printf "%s\\n" "$*" >> "$DOCKER_LOG"
+case "$1" in
+  ps|image|build|pull|tag|volume) exit 0 ;;
+  run) printf "fake docker run"; shift; for arg in "$@"; do printf " <%s>" "$arg"; done; printf "\\n"; exit 0 ;;
+esac
+exit 0
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            (cage_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-test"',
+                        "[auth.codex-test]",
+                        'tool = "codex"',
+                        f'host_codex_dir = "{codex_home}"',
+                        'copy_auth = false',
+                        "[presets.codex-test]",
+                        'tool = "codex"',
+                        'auth = "codex-test"',
+                        'net = "open"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["DOCKER_LOG"] = str(docker_log)
+
+            result = subprocess.run(
+                [str(CAGE), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            docker_calls = docker_log.read_text()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(docker_calls.count(":/vol"), 2)
+        self.assertIn(f"{codex_home}:/host-codex", docker_calls)
+        self.assertIn(f"{codex_home}:/host-codex:ro", docker_calls)
+
     def test_profile_option_is_removed(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             tmp_path = Path(tmp)

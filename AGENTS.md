@@ -107,7 +107,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 # auth.json, so copy_auth=false still skips only the main Codex login cache.
 #   [mcp_packs.dash0]
 #   servers = [
-#     { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+#     { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com", oauth_scopes = ["*"], oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
 #   ]
 
 # Host command bridge — expose host commands (e.g. token minters) inside the container
@@ -132,7 +132,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
   - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
-  - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. If the preset selects `skill_packs`, each selected skill directory is mounted read-only at `/host-agent-skills/<name>` and copied into `$HOME/.agents/skills` inside the container. If no `skill_packs` are selected, the selected auth block's host agents directory is mounted read-only at `/host-agents` and copied wholesale so globally-installed skills (`npx skills add … -g`) are visible inside the container
+  - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. MCP OAuth `.credentials.json` is synchronized by the host launcher between the host Codex dir and the per-repo Docker volume before launch and after exit, so rotating refresh tokens do not diverge. If the preset selects `skill_packs`, each selected skill directory is mounted read-only at `/host-agent-skills/<name>` and copied into `$HOME/.agents/skills` inside the container. If no `skill_packs` are selected, the selected auth block's host agents directory is mounted read-only at `/host-agents` and copied wholesale so globally-installed skills (`npx skills add … -g`) are visible inside the container
   - **GitHub CLI (both tools, opt-in via preset identity `gh_auth = true`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
   - Per-repo named Docker volume for persistent state
   - SSH key read-only for git push (if the preset identity configures `ssh_key`)
@@ -154,7 +154,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`entrypoint-codex.sh`** (runs inside Codex container on every start):
 - Same root→user pattern as Claude entrypoint (UID/GID remapping via `gosu`)
-- Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume
+- Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume; MCP OAuth `.credentials.json` is reconciled by the host launcher before and after the container run
 - Copies selected `/host-agent-skills/<name>` directories into `$HOME/.agents/skills` when `skill_packs` are selected; otherwise copies `/host-agents` (read-only mount of `~/.agents/`, the npm `skills` CLI registry) into writable home if present, so globally-installed skills work inside the container
 - Appends central-config MCP servers to the writable container `~/.codex/config.toml` only. Stdio servers use `mcp-relay`; HTTP servers use native Codex `mcp_servers` entries. Duplicate server names already present in host config fail clearly rather than silently overriding
 - Skips `auth.json` when the selected auth block has `copy_auth = false` (for non-OpenAI providers like Azure OpenAI)
@@ -258,7 +258,7 @@ If Dash0 requires OAuth instead of an API token, use the OAuth shape:
 ```toml
 [mcp_packs.dash0]
 servers = [
-  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com", oauth_scopes = ["*"], oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
 ]
 ```
 For Codex, run `cage mcp login dash0 ~/path/to/repo` (or add `--preset NAME`) on
@@ -268,6 +268,9 @@ normal cage launches to generate the MCP config from central TOML. cage sets
 Codex's documented `mcp_oauth_credentials_store` to `file` for both operations;
 this is separate from `auth.json`, so Codex auth blocks with `copy_auth = false`
 still skip only the main Codex login cache.
+The host launcher synchronizes Codex MCP OAuth `.credentials.json` between the
+host Codex directory and the per-repo Docker volume before launch and after
+exit, so providers with rotating refresh tokens do not leave stale copies.
 
 For Claude, select the same OAuth MCP pack from a Claude preset and authenticate
 inside the cage session with `/mcp`. No container port publishing is required
@@ -283,7 +286,7 @@ uses the URL and optional client ID; shared Codex fields such as
 - Interactive mode is a one-shot composition layer over central config blocks. It is mutually exclusive with `--preset`, requires a TTY, and must not save selections unless a separate config-authoring feature is explicitly added
 - Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
 - Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. When `skill_packs` are selected, cage mounts and copies only those skills; when no `skill_packs` are selected, it falls back to copying the whole `host_agents_dir`
-- OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
+- OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. cage also syncs Codex MCP OAuth `.credentials.json` between host and volume before launch and after exit to preserve rotated refresh tokens. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`, profiles, folder mappings, or repo `.cage.conf`
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume. The host file is also mounted read-only at `/host-claude-json`; the entrypoint copies **only** its `mcpServers` key into the volume copy (with `${VAR}` expansion), so user-scope MCP servers (e.g. Linear) work in-container while onboarding/account/history stay isolated. This is also where stdio-bridge servers (`MCP_SERVERS`) land — Claude reads `mcpServers` from here, not `settings.json`

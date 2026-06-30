@@ -26,8 +26,9 @@ if [ -f "$CODEX_DIR/config.toml" ] && grep -q "projects\\.\"${WORK_DIR}\"" "$COD
 fi
 
 # Copy host Codex config into the writable volume. When copy_auth is disabled,
-# only auth.json is skipped; Codex MCP OAuth has its own credential store and is
-# kept separate from the main Codex login cache.
+# only auth.json is skipped. Codex MCP OAuth's .credentials.json is also
+# reconciled by the host launcher before/after the container runs so rotated
+# refresh tokens do not diverge between the host Codex dir and this volume.
 if [ -d /host-codex ]; then
     for f in /host-codex/*; do
         [ -e "$f" ] || continue
@@ -158,6 +159,7 @@ if os.environ.get('CAGE_REMOTE_MCP_SERVERS'):
             'bearer_token_env_var': srv.get('bearer_token_env_var'),
             'auth': srv.get('auth'),
             'oauth_resource': srv.get('oauth_resource'),
+            'oauth_scopes': srv.get('oauth_scopes') or [],
             'oauth_client_id': client_id,
         })
 
@@ -199,6 +201,8 @@ if new_servers:
             if srv.get('auth') == 'oauth':
                 if srv.get('oauth_resource'):
                     text += 'oauth_resource = %s\n' % q(srv['oauth_resource'])
+                if srv.get('oauth_scopes'):
+                    text += 'scopes = [%s]\n' % ', '.join(q(scope) for scope in srv['oauth_scopes'])
                 if srv.get('oauth_client_id'):
                     text += '\n' + oauth_table_name(name) + '\n'
                     text += 'client_id = %s\n' % q(srv['oauth_client_id'])

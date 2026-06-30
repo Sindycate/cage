@@ -155,7 +155,7 @@ servers = [
 
 [mcp_packs.dash0]
 servers = [
-  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com/mcp", oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
+  { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com", oauth_scopes = ["*"], oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
 ]
 
 [mcp_packs.local-tools]
@@ -212,6 +212,11 @@ needed. The central TOML remains the source of the MCP server definition. cage
 forces Codex's MCP OAuth credential store to file mode for these logins and
 for container launches; this is separate from `auth.json`, so auth blocks with
 `copy_auth = false` still skip the main Codex login cache.
+
+For Codex, cage synchronizes `.credentials.json` between the resolved host
+Codex directory and the per-repo Docker volume before launch and after exit.
+This keeps providers that rotate MCP OAuth refresh tokens, such as Dash0, from
+leaving stale token copies in either place.
 
 For Claude OAuth MCP servers, select the same central MCP pack from a Claude
 preset and authenticate inside the cage session with Claude's `/mcp` command.
@@ -293,7 +298,7 @@ env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 
 Everything else — your home directory, OS config, other repos — is not accessible to the container.
 
-On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected.
+On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials in `.credentials.json` are synchronized by the host launcher before and after the run so refresh-token rotation persists outside the container volume.
 
 ## Git commit & push
 

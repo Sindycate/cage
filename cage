@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.22.3"
+CAGE_VERSION="0.22.4"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -326,6 +326,12 @@ case "$CAGE_TOOL" in
         DOCKERFILE="Dockerfile.codex"
         ;;
 esac
+
+CODEX_HOST_PATH=""
+if [ "$CAGE_TOOL" = "codex" ]; then
+    CODEX_HOST_PATH="${HOST_CODEX_DIR:-$HOME/.codex}"
+    CODEX_HOST_PATH="${CODEX_HOST_PATH/#\~/$HOME}"
+fi
 
 # --- Extra named mounts -----------------------------------------------------
 # Bind-mount additional host dirs at their same absolute host path (like the
@@ -927,6 +933,57 @@ cleanup_session_sync() {
         ' >/dev/null 2>&1 || true
 }
 
+# --- Codex MCP OAuth credential sync ----------------------------------------
+# Codex stores file-backed MCP OAuth credentials in .credentials.json. Some
+# providers rotate refresh tokens; leaving host and volume copies to diverge can
+# make a later refresh reuse an old token and revoke the token family. The main
+# container still sees the host Codex dir read-only; this host-side sync is the
+# only write-back path.
+CODEX_OAUTH_CREDENTIALS_SYNC=0
+if [ "$CAGE_TOOL" = "codex" ] && [ -d "$CODEX_HOST_PATH" ]; then
+    CODEX_OAUTH_CREDENTIALS_SYNC=1
+    docker volume create "$VOLUME_NAME" >/dev/null
+fi
+
+sync_codex_oauth_credentials() {
+    [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ] || return 0
+    docker run --rm \
+        --entrypoint sh \
+        -v "$VOLUME_NAME:/vol" \
+        -v "$CODEX_HOST_PATH:/host-codex" \
+        -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+        "$IMAGE" -c '
+            host="/host-codex/.credentials.json"
+            vol="/vol/.credentials.json"
+            if [ ! -e "$host" ]; then
+                rm -f "$vol"
+                exit 0
+            fi
+
+            copy_one() {
+                src="$1"; dst="$2"
+                mkdir -p "$(dirname "$dst")"
+                cp -p "$src" "$dst.tmp" && mv "$dst.tmp" "$dst"
+            }
+
+            if [ ! -e "$vol" ]; then
+                copy_one "$host" "$vol"
+            else
+                hm=$(stat -c%Y "$host")
+                vm=$(stat -c%Y "$vol")
+                if [ "$hm" -gt "$vm" ]; then
+                    copy_one "$host" "$vol"
+                elif [ "$vm" -gt "$hm" ]; then
+                    copy_one "$vol" "$host"
+                fi
+            fi
+
+            chown "$HOST_UID:$HOST_GID" "$host" "$vol" 2>/dev/null || true
+        ' >/dev/null 2>&1 || true
+}
+
+sync_codex_oauth_credentials
+
 echo "=== ${TOOL_DISPLAY_NAME} Container${YOLO_LABEL}${NET_LABEL}${MCP_LABEL}${HOST_CMD_LABEL} ==="
 echo "  Repo:      $REPO_PATH"
 [ -n "${CAGE_PRESET:-}" ] && echo "  Preset:    $CAGE_PRESET"
@@ -1014,8 +1071,6 @@ case "$CAGE_TOOL" in
             --security-opt seccomp=unconfined
             -v "$VOLUME_NAME:${CONTAINER_HOME}/.codex"
         )
-        CODEX_HOST_PATH="${HOST_CODEX_DIR:-$HOME/.codex}"
-        CODEX_HOST_PATH="${CODEX_HOST_PATH/#\~/$HOME}"
         if [ -d "$CODEX_HOST_PATH" ]; then
             DOCKER_ARGS+=(-v "$CODEX_HOST_PATH:/host-codex:ro")
         fi
@@ -1124,9 +1179,9 @@ if [ "$YOLO" -eq 1 ]; then
     esac
 fi
 
-if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ]; then
+if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ] || [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ]; then
     # Cannot use exec: need cleanup traps to run via trap EXIT
-    trap 'cleanup_session_sync; cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
+    trap 'sync_codex_oauth_credentials; cleanup_session_sync; cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
     docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
 else
     exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
