@@ -68,6 +68,9 @@ def table_name(name):
 def oauth_table_name(name):
     return '[mcp_servers.%s.oauth]' % q(name)
 
+def env_table_name(name):
+    return '[mcp_servers.%s.env]' % q(name)
+
 def existing_mcp_names(src):
     names = set()
     for match in re.finditer(r'(?m)^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*(?:#.*)?$', src):
@@ -106,11 +109,30 @@ if os.environ.get('CAGE_MCP_SERVERS'):
         sys.stderr.write('cage: invalid CAGE_MCP_SERVERS: %s\n' % exc)
         sys.exit(1)
     for name in bridged:
+        port_env = 'MCP_BRIDGE_PORT_%s' % name.upper().replace('-', '_')
+        bridge_host = os.environ.get('MCP_BRIDGE_HOST')
+        bridge_port = os.environ.get(port_env)
+        if not bridge_host or not bridge_port:
+            sys.stderr.write(
+                'cage: bridged MCP server %r is missing bridge env var(s): %s\n'
+                % (name, ', '.join(
+                    key for key, value in (
+                        ('MCP_BRIDGE_HOST', bridge_host),
+                        (port_env, bridge_port),
+                    )
+                    if not value
+                ))
+            )
+            sys.exit(1)
         new_servers.append({
             'name': name,
             'kind': 'stdio',
             'command': 'mcp-relay',
             'args': [name],
+            'env': {
+                'MCP_BRIDGE_HOST': bridge_host,
+                port_env: bridge_port,
+            },
         })
 
 if os.environ.get('CAGE_REMOTE_MCP_SERVERS'):
@@ -167,6 +189,11 @@ if new_servers:
         if srv['kind'] == 'stdio':
             text += 'command = %s\n' % q(srv['command'])
             text += 'args = [%s]\n' % ', '.join(q(arg) for arg in srv.get('args', []))
+            env = srv.get('env') or {}
+            if env:
+                text += '\n' + env_table_name(name) + '\n'
+                for key in sorted(env):
+                    text += '%s = %s\n' % (key, q(env[key]))
         else:
             text += 'url = %s\n' % q(srv.get('url') or '')
             if srv.get('auth') == 'oauth':
