@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.22.4"
+CAGE_VERSION="0.22.5"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -537,8 +537,9 @@ if [ "$NET_MODE" = "gate" ]; then
         > "$PROXY_OUTPUT" 2>"$PROXY_LOG" &
     PROXY_PID=$!
 
-    # Wait for proxy to be ready (up to 3 seconds)
-    for _ in $(seq 1 30); do
+    # Wait for proxy to be ready. Python startup can be slow after install or
+    # Docker image build, especially with pyenv-managed interpreters.
+    for _ in $(seq 1 150); do
         if grep -q "^READY" "$PROXY_OUTPUT" 2>/dev/null; then break; fi
         # Check if proxy already exited
         if ! kill -0 "$PROXY_PID" 2>/dev/null; then break; fi

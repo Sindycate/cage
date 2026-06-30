@@ -405,8 +405,7 @@ def main():
 
     def shutdown_handler(signum, frame):
         log("Shutting down")
-        server.shutdown()
-        sys.exit(0)
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
@@ -416,6 +415,8 @@ def main():
     except KeyboardInterrupt:
         log("Interrupted")
         server.shutdown()
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
