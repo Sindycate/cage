@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.22.1"
+CAGE_VERSION="0.22.2"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -246,7 +246,7 @@ fi
 _init_config_vars() {
     GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" HOST_AGENTS_DIR="" GH_AUTH="" GH_ACCOUNT=""
-    MCP_SERVERS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
+    MCP_SERVERS="" SKILL_MOUNTS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
     CAGE_PRESET="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS=""
 }
 
@@ -1019,10 +1019,32 @@ case "$CAGE_TOOL" in
         if [ -d "$CODEX_HOST_PATH" ]; then
             DOCKER_ARGS+=(-v "$CODEX_HOST_PATH:/host-codex:ro")
         fi
-        AGENTS_HOST_PATH="${HOST_AGENTS_DIR:-$HOME/.agents}"
-        AGENTS_HOST_PATH="${AGENTS_HOST_PATH/#\~/$HOME}"
-        if [ -d "$AGENTS_HOST_PATH" ]; then
-            DOCKER_ARGS+=(-v "$AGENTS_HOST_PATH:/host-agents:ro")
+        if [ -n "${SKILL_MOUNTS:-}" ]; then
+            CAGE_SKILL_NAMES=()
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                skill_name="${line%%=*}"
+                skill_path="${line#*=}"
+                if [ ! -d "$skill_path" ]; then
+                    echo "ERROR: selected skill '$skill_name' directory does not exist: $skill_path" >&2
+                    exit 1
+                fi
+                if [ ! -f "$skill_path/SKILL.md" ]; then
+                    echo "ERROR: selected skill '$skill_name' is missing SKILL.md: $skill_path" >&2
+                    exit 1
+                fi
+                DOCKER_ARGS+=(-v "$skill_path:/host-agent-skills/$skill_name:ro")
+                CAGE_SKILL_NAMES+=("$skill_name")
+            done <<< "${SKILL_MOUNTS}"
+            if [ ${#CAGE_SKILL_NAMES[@]} -gt 0 ]; then
+                DOCKER_ARGS+=(-e "CAGE_SKILL_NAMES=${CAGE_SKILL_NAMES[*]}")
+            fi
+        else
+            AGENTS_HOST_PATH="${HOST_AGENTS_DIR:-$HOME/.agents}"
+            AGENTS_HOST_PATH="${AGENTS_HOST_PATH/#\~/$HOME}"
+            if [ -d "$AGENTS_HOST_PATH" ]; then
+                DOCKER_ARGS+=(-v "$AGENTS_HOST_PATH:/host-agents:ro")
+            fi
         fi
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             DOCKER_ARGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")

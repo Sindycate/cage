@@ -117,9 +117,9 @@ cage config explain ~/projects/myapp
 cage config doctor --preset codex-company ~/projects/myapp
 ```
 
-`~/.config/cage/config.toml` is required for launches. `cage config explain` shows exactly which preset, auth block, MCP packs, env vars, mounts, and identity will be used.
+`~/.config/cage/config.toml` is required for launches. `cage config explain` shows exactly which preset, auth block, MCP packs, skill packs, env vars, mounts, and identity will be used.
 
-Use `cage --interactive ~/projects/myapp` for a one-shot ad-hoc launch. It prompts for the tool, auth block, identity, MCP packs, host commands, network mode, and Claude session sync from objects already defined in `config.toml`; it does not save or edit the config.
+Use `cage --interactive ~/projects/myapp` for a one-shot ad-hoc launch. It prompts for the tool, auth block, identity, MCP packs, Codex skill packs, host commands, network mode, and Claude session sync from objects already defined in `config.toml`; it does not save or edit the config.
 
 ```toml
 version = 1
@@ -131,12 +131,13 @@ net = "gate"
 [auth.codex-work]
 tool = "codex"
 host_codex_dir = "~/.codex-work"
-host_agents_dir = "~/.agents-work"
+host_agents_dir = "~/.agents"
 copy_auth = true
 
 [auth.codex-company-proxy]
 tool = "codex"
 host_codex_dir = "~/.codex-company"
+host_agents_dir = "~/.agents"
 copy_auth = false
 env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 
@@ -162,11 +163,20 @@ servers = [
   { name = "jira", type = "stdio", command = "npx -y @company/jira-mcp" },
 ]
 
+[skill_packs.agent-basics]
+source = "~/.agents"
+skills = ["agents-best-practices"]
+
+[skill_packs.external-systems]
+source = "~/.agents"
+skills = ["linear-ticket-flow", "dash0-dashboard-flow"]
+
 [presets.codex-work]
 tool = "codex"
 auth = "codex-work"
 identity = "work"
 mcp_packs = ["linear", "dash0", "local-tools"]
+skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
 
 [presets.codex-company-debug]
@@ -174,6 +184,7 @@ tool = "codex"
 auth = "codex-company-proxy"
 identity = "work"
 mcp_packs = ["linear"]
+skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
 
 [projects]
@@ -239,7 +250,7 @@ Codex using a separate host config directory:
 [auth.codex-work]
 tool = "codex"
 host_codex_dir = "~/.codex-work"
-host_agents_dir = "~/.agents-work"
+host_agents_dir = "~/.agents"
 copy_auth = true
 ```
 
@@ -274,13 +285,15 @@ env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 |-------|-------------------|--------|
 | Your repo | same absolute path as on host | **read-write** |
 | Codex host directory from preset auth | `/host-codex` | read-only |
+| Selected Codex skills from `skill_packs` | `/host-agent-skills/<name>` | read-only |
+| Legacy Codex agents directory *(only when no `skill_packs` are selected)* | `/host-agents` | read-only |
 | Docker volume (per-repo) | `/home/codex/.codex` | read-write |
 | SSH key (from preset identity) | `/home/codex/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/codex/.ssh/known_hosts` | read-only |
 
 Everything else — your home directory, OS config, other repos — is not accessible to the container.
 
-On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in.
+On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected.
 
 ## Git commit & push
 

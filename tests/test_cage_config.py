@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import pty
@@ -140,6 +141,106 @@ class CageConfigTests(unittest.TestCase):
 
         with self.assertRaises(cage_config.ConfigError):
             self.resolve(data)
+
+    def test_resolves_selected_skill_packs(self):
+        data = self.base_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            agents = Path(tmp) / ".agents"
+            for name in ["agents-best-practices", "linear-ticket-flow", "dash0-dashboard-flow"]:
+                skill_dir = agents / "skills" / name
+                skill_dir.mkdir(parents=True)
+                skill_dir.joinpath("SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: test\n---\n\n# Test\n",
+                    encoding="utf-8",
+                )
+            data["skill_packs"] = {
+                "agent-basics": {
+                    "source": str(agents),
+                    "skills": ["agents-best-practices"],
+                },
+                "external-systems": {
+                    "source": str(agents),
+                    "skills": ["linear-ticket-flow", "dash0-dashboard-flow"],
+                },
+            }
+            data["presets"]["codex-main"]["skill_packs"] = ["agent-basics", "external-systems"]
+
+            resolved = self.resolve(data)
+
+        self.assertEqual(resolved.skill_pack_names, ["agent-basics", "external-systems"])
+        self.assertEqual(
+            [skill["name"] for skill in resolved.skill_mounts],
+            ["agents-best-practices", "linear-ticket-flow", "dash0-dashboard-flow"],
+        )
+
+    def test_missing_skill_pack_is_rejected(self):
+        data = self.base_config()
+        data["presets"]["codex-main"]["skill_packs"] = ["missing"]
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "skill pack not found"):
+            self.resolve(data)
+
+    def test_missing_skill_md_is_rejected(self):
+        data = self.base_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            agents = Path(tmp) / ".agents"
+            (agents / "skills" / "linear-ticket-flow").mkdir(parents=True)
+            data["skill_packs"] = {
+                "external-systems": {
+                    "source": str(agents),
+                    "skills": ["linear-ticket-flow"],
+                },
+            }
+            data["presets"]["codex-main"]["skill_packs"] = ["external-systems"]
+
+            with self.assertRaisesRegex(cage_config.ConfigError, "missing SKILL.md"):
+                self.resolve(data)
+
+    def test_duplicate_skill_names_are_rejected(self):
+        data = self.base_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            agents = Path(tmp) / ".agents"
+            skill_dir = agents / "skills" / "linear-ticket-flow"
+            skill_dir.mkdir(parents=True)
+            skill_dir.joinpath("SKILL.md").write_text(
+                "---\nname: linear-ticket-flow\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+            data["skill_packs"] = {
+                "a": {"source": str(agents), "skills": ["linear-ticket-flow"]},
+                "b": {"source": str(agents), "skills": ["linear-ticket-flow"]},
+            }
+            data["presets"]["codex-main"]["skill_packs"] = ["a", "b"]
+
+            with self.assertRaisesRegex(cage_config.ConfigError, "duplicate skill name"):
+                self.resolve(data)
+
+    def test_explain_shows_selected_skill_packs(self):
+        data = self.base_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            agents = Path(tmp) / ".agents"
+            skill_dir = agents / "skills" / "linear-ticket-flow"
+            skill_dir.mkdir(parents=True)
+            skill_dir.joinpath("SKILL.md").write_text(
+                "---\nname: linear-ticket-flow\ndescription: test\n---\n",
+                encoding="utf-8",
+            )
+            data["skill_packs"] = {
+                "external-systems": {
+                    "source": str(agents),
+                    "skills": ["linear-ticket-flow"],
+                },
+            }
+            data["presets"]["codex-main"]["skill_packs"] = ["external-systems"]
+            resolved = self.resolve(data)
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                result = cage_config.explain(resolved, doctor=True)
+
+        self.assertEqual(result, 0)
+        self.assertIn("Skill packs: external-systems", out.getvalue())
+        self.assertIn("linear-ticket-flow", out.getvalue())
+        self.assertIn("Doctor: ok", out.getvalue())
 
     def test_missing_auth_reference_is_rejected(self):
         data = self.base_config()

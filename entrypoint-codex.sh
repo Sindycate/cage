@@ -184,9 +184,28 @@ PY
     chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 fi
 
-# Copy host ~/.agents/ (npm `skills` CLI registry) into the writable volume so
+# Copy selected skill packs when cage mounted explicit skill directories. This
+# keeps skill availability preset-scoped without copying the entire host
+# registry.
+if [ -n "${CAGE_SKILL_NAMES:-}" ]; then
+    AGENTS_DIR="$HOME/.agents"
+    SKILLS_DIR="$AGENTS_DIR/skills"
+    mkdir -p "$SKILLS_DIR"
+    for _skill_name in $CAGE_SKILL_NAMES; do
+        _src="/host-agent-skills/$_skill_name"
+        _dst="$SKILLS_DIR/$_skill_name"
+        if [ ! -d "$_src" ] || [ ! -f "$_src/SKILL.md" ]; then
+            echo "cage: selected skill mount is missing or invalid: $_skill_name" >&2
+            exit 1
+        fi
+        rm -rf "$_dst"
+        mkdir -p "$_dst"
+        cp -rf "$_src/." "$_dst/"
+    done
+    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
+# Copy host ~/.agents/ (npm `skills` CLI registry) into the writable home so
 # globally-installed skills (e.g. via `npx skills add ... -g`) are visible.
-if [ -d /host-agents ]; then
+elif [ -d /host-agents ]; then
     AGENTS_DIR="$HOME/.agents"
     mkdir -p "$AGENTS_DIR"
     cp -rf /host-agents/. "$AGENTS_DIR/"

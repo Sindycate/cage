@@ -16,7 +16,7 @@ def write_fake_docker(path: Path) -> None:
 case "$1" in
   ps) exit 0 ;;
   image) exit 0 ;;
-  run) echo "fake docker run"; exit 0 ;;
+  run) printf "fake docker run"; shift; for arg in "$@"; do printf " <%s>" "$arg"; done; printf "\\n"; exit 0 ;;
   build|pull|tag|volume) exit 0 ;;
 esac
 exit 0
@@ -113,6 +113,123 @@ class CageLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Preset:    codex-test", result.stdout)
         self.assertIn("fake docker run", result.stdout)
+
+    def test_skill_packs_mount_selected_skills_only(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            bin_dir = tmp_path / "bin"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            agents = home / ".agents"
+            bin_dir.mkdir(parents=True)
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            write_fake_docker(bin_dir / "docker")
+            for name in ["agents-best-practices", "linear-ticket-flow"]:
+                skill_dir = agents / "skills" / name
+                skill_dir.mkdir(parents=True)
+                skill_dir.joinpath("SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: test\n---\n",
+                    encoding="utf-8",
+                )
+            (cage_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-test"',
+                        "[auth.codex-test]",
+                        'tool = "codex"',
+                        f'host_agents_dir = "{agents}"',
+                        'copy_auth = false',
+                        "[skill_packs.agent-basics]",
+                        f'source = "{agents}"',
+                        'skills = ["agents-best-practices"]',
+                        "[skill_packs.external-systems]",
+                        f'source = "{agents}"',
+                        'skills = ["linear-ticket-flow"]',
+                        "[presets.codex-test]",
+                        'tool = "codex"',
+                        'auth = "codex-test"',
+                        'net = "open"',
+                        'skill_packs = ["agent-basics", "external-systems"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+            result = subprocess.run(
+                [str(CAGE), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{agents}/skills/agents-best-practices:/host-agent-skills/agents-best-practices:ro", result.stdout)
+        self.assertIn(f"{agents}/skills/linear-ticket-flow:/host-agent-skills/linear-ticket-flow:ro", result.stdout)
+        self.assertIn("CAGE_SKILL_NAMES=agents-best-practices linear-ticket-flow", result.stdout)
+        self.assertNotIn(":/host-agents:ro", result.stdout)
+
+    def test_without_skill_packs_mounts_legacy_agents_dir(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            tmp_path = Path(tmp)
+            xdg = tmp_path / "xdg"
+            home = tmp_path / "home"
+            bin_dir = tmp_path / "bin"
+            cage_dir = xdg / "cage"
+            repo = tmp_path / "repo"
+            agents = home / ".agents"
+            bin_dir.mkdir(parents=True)
+            cage_dir.mkdir(parents=True)
+            home.mkdir(parents=True)
+            repo.mkdir()
+            agents.mkdir()
+            write_fake_docker(bin_dir / "docker")
+            (cage_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "codex-test"',
+                        "[auth.codex-test]",
+                        'tool = "codex"',
+                        f'host_agents_dir = "{agents}"',
+                        'copy_auth = false',
+                        "[presets.codex-test]",
+                        'tool = "codex"',
+                        'auth = "codex-test"',
+                        'net = "open"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(xdg)
+            env["HOME"] = str(home)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+
+            result = subprocess.run(
+                [str(CAGE), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{agents}:/host-agents:ro", result.stdout)
+        self.assertNotIn("/host-agent-skills/", result.stdout)
 
     def test_profile_option_is_removed(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:

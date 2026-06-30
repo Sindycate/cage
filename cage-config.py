@@ -30,6 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on host Python
 
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SKILL_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 TABLE_RE = re.compile(r"^\s*\[[^\]]+\]\s*(?:#.*)?$")
 
 
@@ -47,6 +48,7 @@ class ResolvedConfig:
     auth_name: str = ""
     identity_name: str = ""
     mcp_pack_names: list[str] = field(default_factory=list)
+    skill_pack_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: str = ""
     claude_auth: str = ""
@@ -64,6 +66,7 @@ class ResolvedConfig:
     extra_env: list[str] = field(default_factory=list)
     stdio_mcp: list[dict[str, Any]] = field(default_factory=list)
     remote_mcp: list[dict[str, Any]] = field(default_factory=list)
+    skill_mounts: list[dict[str, str]] = field(default_factory=list)
     host_commands: list[dict[str, str]] = field(default_factory=list)
     extra_mounts: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -75,6 +78,7 @@ class InteractiveSelections:
     auth_name: str = ""
     identity_name: str = ""
     mcp_pack_names: list[str] = field(default_factory=list)
+    skill_pack_names: list[str] = field(default_factory=list)
     host_command_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: bool | None = None
@@ -137,6 +141,14 @@ def require_name(value: Any, label: str) -> str:
         raise ConfigError(f"{label} must be a non-empty string")
     if not NAME_RE.match(value):
         raise ConfigError(f"{label} has invalid characters: {value!r}")
+    return value
+
+
+def require_skill_name(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{label} must be a non-empty string")
+    if not SKILL_NAME_RE.match(value):
+        raise ConfigError(f"{label} must contain only lowercase letters, digits, and hyphens: {value!r}")
     return value
 
 
@@ -388,6 +400,11 @@ def mcp_pack_label(name: str, pack: dict[str, Any]) -> str:
     return f"{name} ({', '.join(servers)})" if servers else name
 
 
+def skill_pack_label(name: str, pack: dict[str, Any]) -> str:
+    skills = str_list_or_empty(pack.get("skills"))
+    return f"{name} ({', '.join(skills)})" if skills else name
+
+
 def host_command_label(name: str, command_def: dict[str, Any]) -> str:
     command = command_def.get("command")
     return f"{name} ({command})" if isinstance(command, str) and command else name
@@ -403,6 +420,8 @@ def build_interactive_preset(selections: InteractiveSelections) -> dict[str, Any
         preset["identity"] = selections.identity_name
     if selections.mcp_pack_names:
         preset["mcp_packs"] = selections.mcp_pack_names
+    if selections.skill_pack_names:
+        preset["skill_packs"] = selections.skill_pack_names
     if selections.host_command_names:
         preset["host_commands"] = selections.host_command_names
     if selections.net:
@@ -496,6 +515,20 @@ def interactive_select(
             str_list_or_empty(seed_for_tool.get("mcp_packs")),
         )
 
+        skill_pack_names: list[str] = []
+        if tool == "codex":
+            skill_packs = as_table(data, "skill_packs")
+            skill_choices = [
+                (name, skill_pack_label(name, skill_packs[name]))
+                for name in valid_named_tables(skill_packs)
+            ]
+            skill_pack_names = prompt_multi(
+                tty,
+                "Select skill packs (comma-separated, 0 for none, all for every pack)",
+                skill_choices,
+                str_list_or_empty(seed_for_tool.get("skill_packs")),
+            )
+
         host_command_defs = as_table(data, "host_commands")
         host_command_choices = [
             (name, host_command_label(name, host_command_defs[name]))
@@ -532,6 +565,7 @@ def interactive_select(
         auth_name=auth_name,
         identity_name=identity_name,
         mcp_pack_names=mcp_pack_names,
+        skill_pack_names=skill_pack_names,
         host_command_names=host_command_names,
         net=net,
         session_sync=session_sync,
@@ -551,6 +585,7 @@ def resolve_config(
     auths = as_table(data, "auth")
     identities = as_table(data, "identities")
     mcp_packs = as_table(data, "mcp_packs")
+    skill_packs = as_table(data, "skill_packs")
     host_command_defs = as_table(data, "host_commands")
     projects = as_table(data, "projects")
 
@@ -731,6 +766,36 @@ def resolve_config(
             else:
                 raise ConfigError(f"unsupported MCP server type for {name!r}: {server_type}")
 
+    skill_pack_names = as_str_list(preset.get("skill_packs"), f"presets.{preset_name}.skill_packs")
+    if skill_pack_names and tool != "codex":
+        raise ConfigError("skill_packs are only supported for Codex presets")
+    seen_skills: set[str] = set()
+    for pack_name in skill_pack_names:
+        require_name(pack_name, "skill pack name")
+        pack = skill_packs.get(pack_name)
+        if not isinstance(pack, dict):
+            raise ConfigError(f"skill pack not found: {pack_name}")
+        resolved.skill_pack_names.append(pack_name)
+        source_raw = pack.get("source") or resolved.host_agents_dir or "~/.agents"
+        if not isinstance(source_raw, str) or not source_raw:
+            raise ConfigError(f"skill_packs.{pack_name}.source must be a string")
+        if "\n" in source_raw:
+            raise ConfigError(f"skill_packs.{pack_name}.source cannot contain newlines")
+        source = Path(expand_path_string(source_raw))
+        skills = as_str_list(pack.get("skills"), f"skill_packs.{pack_name}.skills")
+        if not skills:
+            raise ConfigError(f"skill_packs.{pack_name}.skills must list at least one skill")
+        for raw_skill_name in skills:
+            skill_name = require_skill_name(raw_skill_name, f"skill in pack {pack_name}")
+            if skill_name in seen_skills:
+                raise ConfigError(f"duplicate skill name across selected packs: {skill_name}")
+            seen_skills.add(skill_name)
+            skill_dir = source / "skills" / skill_name
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                raise ConfigError(f"selected skill {skill_name!r} is missing SKILL.md at {skill_md}")
+            resolved.skill_mounts.append({"name": skill_name, "path": str(skill_dir)})
+
     seen_host_commands: set[str] = set()
     for item in as_list(preset.get("host_commands"), f"presets.{preset_name}.host_commands"):
         if isinstance(item, str):
@@ -780,6 +845,7 @@ def shell_assign(name: str, value: Any) -> str:
 
 def emit_shell(resolved: ResolvedConfig) -> None:
     mcp_servers = "\n".join(f"{s['name']}={s['command']}" for s in resolved.stdio_mcp)
+    skill_mounts = "\n".join(f"{s['name']}={s['path']}" for s in resolved.skill_mounts)
     host_commands = "\n".join(f"{c['name']}={c['command']}" for c in resolved.host_commands)
     extra_mounts = "\n".join(resolved.extra_mounts)
     remote_json = json.dumps(resolved.remote_mcp, separators=(",", ":"))
@@ -802,6 +868,7 @@ def emit_shell(resolved: ResolvedConfig) -> None:
         "GH_ACCOUNT": resolved.gh_account,
         "EXTRA_ENV": " ".join(resolved.extra_env),
         "MCP_SERVERS": mcp_servers,
+        "SKILL_MOUNTS": skill_mounts,
         "HOST_COMMANDS": host_commands,
         "EXTRA_MOUNTS": extra_mounts,
         "SESSION_SYNC": resolved.session_sync,
@@ -833,12 +900,18 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print(f"Identity: {resolved.identity_name}")
     if resolved.mcp_pack_names:
         print(f"MCP packs: {', '.join(resolved.mcp_pack_names)}")
+    if resolved.skill_pack_names:
+        print(f"Skill packs: {', '.join(resolved.skill_pack_names)}")
     if resolved.stdio_mcp or resolved.remote_mcp:
         print("MCP servers:")
         for server in resolved.stdio_mcp:
             print(f"  - {server['name']} (stdio bridge)")
         for server in resolved.remote_mcp:
             print(f"  - {format_server(server)}")
+    if resolved.skill_mounts:
+        print("Skills:")
+        for skill in resolved.skill_mounts:
+            print(f"  - {skill['name']} ({skill['path']})")
     if resolved.extra_env:
         print("Env forwarded:")
         for name in resolved.extra_env:
@@ -1053,13 +1126,13 @@ session_sync = true
 [auth.codex-work]
 tool = "codex"
 host_codex_dir = "~/.codex-work"
-host_agents_dir = "~/.agents-work"
+host_agents_dir = "~/.agents"
 copy_auth = true
 
 [auth.codex-company-proxy]
 tool = "codex"
 host_codex_dir = "~/.codex-company"
-host_agents_dir = "~/.agents-company"
+host_agents_dir = "~/.agents"
 copy_auth = false
 env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 
@@ -1080,11 +1153,20 @@ servers = [
   { name = "jira", type = "stdio", command = "npx -y @company/jira-mcp" },
 ]
 
+[skill_packs.agent-basics]
+source = "~/.agents"
+skills = ["agents-best-practices"]
+
+[skill_packs.external-systems]
+source = "~/.agents"
+skills = ["linear-ticket-flow", "dash0-dashboard-flow"]
+
 [presets.codex-work]
 tool = "codex"
 auth = "codex-work"
 identity = "work"
 mcp_packs = ["linear", "local-tools"]
+skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
 
 [presets.codex-company-debug]
@@ -1092,6 +1174,7 @@ tool = "codex"
 auth = "codex-company-proxy"
 identity = "work"
 mcp_packs = ["linear"]
+skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
 
 [projects]
