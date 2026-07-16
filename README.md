@@ -1,16 +1,22 @@
 # cage
 
-Run AI coding assistants ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex)) in Docker containers so they can only touch the repo you point them at — nothing else on your machine.
+Run AI coding assistants ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex)) in Docker containers to reduce the host filesystem blast radius of accidental or over-broad tool actions.
 
 Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 ## What it does
 
-- Runs Claude Code or Codex CLI inside a hardened Docker container (all capabilities dropped, no privilege escalation)
-- Only the target repo is mounted read-write — the sole blast radius
-- Auth credentials and tool settings are mounted read-only
+- Runs Claude Code or Codex CLI inside a Docker container with an isolated home
+- Mounts the target repo read-write and makes extra host mounts explicit
+- Reuses host credentials and settings automatically for a low-friction workflow
 - Per-repo persistent state via Docker volumes (sessions, onboarding survive restarts)
-- Reuses your host settings automatically
+
+Cage's current security boundary is designed primarily for accidental filesystem
+damage, not hostile repository code. Read-only credentials can still be read and
+used, `.git` is writable, host integrations extend authority outside the
+container, and proxy-based network gating can be deliberately bypassed. Read the
+[security model](SECURITY.md) before using Cage with untrusted code or powerful
+credentials.
 
 ## Requirements
 
@@ -82,8 +88,9 @@ cage codex -i ~/projects/myapp
 cage config explain ~/projects/myapp
 cage config doctor --preset codex-company ~/projects/myapp
 
-# Yolo mode — skip all permission prompts (safe because containerized)
-# Automatically enables domain-gated networking
+# Yolo mode — skip the coding tool's permission prompts
+# Automatically enables proxy-based domain approval, which is advisory rather
+# than enforced against code that ignores the proxy
 cage -y ~/projects/myapp
 cage codex -y ~/projects/myapp
 
@@ -271,7 +278,9 @@ env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 
 ## How it works
 
-`cage` is a small bash script that runs `docker run` with hardened security. Mounts vary by tool:
+`cage` is a host launcher around `docker run`. It constructs mounts, generated
+tool configuration, state synchronization, optional host integrations, and
+network mode from the selected central preset. Mounts vary by tool:
 
 **Claude Code** (`cage claude ~/repo`):
 
@@ -296,7 +305,10 @@ env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 | SSH key (from preset identity) | `/home/codex/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/codex/.ssh/known_hosts` | read-only |
 
-Everything else — your home directory, OS config, other repos — is not accessible to the container.
+Unlisted host paths are not directly mounted. Selected host commands/MCP bridges
+can still access the host with the configured command's authority, credentials
+can be used from inside the container, and enabled session/OAuth synchronization
+writes selected state back outside the repository. See [SECURITY.md](SECURITY.md).
 
 On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials in `.credentials.json` are synchronized by the host launcher before and after the run so refresh-token rotation persists outside the container volume.
 
@@ -320,7 +332,7 @@ identity = "work"
 ```
 
 **Limitations:**
-- SSH keys must be unencrypted (no passphrase) — ssh-agent is not available in the container
+- Passphrase-protected SSH keys prompt on each use because ssh-agent is not forwarded
 - Git push over SSH bypasses `--net gate` (raw TCP, not HTTP)
 - With `--net off`, push is blocked entirely (no network)
 
@@ -350,12 +362,11 @@ make install
 
 Docker images are rebuilt automatically on the next `cage` run after a version bump (the new versioned tag triggers a build).
 
-To force-rebuild Docker images (e.g., to pick up new tool versions):
+To force-rebuild the versioned image Cage actually launches:
 
 ```bash
-docker compose build --no-cache           # rebuild both images
-docker compose build --no-cache claude     # just Claude Code
-docker compose build --no-cache codex      # just Codex CLI
+cage --rebuild ~/path/to/repo
+cage codex --rebuild ~/path/to/repo
 ```
 
 ### Uninstall
@@ -386,16 +397,18 @@ docker volume rm codex-state-<name>
 
 ## Network gating
 
-With `--net gate`, all outbound HTTP/HTTPS from the container routes through a host-side proxy that prompts you before allowing access to new domains.
+With `--net gate`, proxy-aware HTTP/HTTPS clients receive a host-side proxy that
+prompts before allowing new domains. This is an approval and visibility helper,
+not enforced egress isolation: code can ignore the proxy environment variables.
 
 **How it works:**
-1. A Python proxy starts on the host and binds to a random port
-2. The container gets `HTTP_PROXY`/`HTTPS_PROXY` env vars pointing to it
+1. A Python proxy starts on the host on a random port with a fresh per-launch credential
+2. The container gets authenticated `HTTP_PROXY`/`HTTPS_PROXY` URLs pointing to it; no manual credential setup is required
 3. When Claude Code (or any tool) tries to reach a new domain, a macOS dialog pops up
 4. You choose: **Allow (project)**, **Allow (always)**, or **Deny**
 5. The connection is held open during the prompt — no failed first request
 
-**Pre-allowed domains:** AWS infrastructure (`*.amazonaws.com`, `*.amazontrust.com`, `*.cloudfront.net`) and OpenAI API (`*.openai.com`, `*.oaiusercontent.com`, `*.oaistatic.com`) are always allowed.
+**Pre-allowed domains:** AWS infrastructure (`*.amazonaws.com`, `*.amazontrust.com`, `*.cloudfront.net`) and OpenAI API (`*.openai.com`, `*.oaiusercontent.com`, `*.oaistatic.com`) are allowed without a prompt. Some are broad shared-hosting domains; use `--net off` when deliberate exfiltration resistance is required.
 
 **Allowlist storage:**
 - Global (all projects): `~/.claude/netgate/global.json`
@@ -408,4 +421,7 @@ With `--net gate`, all outbound HTTP/HTTPS from the container routes through a h
 
 - Network gating dialogs use native macOS popups (`osascript`); on Linux, prompts appear in the terminal
 - Network gating only covers HTTP/HTTPS via proxy env vars — raw TCP, SSH, and DNS bypass the proxy
-- The mounted repo is still fully writable — but it's git-tracked, so worst case you `git checkout .`
+- The per-launch proxy credential prevents unrelated local/LAN clients from using Netgate, but any process in the selected container can read and use that credential
+- The repository, including `.git`, ignored files, and untracked files, is fully writable; `git checkout .` is not a complete recovery mechanism
+- Read-only credential mounts prevent modification, not reading, use, copying, or exfiltration
+- MCP/host-command bridges and external connector actions extend the blast radius beyond local files

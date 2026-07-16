@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!Dockerfile.codex
+!entrypoint.sh
+!entrypoint-codex.sh
+!mcp-relay
+!host-cmd-relay

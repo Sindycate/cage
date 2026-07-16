@@ -5,27 +5,13 @@ LIBDIR  ?= $(PREFIX)/share/cage
 VERSION  := $(shell grep '^CAGE_VERSION=' cage | cut -d'"' -f2)
 REGISTRY := ghcr.io/sindycate/cage
 
-DIST_FILES = cage cage-config.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay docker-compose.yml \
-             Dockerfile Dockerfile.codex \
-             entrypoint.sh entrypoint-codex.sh
-
 .PHONY: install uninstall build rebuild pull version
 
 install:
-	mkdir -p $(LIBDIR) $(BINDIR)
-	rm -f $(LIBDIR)/cage-setup.sh $(LIBDIR)/cage-profiles.sh
-	cp $(DIST_FILES) $(LIBDIR)/
-	cp -r netgate $(LIBDIR)/
-	chmod +x $(LIBDIR)/cage $(LIBDIR)/cage-config.py $(LIBDIR)/cage-netgate.sh $(LIBDIR)/netgate-proxy.py $(LIBDIR)/mcp-bridge.py $(LIBDIR)/mcp-relay $(LIBDIR)/host-cmd-bridge.py $(LIBDIR)/host-cmd-relay
-	ln -sf $(LIBDIR)/cage $(BINDIR)/cage
-	mkdir -p $(HOME)/.config/cage
-	@echo "Installed cage $(VERSION) to $(BINDIR)/cage"
-	@echo "Make sure $(BINDIR) is in your PATH."
+	CAGE_INSTALL_DIR="$(LIBDIR)" CAGE_BIN_DIR="$(BINDIR)" ./install.sh --from-source
 
 uninstall:
-	rm -f $(BINDIR)/cage
-	rm -rf $(LIBDIR)
-	@echo "Uninstalled cage. Config at ~/.config/cage/ preserved."
+	CAGE_INSTALL_DIR="$(LIBDIR)" CAGE_BIN_DIR="$(BINDIR)" ./install.sh --uninstall
 
 build:
 	docker compose build

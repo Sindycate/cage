@@ -37,7 +37,7 @@ _netgate_repo_hash() {
 _netgate_read_json() {
     local file="$1"
     [ -f "$file" ] || return 0
-    python3 -c "
+    python3 -I -c "
 import json, sys
 try:
     data = json.load(open(sys.argv[1]))
@@ -50,7 +50,7 @@ except (json.JSONDecodeError, OSError):
 
 _netgate_add_entry() {
     local file="$1" key="$2" domain="$3"
-    python3 -c "
+    python3 -I -c "
 import json, os, sys
 path, key, domain = sys.argv[1], sys.argv[2], sys.argv[3]
 data = {}
@@ -73,7 +73,7 @@ with open(path, 'w') as f:
 _netgate_remove_entry() {
     local file="$1" domain="$2"
     [ -f "$file" ] || return 1
-    python3 -c "
+    python3 -I -c "
 import json, sys
 path, domain = sys.argv[1], sys.argv[2]
 try:
@@ -96,7 +96,7 @@ with open(path, 'w') as f:
 _netgate_remove_from_denied() {
     local file="$1" domain="$2"
     [ -f "$file" ] || return 0
-    python3 -c "
+    python3 -I -c "
 import json, sys
 path, domain = sys.argv[1], sys.argv[2]
 try:

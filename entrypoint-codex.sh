@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 # Match container user to host UID/GID for correct file ownership
 TARGET_USER="codex"
@@ -11,13 +12,21 @@ if [ -n "${HOST_GID:-}" ] && [ "$(id -g "$TARGET_USER")" != "$HOST_GID" ]; then
 fi
 
 # Ensure home dir and volume are owned by the (possibly remapped) user
-chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true
+chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true
 
 CODEX_DIR="$HOME/.codex"
 mkdir -p "$CODEX_DIR"
+chmod 700 "$CODEX_DIR" 2>/dev/null || true
 
 # Use WORKSPACE_DIR so each project gets a unique identity
 WORK_DIR="${WORKSPACE_DIR:-/workspace}"
+
+# Persistent state belongs to the previous model process. Remove an unsafe
+# config destination before any root read or append; normal regular state is
+# preserved until the host copy/reconciler replaces it.
+if [ -L "$CODEX_DIR/config.toml" ] || { [ -e "$CODEX_DIR/config.toml" ] && [ ! -f "$CODEX_DIR/config.toml" ]; }; then
+    rm -rf -- "$CODEX_DIR/config.toml"
+fi
 
 # Check if workspace was already trusted (from a previous run)
 WAS_TRUSTED=0
@@ -26,39 +35,92 @@ if [ -f "$CODEX_DIR/config.toml" ] && grep -q "projects\\.\"${WORK_DIR}\"" "$COD
 fi
 
 # Copy host Codex config into the writable volume. When copy_auth is disabled,
-# only auth.json is skipped. Codex MCP OAuth's .credentials.json is also
+# auth.json is explicitly removed. Codex MCP OAuth's .credentials.json is also
 # reconciled by the host launcher before/after the container runs so rotated
 # refresh tokens do not diverge between the host Codex dir and this volume.
+reconcile_codex_auth() {
+    local host_dir="$1"
+    local codex_dir="$2"
+    local copy_auth="$3"
+    local destination="$codex_dir/auth.json"
+
+    # Remove first so a disabled/missing source cannot fall back to credentials
+    # retained by this repository volume from a different preset.
+    rm -rf -- "$destination"
+    if [ "$copy_auth" != "0" ] && [ -f "$host_dir/auth.json" ]; then
+        install -m 600 "$host_dir/auth.json" "$destination"
+    fi
+}
+
+copy_host_codex_entry() {
+    local source="$1"
+    local name="$2"
+    local destination="$CODEX_DIR/$name"
+    rm -rf -- "$destination"
+    case "$name" in
+        config.toml|.credentials.json|instructions.md)
+            [ -f "$source" ] || {
+                echo "cage: expected regular host Codex state: $name" >&2
+                return 1
+            }
+            install -m 600 -- "$source" "$destination"
+            ;;
+        *)
+            cp -a --no-dereference -- "$source" "$destination"
+            ;;
+    esac
+}
+
 if [ -d /host-codex ]; then
     for f in /host-codex/*; do
         [ -e "$f" ] || continue
         name="$(basename "$f")"
-        [ "${CODEX_COPY_AUTH:-1}" = "0" ] && [ "$name" = "auth.json" ] && continue
-        cp -rf "$f" "$CODEX_DIR/"
+        [ "$name" = "auth.json" ] && continue
+        copy_host_codex_entry "$f" "$name"
     done
     # Also copy dotfiles
     for f in /host-codex/.*; do
         [ -e "$f" ] || continue
         name="$(basename "$f")"
         [ "$name" = "." ] || [ "$name" = ".." ] && continue
-        cp -rf "$f" "$CODEX_DIR/"
+        copy_host_codex_entry "$f" "$name"
     done
     # cp ran as root and preserved host mode bits; re-own so the codex user can read them
-    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
+    chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 fi
 
-# Add MCP servers selected by cage's central config into the writable container
-# config only. Host ~/.codex/config.toml remains untouched.
-if [ -n "${CAGE_MCP_SERVERS:-}" ] || [ -n "${CAGE_REMOTE_MCP_SERVERS:-}" ]; then
-    CODEX_CONFIG_PATH="$CODEX_DIR/config.toml" python3 - <<'PY'
+reconcile_codex_auth /host-codex "$CODEX_DIR" "${CODEX_COPY_AUTH:-1}"
+for _sensitive_file in auth.json .credentials.json config.toml; do
+    [ -f "$CODEX_DIR/$_sensitive_file" ] && chmod 600 "$CODEX_DIR/$_sensitive_file"
+done
+
+# Reconcile MCP servers selected by cage's central config into a marked,
+# generated block. This always runs so switching to a preset with no MCP pack
+# removes Cage's previous block while leaving host/user TOML untouched.
+CODEX_CONFIG_PATH="$CODEX_DIR/config.toml" python3 -I - <<'PY'
 import json
 import os
 import re
 import sys
+import tempfile
+import tomllib
 from pathlib import Path
 
 path = Path(os.environ["CODEX_CONFIG_PATH"])
-text = path.read_text() if path.exists() else ""
+original_text = path.read_text() if path.exists() else ""
+managed_start = "# BEGIN CAGE MANAGED MCP SERVERS"
+managed_end = "# END CAGE MANAGED MCP SERVERS"
+
+
+def strip_managed_blocks(src):
+    pattern = re.compile(
+        r"(?ms)^[ \t]*%s[ \t]*\n.*?^[ \t]*%s[ \t]*(?:\n|$)"
+        % (re.escape(managed_start), re.escape(managed_end))
+    )
+    return pattern.sub("", src)
+
+
+text = strip_managed_blocks(original_text)
 
 def q(value):
     return json.dumps(str(value))
@@ -72,13 +134,36 @@ def oauth_table_name(name):
 def env_table_name(name):
     return '[mcp_servers.%s.env]' % q(name)
 
+
 def existing_mcp_names(src):
-    names = set()
-    for match in re.finditer(r'(?m)^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*(?:#.*)?$', src):
-        names.add(match.group(1))
-    for match in re.finditer(r'(?m)^\s*\[mcp_servers\."([^"]+)"\]\s*(?:#.*)?$', src):
-        names.add(match.group(1))
-    return names
+    try:
+        parsed = tomllib.loads(src)
+    except tomllib.TOMLDecodeError as exc:
+        sys.stderr.write("cage: cannot reconcile MCP servers in invalid Codex config: %s\n" % exc)
+        sys.exit(1)
+    servers = parsed.get("mcp_servers", {})
+    return set(servers) if isinstance(servers, dict) else set()
+
+
+def write_text_atomic(destination, value):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".%s." % destination.name,
+        dir=str(destination.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as tmp:
+            tmp.write(value)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, destination)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
 
 def ensure_rmcp_feature(src):
     if 'experimental_use_rmcp_client' in src:
@@ -113,13 +198,15 @@ if os.environ.get('CAGE_MCP_SERVERS'):
         port_env = 'MCP_BRIDGE_PORT_%s' % name.upper().replace('-', '_')
         bridge_host = os.environ.get('MCP_BRIDGE_HOST')
         bridge_port = os.environ.get(port_env)
-        if not bridge_host or not bridge_port:
+        bridge_token = os.environ.get('MCP_BRIDGE_TOKEN')
+        if not bridge_host or not bridge_port or not bridge_token:
             sys.stderr.write(
                 'cage: bridged MCP server %r is missing bridge env var(s): %s\n'
                 % (name, ', '.join(
                     key for key, value in (
                         ('MCP_BRIDGE_HOST', bridge_host),
                         (port_env, bridge_port),
+                        ('MCP_BRIDGE_TOKEN', bridge_token),
                     )
                     if not value
                 ))
@@ -133,6 +220,7 @@ if os.environ.get('CAGE_MCP_SERVERS'):
             'env': {
                 'MCP_BRIDGE_HOST': bridge_host,
                 port_env: bridge_port,
+                'MCP_BRIDGE_TOKEN': bridge_token,
             },
         })
 
@@ -183,6 +271,7 @@ if new_servers:
     text = ensure_rmcp_feature(text)
     if text and not text.endswith('\n'):
         text += '\n'
+    text += '\n' + managed_start + '\n'
     for srv in new_servers:
         name = srv.get('name')
         if not name:
@@ -208,12 +297,13 @@ if new_servers:
                     text += 'client_id = %s\n' % q(srv['oauth_client_id'])
             elif srv.get('bearer_token_env_var'):
                 text += 'bearer_token_env_var = %s\n' % q(srv['bearer_token_env_var'])
+    text += managed_end + '\n'
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(text)
+if path.exists() or text != original_text:
+    write_text_atomic(path, text)
 PY
-    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
-fi
+chmod 600 "$CODEX_DIR/config.toml" 2>/dev/null || true
+chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 
 # Copy selected skill packs when cage mounted explicit skill directories. This
 # keeps skill availability preset-scoped without copying the entire host
@@ -233,25 +323,32 @@ if [ -n "${CAGE_SKILL_NAMES:-}" ]; then
         mkdir -p "$_dst"
         cp -rf "$_src/." "$_dst/"
     done
-    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
+    chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
 # Copy host ~/.agents/ (npm `skills` CLI registry) into the writable home so
 # globally-installed skills (e.g. via `npx skills add ... -g`) are visible.
 elif [ -d /host-agents ]; then
     AGENTS_DIR="$HOME/.agents"
     mkdir -p "$AGENTS_DIR"
     cp -rf /host-agents/. "$AGENTS_DIR/"
-    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
+    chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$AGENTS_DIR" 2>/dev/null || true
 fi
 
-# Inject cage container context into instructions.md
-cat > "$CODEX_DIR/instructions.md" <<'CAGE_EOF'
+# Inject Cage context through a same-directory atomic replacement so a symlink
+# planted in persistent model-owned state cannot redirect the root write.
+_codex_instructions_tmp="$(mktemp "$CODEX_DIR/.instructions.md.cage.XXXXXX")"
+cat > "$_codex_instructions_tmp" <<'CAGE_EOF'
 # Container Environment (cage)
 You are running inside a Docker container managed by cage.
 - You have passwordless `sudo` access — use `sudo apt-get install -y <package>` to install any system packages you need (e.g., playwright, build tools, native libraries)
 - Python 3, Node.js (LTS), and npm are pre-installed
-- Only the workspace directory is writable on the host filesystem
+- The workspace and any mounts explicitly marked read-write can modify host files; the workspace includes writable Git metadata
+- Read-only credential mounts can still be read and used, and selected host MCP/command bridges execute with host authority
+- Cage may reconcile selected session and OAuth state back to host-owned locations after the tool exits
 - `pip install` and `npm install` work without sudo
 CAGE_EOF
+chmod 600 "$_codex_instructions_tmp"
+chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$_codex_instructions_tmp" 2>/dev/null || true
+mv -fT -- "$_codex_instructions_tmp" "$CODEX_DIR/instructions.md"
 
 # Restore workspace trust if it was previously granted but lost by the copy
 if [ "$WAS_TRUSTED" -eq 1 ] && ! grep -q "projects\\.\"${WORK_DIR}\"" "$CODEX_DIR/config.toml" 2>/dev/null; then
@@ -289,7 +386,7 @@ if [ -d /host-gh ]; then
     GH_CONFIG_DIR="${HOME}/.config/gh"
     mkdir -p "$GH_CONFIG_DIR"
     cp -rf /host-gh/* "$GH_CONFIG_DIR/" 2>/dev/null || true
-    chown -R "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$GH_CONFIG_DIR" 2>/dev/null || true
+    chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$GH_CONFIG_DIR" 2>/dev/null || true
 fi
 
 # Host command bridge shims: write /usr/local/bin/<name> for each entry in

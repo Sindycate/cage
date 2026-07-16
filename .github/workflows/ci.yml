@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Run Docker integration smoke tests
+        if: matrix.python-version == '3.12'
+        env:
+          CAGE_RUN_DOCKER_SMOKE: '1'
+        run: python -m pytest -q tests/test_docker_smoke.py
+
+      - name: Check Python syntax
+        run: python -m py_compile cage-config.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
+
+      - name: Check shell syntax
+        run: bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh
+
+      - name: Validate Compose configuration
+        run: docker compose config

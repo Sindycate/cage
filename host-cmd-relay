@@ -1,55 +1,163 @@
 #!/usr/bin/env python3
-"""Relay stdin/stdout to the host command bridge on the host.
+"""Run one configured host command through Cage's authenticated bridge."""
 
-Unlike mcp-relay, this relay is used for one-shot commands that may not
-read stdin. When stdin closes, we must NOT exit — we keep draining the
-socket so the command's stdout reaches the caller before we terminate.
-
-We also do NOT call sock.shutdown(SHUT_WR) on stdin EOF: Docker Desktop's
-vpnkit NAT on macOS turns a half-close into a full close for the peer,
-which causes the bridge to lose the subprocess's still-in-flight stdout.
-Instead we just stop watching stdin; the bridge closes the connection
-when the subprocess exits.
-"""
+import json
 import os
-import select
+import re
 import socket
+import struct
 import sys
+import threading
+import time
 
 BUFSIZE = 65536
+HANDSHAKE_PREFIX = b"CAGE-HOSTCMD/1 "
+MAX_RESPONSE_BYTES = 16
+FRAME_HEADER = struct.Struct("!cI")
+FRAME_ARGV = b"A"
+FRAME_STDIN = b"I"
+FRAME_STDIN_EOF = b"E"
+FRAME_STDOUT = b"O"
+FRAME_STDERR = b"R"
+FRAME_EXIT = b"X"
+FRAME_ERROR = b"!"
+MAX_FRAME_BYTES = 64 * 1024
+MAX_ARG_COUNT = 128
+MAX_ARG_BYTES = 16 * 1024
+MAX_ARGV_BYTES = 64 * 1024
+NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
 
-name = sys.argv[1].upper().replace("-", "_")
-host = os.environ["HOST_CMD_BRIDGE_HOST"]
-port = int(os.environ[f"HOST_CMD_BRIDGE_PORT_{name}"])
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((host, port))
-sock.setblocking(False)
+def read_line(sock, maximum, timeout_seconds):
+    data = bytearray()
+    deadline = time.monotonic() + timeout_seconds
+    while len(data) <= maximum:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("authentication response timed out")
+        sock.settimeout(remaining)
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if chunk == b"\n":
+            break
+    return bytes(data)
 
-stdin_fd = sys.stdin.buffer.fileno()
-stdout = sys.stdout.buffer
-stdin_open = True
 
-try:
-    while True:
-        watch = [sock]
-        if stdin_open:
-            watch.append(stdin_fd)
-        readable, _, _ = select.select(watch, [], [])
-        for fd in readable:
-            if fd is sock:
-                data = sock.recv(BUFSIZE)
-                if not data:
-                    sys.exit(0)
-                stdout.write(data)
-                stdout.flush()
+def recv_exact(sock, size):
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            raise EOFError("bridge connection closed before process status")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def recv_frame(sock):
+    kind, size = FRAME_HEADER.unpack(recv_exact(sock, FRAME_HEADER.size))
+    if size > MAX_FRAME_BYTES:
+        raise ValueError("bridge response frame is too large")
+    return kind, recv_exact(sock, size)
+
+
+def send_frame(sock, kind, payload=b""):
+    sock.sendall(FRAME_HEADER.pack(kind, len(payload)) + payload)
+
+
+def encoded_argv(arguments):
+    if len(arguments) > MAX_ARG_COUNT:
+        raise ValueError(f"at most {MAX_ARG_COUNT} arguments are supported")
+    total = 0
+    for argument in arguments:
+        encoded = argument.encode("utf-8")
+        total += len(encoded)
+        if len(encoded) > MAX_ARG_BYTES or "\x00" in argument:
+            raise ValueError("argument is too large or contains NUL")
+    payload = json.dumps(arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if total > MAX_ARGV_BYTES or len(payload) > MAX_ARGV_BYTES:
+        raise ValueError("arguments exceed the aggregate size limit")
+    return payload
+
+
+def main():
+    if len(sys.argv) < 2 or not NAME_PATTERN.fullmatch(sys.argv[1]):
+        print("host-cmd-relay: expected a valid command name", file=sys.stderr)
+        return 64
+    try:
+        argv_payload = encoded_argv(sys.argv[2:])
+    except ValueError as exc:
+        print(f"host-cmd-relay: {exc}", file=sys.stderr)
+        return 64
+
+    key = sys.argv[1].upper().replace("-", "_")
+    try:
+        host = os.environ["HOST_CMD_BRIDGE_HOST"]
+        port = int(os.environ[f"HOST_CMD_BRIDGE_PORT_{key}"])
+        token = os.environ["HOST_CMD_BRIDGE_TOKEN"]
+    except (KeyError, ValueError):
+        print("host-cmd-relay: bridge configuration is incomplete", file=sys.stderr)
+        return 78
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        print("host-cmd-relay: bridge authentication token is invalid", file=sys.stderr)
+        return 78
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(5.0)
+        sock.connect((host, port))
+        sock.sendall(HANDSHAKE_PREFIX + token.encode("ascii") + b"\n")
+        if read_line(sock, MAX_RESPONSE_BYTES, 5.0) != b"OK\n":
+            print("host-cmd-relay: bridge authentication failed", file=sys.stderr)
+            return 77
+        sock.settimeout(None)
+        send_frame(sock, FRAME_ARGV, argv_payload)
+
+        def send_stdin():
+            try:
+                while True:
+                    data = os.read(sys.stdin.buffer.fileno(), BUFSIZE)
+                    if not data:
+                        send_frame(sock, FRAME_STDIN_EOF)
+                        return
+                    send_frame(sock, FRAME_STDIN, data)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
+        stdin_thread = threading.Thread(target=send_stdin, daemon=True)
+        stdin_thread.start()
+
+        while True:
+            kind, payload = recv_frame(sock)
+            if kind == FRAME_STDOUT:
+                sys.stdout.buffer.write(payload)
+                sys.stdout.buffer.flush()
+            elif kind == FRAME_STDERR:
+                sys.stderr.buffer.write(payload)
+                sys.stderr.buffer.flush()
+            elif kind == FRAME_ERROR:
+                sys.stderr.write(payload.decode("utf-8", "replace") + "\n")
+                sys.stderr.flush()
+            elif kind == FRAME_EXIT:
+                try:
+                    status = json.loads(payload.decode("ascii"))
+                    code = int(status["code"])
+                except (UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    print("host-cmd-relay: invalid process status from bridge", file=sys.stderr)
+                    return 74
+                return max(0, min(255, code))
             else:
-                data = os.read(stdin_fd, BUFSIZE)
-                if not data:
-                    stdin_open = False
-                else:
-                    sock.sendall(data)
-except (BrokenPipeError, ConnectionResetError, OSError):
-    pass
-finally:
-    sock.close()
+                print("host-cmd-relay: unexpected bridge response", file=sys.stderr)
+                return 74
+    except KeyboardInterrupt:
+        return 130
+    except (EOFError, BrokenPipeError, ConnectionResetError, OSError, TimeoutError, ValueError) as exc:
+        print(f"host-cmd-relay: bridge connection failed: {exc}", file=sys.stderr)
+        return 74
+    finally:
+        sock.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

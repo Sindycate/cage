@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.22.5"
+CAGE_VERSION="0.23.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -25,18 +25,19 @@ _trim_preserving_quotes() {
 }
 
 # Top-level flags (before subcommand)
+SHOW_HELP=0
 case "${1:-}" in
     --version|-V) echo "cage $CAGE_VERSION"; exit 0 ;;
-    --help|-h)    set -- ;;  # clear args to trigger usage below
+    --help|-h)    SHOW_HELP=1; set -- ;;  # clear args to trigger usage below
     setup|--setup)
         shift
-        python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" init "$@"; exit $? ;;
+        python3 -I "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" init "$@"; exit $? ;;
     config|--config)
         shift
-        python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" "$@"; exit $? ;;
+        python3 -I "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" "$@"; exit $? ;;
     mcp|--mcp)
         shift
-        python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" mcp "$@"; exit $? ;;
+        python3 -I "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" mcp "$@"; exit $? ;;
     netgate|--netgate)
         shift
         source "$SCRIPT_DIR/cage-netgate.sh"; exit $? ;;
@@ -46,7 +47,7 @@ case "${1:-}" in
         _upd_tool="${1:-}"
         if [ -z "$_upd_tool" ]; then
             if [ -f "$CAGE_CONFIG_DIR/config.toml" ]; then
-                _upd_tool="$(python3 "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" default-tool 2>/dev/null)" || true
+                _upd_tool="$(python3 -I "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" default-tool 2>/dev/null)" || true
             fi
             _upd_tool="${_upd_tool:-claude}"
         fi
@@ -108,6 +109,15 @@ EXTRA_MOUNT_SPECS=()   # entries are "ro<TAB><path>" / "rw<TAB><path>" from CLI 
 
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
+        --)
+            shift
+            break
+            ;;
+        --help|-h)
+            SHOW_HELP=1
+            set --
+            break
+            ;;
         -y|--yolo)
             YOLO=1
             shift
@@ -117,7 +127,8 @@ while [[ "${1:-}" == -* ]]; do
             shift
             ;;
         --net)
-            NET_MODE="${2:-gate}"
+            [ -n "${2:-}" ] || { echo "Missing mode after --net" >&2; exit 1; }
+            NET_MODE="$2"
             shift 2
             ;;
         --net=*)
@@ -221,6 +232,7 @@ if [ $# -lt 1 ]; then
     echo "  cage --mount-ro ~/code/shared-lib ~/projects/myapp"
     echo "  cage ~/projects/myapp --resume"
     echo "  cage ~/projects/myapp -p 'explain this codebase'"
+    [ "$SHOW_HELP" -eq 1 ] && exit 0
     exit 1
 fi
 
@@ -271,7 +283,7 @@ _load_config() {
         [ -n "${CAGE_PRESET_FLAG:-}" ] && resolve_args+=(--preset "$CAGE_PRESET_FLAG")
     fi
     [ -n "${CAGE_TOOL:-}" ] && resolve_args+=(--tool "$CAGE_TOOL")
-    eval "$(python3 "$SCRIPT_DIR/cage-config.py" "${resolve_args[@]}")"
+    eval "$(python3 -I "$SCRIPT_DIR/cage-config.py" "${resolve_args[@]}")"
 }
 
 _load_config
@@ -531,11 +543,13 @@ PROXY_ARGS=()
 if [ "$NET_MODE" = "gate" ]; then
     PROXY_OUTPUT=$(mktemp)
     PROXY_LOG=$(mktemp)
-    python3 "$SCRIPT_DIR/netgate-proxy.py" \
+    PROXY_TOKEN="$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')"
+    CAGE_NETGATE_AUTH_TOKEN="$PROXY_TOKEN" python3 -I "$SCRIPT_DIR/netgate-proxy.py" \
         --project-hash "$REPO_HASH" \
         --container-name "$CONTAINER_NAME" \
         > "$PROXY_OUTPUT" 2>"$PROXY_LOG" &
     PROXY_PID=$!
+    trap cleanup_proxy EXIT
 
     # Wait for proxy to be ready. Python startup can be slow after install or
     # Docker image build, especially with pyenv-managed interpreters.
@@ -557,7 +571,7 @@ if [ "$NET_MODE" = "gate" ]; then
     PROXY_PORT=$(grep "^PORT=" "$PROXY_OUTPUT" | head -1 | cut -d= -f2)
     rm -f "$PROXY_OUTPUT"
 
-    PROXY_URL="http://host.docker.internal:${PROXY_PORT}"
+    PROXY_URL="http://cage:${PROXY_TOKEN}@host.docker.internal:${PROXY_PORT}"
     NET_LABEL=" [NET:GATED :${PROXY_PORT}]"
 
     PROXY_ARGS=(
@@ -582,13 +596,15 @@ fi
 MCP_BRIDGE_PID=""
 MCP_BRIDGE_ARGS=()
 MCP_LABEL=""
-MCP_JSON_BACKUP=""
+MCP_PROJECT_CONFIG=""
+MCP_BRIDGE_TOKEN=""
 
 cleanup_mcp_bridge() {
-    # Restore .mcp.json if we patched it
-    if [ -n "$MCP_JSON_BACKUP" ] && [ -f "$MCP_JSON_BACKUP" ]; then
-        cp "$MCP_JSON_BACKUP" "$REPO_PATH/.mcp.json"
-        rm -f "$MCP_JSON_BACKUP"
+    # The generated project MCP config is mounted read-only inside the
+    # container and never written into the host repository.
+    if [ -n "${MCP_PROJECT_CONFIG:-}" ]; then
+        rm -f "$MCP_PROJECT_CONFIG"
+        MCP_PROJECT_CONFIG=""
     fi
     if [ -n "$MCP_BRIDGE_PID" ] && kill -0 "$MCP_BRIDGE_PID" 2>/dev/null; then
         kill "$MCP_BRIDGE_PID" 2>/dev/null
@@ -606,7 +622,15 @@ if [ -n "${MCP_SERVERS:-}" ]; then
     if [ "$NET_MODE" = "off" ]; then
         echo "WARNING: stdio MCP servers ignored — network is disabled (--net off)" >&2
     else
-        BRIDGE_ARGS=()
+        BRIDGE_ARGS=(--deny-executable-root "$REPO_PATH")
+        for _mount_entry in "${_EXTRA_MOUNT_SEEN[@]+"${_EXTRA_MOUNT_SEEN[@]}"}"; do
+            if [ "${_mount_entry%%$'\t'*}" = "rw" ]; then
+                BRIDGE_ARGS+=(--deny-executable-root "${_mount_entry#*$'\t'}")
+            fi
+        done
+        for _bridge_env_name in $EXTRA_ENV; do
+            BRIDGE_ARGS+=(--pass-env "$_bridge_env_name")
+        done
         while IFS= read -r line; do
             line="$(_trim_preserving_quotes "$line")"
             [ -z "$line" ] && continue
@@ -618,9 +642,14 @@ if [ -n "${MCP_SERVERS:-}" ]; then
         if [ ${#BRIDGE_ARGS[@]} -gt 0 ]; then
             MCP_BRIDGE_OUTPUT=$(mktemp)
             MCP_BRIDGE_LOG=$(mktemp)
-            python3 "$SCRIPT_DIR/mcp-bridge.py" "${BRIDGE_ARGS[@]}" \
+            MCP_BRIDGE_TOKEN="$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')"
+            CAGE_BRIDGE_AUTH_TOKEN="$MCP_BRIDGE_TOKEN" \
+                python3 -I "$SCRIPT_DIR/mcp-bridge.py" "${BRIDGE_ARGS[@]}" \
                 > "$MCP_BRIDGE_OUTPUT" 2>"$MCP_BRIDGE_LOG" &
             MCP_BRIDGE_PID=$!
+            # Install cleanup immediately so interrupts during startup cannot
+            # strand the host bridge or its generated overlay.
+            trap 'cleanup_mcp_bridge; cleanup_proxy' EXIT
 
             for _ in $(seq 1 30); do
                 if grep -q "^READY" "$MCP_BRIDGE_OUTPUT" 2>/dev/null; then break; fi
@@ -651,6 +680,7 @@ if [ -n "${MCP_SERVERS:-}" ]; then
 
             MCP_BRIDGE_ARGS+=(
                 -e "MCP_BRIDGE_HOST=host.docker.internal"
+                -e "MCP_BRIDGE_TOKEN=${MCP_BRIDGE_TOKEN}"
                 -e "CAGE_MCP_SERVERS=${CAGE_MCP_JSON}"
             )
 
@@ -659,24 +689,108 @@ if [ -n "${MCP_SERVERS:-}" ]; then
                 MCP_BRIDGE_ARGS+=(--add-host host.docker.internal:host-gateway)
             fi
 
-            # Patch .mcp.json in the repo if it defines any bridged servers
-            if [ -f "$REPO_PATH/.mcp.json" ]; then
-                MCP_JSON_BACKUP=$(mktemp)
-                cp "$REPO_PATH/.mcp.json" "$MCP_JSON_BACKUP"
-                python3 -c "
-import json, sys
-with open('$REPO_PATH/.mcp.json') as f:
-    cfg = json.load(f)
-bridged = set(sys.argv[1:])
+            # If the project defines a bridged server in .mcp.json, generate a
+            # private patched copy and mount it over the project file read-only
+            # inside the container. Never rewrite or restore the host file: the
+            # repository is container-writable, so a cleanup-time restore would
+            # otherwise follow a container-controlled symlink on the host.
+            if [ -e "$REPO_PATH/.mcp.json" ] || [ -L "$REPO_PATH/.mcp.json" ]; then
+                MCP_PROJECT_CONFIG=$(mktemp "${TMPDIR:-/tmp}/cage-mcp.XXXXXX")
+                _bridged_names=()
+                while IFS= read -r _server_line; do
+                    _bridged_names+=("$(printf '%s\n' "$_server_line" | sed 's/^SERVER:\(.*\)=PORT:.*/\1/')")
+                done < <(grep "^SERVER:" "$MCP_BRIDGE_OUTPUT")
+
+                if python3 -I -c '
+import json
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:3]
+bridged = set(sys.argv[3:])
+max_project_mcp_bytes = 16 * 1024 * 1024
+
+try:
+    before = os.lstat(source)
+    if stat.S_ISLNK(before.st_mode):
+        raise OSError("refusing symlinked project MCP configuration")
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError("project MCP configuration is not a regular file")
+    if before.st_size > max_project_mcp_bytes:
+        raise OSError("project MCP configuration exceeds the 16 MiB limit")
+
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = os.open(source, flags)
+    opened = os.fstat(descriptor)
+    current = os.lstat(source)
+    identity = lambda value: (value.st_dev, value.st_ino)
+    if identity(before) != identity(opened) or identity(opened) != identity(current):
+        os.close(descriptor)
+        raise OSError("project MCP configuration changed while it was being read")
+
+    with os.fdopen(descriptor, "rb") as handle:
+        payload_bytes = handle.read(max_project_mcp_bytes + 1)
+    if len(payload_bytes) > max_project_mcp_bytes:
+        raise OSError("project MCP configuration exceeds the 16 MiB limit")
+    payload = payload_bytes.decode("utf-8")
+    config = json.loads(payload)
+except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+    sys.stderr.write("cage: cannot generate project .mcp.json overlay: %s\n" % exc)
+    sys.exit(2)
+
+if not isinstance(config, dict):
+    sys.stderr.write("cage: cannot generate project .mcp.json overlay: root must be an object\n")
+    sys.exit(2)
+
+servers = config.get("mcpServers", {})
+if not isinstance(servers, dict):
+    sys.stderr.write("cage: cannot generate project .mcp.json overlay: mcpServers must be an object\n")
+    sys.exit(2)
+
 changed = False
-for name in list(cfg.get('mcpServers', {})):
+for name in list(servers):
     if name in bridged:
-        cfg['mcpServers'][name] = {'type': 'stdio', 'command': 'mcp-relay', 'args': [name]}
+        servers[name] = {"type": "stdio", "command": "mcp-relay", "args": [name]}
         changed = True
-if changed:
-    with open('$REPO_PATH/.mcp.json', 'w') as f:
-        json.dump(cfg, f, indent=4)
-" $(grep "^SERVER:" "$MCP_BRIDGE_OUTPUT" | sed 's/^SERVER:\(.*\)=PORT:.*/\1/') 2>/dev/null || true
+
+if not changed:
+    sys.exit(3)
+
+try:
+    destination_before = os.lstat(destination)
+    if not stat.S_ISREG(destination_before.st_mode):
+        raise OSError("generated MCP destination is not a regular file")
+    destination_flags = os.O_WRONLY | os.O_NOFOLLOW
+    destination_descriptor = os.open(destination, destination_flags)
+    destination_opened = os.fstat(destination_descriptor)
+    destination_current = os.lstat(destination)
+    if (
+        identity(destination_before) != identity(destination_opened)
+        or identity(destination_opened) != identity(destination_current)
+    ):
+        os.close(destination_descriptor)
+        raise OSError("generated MCP destination changed while it was being opened")
+    os.ftruncate(destination_descriptor, 0)
+    with os.fdopen(destination_descriptor, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=4)
+except OSError as exc:
+    sys.stderr.write("cage: cannot write project .mcp.json overlay: %s\n" % exc)
+    sys.exit(2)
+' "$REPO_PATH/.mcp.json" "$MCP_PROJECT_CONFIG" "${_bridged_names[@]}"; then
+                    # A nested read-only bind masks only .mcp.json in the
+                    # container; the surrounding repository remains writable.
+                    MCP_BRIDGE_ARGS+=(-v "${MCP_PROJECT_CONFIG}:${REPO_PATH}/.mcp.json:ro")
+                else
+                    _overlay_status=$?
+                    rm -f "$MCP_PROJECT_CONFIG"
+                    MCP_PROJECT_CONFIG=""
+                    if [ "$_overlay_status" -ne 3 ]; then
+                        cleanup_mcp_bridge
+                        rm -f "$MCP_BRIDGE_OUTPUT"
+                        exit "$_overlay_status"
+                    fi
+                fi
             fi
 
             rm -f "$MCP_BRIDGE_OUTPUT"
@@ -704,6 +818,7 @@ HOST_CMD_BRIDGE_PID=""
 HOST_CMD_BRIDGE_ARGS=()
 HOST_CMD_LABEL=""
 HOST_CMD_NAMES=""
+HOST_CMD_BRIDGE_TOKEN=""
 
 cleanup_host_cmd_bridge() {
     if [ -n "$HOST_CMD_BRIDGE_PID" ] && kill -0 "$HOST_CMD_BRIDGE_PID" 2>/dev/null; then
@@ -722,7 +837,15 @@ if [ -n "${HOST_COMMANDS:-}" ]; then
     if [ "$NET_MODE" = "off" ]; then
         echo "WARNING: host commands ignored — network is disabled (--net off)" >&2
     else
-        HOST_CMD_ARGS=()
+        HOST_CMD_ARGS=(--deny-executable-root "$REPO_PATH")
+        for _mount_entry in "${_EXTRA_MOUNT_SEEN[@]+"${_EXTRA_MOUNT_SEEN[@]}"}"; do
+            if [ "${_mount_entry%%$'\t'*}" = "rw" ]; then
+                HOST_CMD_ARGS+=(--deny-executable-root "${_mount_entry#*$'\t'}")
+            fi
+        done
+        for _bridge_env_name in $EXTRA_ENV; do
+            HOST_CMD_ARGS+=(--pass-env "$_bridge_env_name")
+        done
         while IFS= read -r line; do
             line="$(_trim_preserving_quotes "$line")"
             [ -z "$line" ] && continue
@@ -735,9 +858,12 @@ if [ -n "${HOST_COMMANDS:-}" ]; then
         if [ ${#HOST_CMD_ARGS[@]} -gt 0 ]; then
             HOST_CMD_BRIDGE_OUTPUT=$(mktemp)
             HOST_CMD_BRIDGE_LOG=$(mktemp)
-            python3 "$SCRIPT_DIR/host-cmd-bridge.py" "${HOST_CMD_ARGS[@]}" \
+            HOST_CMD_BRIDGE_TOKEN="$(python3 -I -c 'import secrets; print(secrets.token_hex(32))')"
+            CAGE_BRIDGE_AUTH_TOKEN="$HOST_CMD_BRIDGE_TOKEN" \
+                python3 -I "$SCRIPT_DIR/host-cmd-bridge.py" "${HOST_CMD_ARGS[@]}" \
                 > "$HOST_CMD_BRIDGE_OUTPUT" 2>"$HOST_CMD_BRIDGE_LOG" &
             HOST_CMD_BRIDGE_PID=$!
+            trap 'cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
 
             for _ in $(seq 1 30); do
                 if grep -q "^READY" "$HOST_CMD_BRIDGE_OUTPUT" 2>/dev/null; then break; fi
@@ -762,6 +888,7 @@ if [ -n "${HOST_COMMANDS:-}" ]; then
 
             HOST_CMD_BRIDGE_ARGS+=(
                 -e "HOST_CMD_BRIDGE_HOST=host.docker.internal"
+                -e "HOST_CMD_BRIDGE_TOKEN=${HOST_CMD_BRIDGE_TOKEN}"
                 -e "CAGE_HOST_COMMANDS=${HOST_CMD_NAMES}"
             )
 
@@ -937,9 +1064,11 @@ cleanup_session_sync() {
 # --- Codex MCP OAuth credential sync ----------------------------------------
 # Codex stores file-backed MCP OAuth credentials in .credentials.json. Some
 # providers rotate refresh tokens; leaving host and volume copies to diverge can
-# make a later refresh reuse an old token and revoke the token family. The main
-# container still sees the host Codex dir read-only; this host-side sync is the
-# only write-back path.
+# make a later refresh reuse an old token and revoke the token family. Keep this
+# automatic for normal Developer-mode use, but never give a helper container a
+# writable mount of the host Codex directory. A host-side reconciler validates
+# both copies, stages the volume copy through a private directory, and performs
+# any host write with an exclusive temporary file plus atomic replacement.
 CODEX_OAUTH_CREDENTIALS_SYNC=0
 if [ "$CAGE_TOOL" = "codex" ] && [ -d "$CODEX_HOST_PATH" ]; then
     CODEX_OAUTH_CREDENTIALS_SYNC=1
@@ -948,39 +1077,792 @@ fi
 
 sync_codex_oauth_credentials() {
     [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ] || return 0
-    docker run --rm \
-        --entrypoint sh \
-        -v "$VOLUME_NAME:/vol" \
-        -v "$CODEX_HOST_PATH:/host-codex" \
-        -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
-        "$IMAGE" -c '
-            host="/host-codex/.credentials.json"
-            vol="/vol/.credentials.json"
-            if [ ! -e "$host" ]; then
-                rm -f "$vol"
-                exit 0
-            fi
+    python3 -I - \
+        "$VOLUME_NAME" "$IMAGE" "$CODEX_HOST_PATH" "$CAGE_CONFIG_DIR" \
+        "$(id -u)" "$(id -g)" <<'PY'
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import tempfile
+import time
 
-            copy_one() {
-                src="$1"; dst="$2"
-                mkdir -p "$(dirname "$dst")"
-                cp -p "$src" "$dst.tmp" && mv "$dst.tmp" "$dst"
-            }
+VOLUME_NAME, IMAGE, HOST_DIR_ARG, CONFIG_DIR_ARG, UID_TEXT, GID_TEXT = sys.argv[1:]
+HOST_UID = int(UID_TEXT)
+HOST_GID = int(GID_TEXT)
+MAX_CREDENTIAL_BYTES = 4 * 1024 * 1024
+MAX_STATE_BYTES = 4096
+STATE_NAME = ".cage-oauth-sync-state.json"
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+MISSING_HASH = "-"
 
-            if [ ! -e "$vol" ]; then
-                copy_one "$host" "$vol"
-            else
-                hm=$(stat -c%Y "$host")
-                vm=$(stat -c%Y "$vol")
-                if [ "$hm" -gt "$vm" ]; then
-                    copy_one "$host" "$vol"
-                elif [ "$vm" -gt "$hm" ]; then
-                    copy_one "$vol" "$host"
-                fi
-            fi
 
-            chown "$HOST_UID:$HOST_GID" "$host" "$vol" 2>/dev/null || true
-        ' >/dev/null 2>&1 || true
+class SyncError(Exception):
+    pass
+
+
+def reject_constant(value):
+    raise SyncError("non-finite JSON value is not allowed")
+
+
+def object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise SyncError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def parse_object(data, label):
+    try:
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=object_without_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise SyncError(f"{label} is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SyncError(f"{label} must contain a JSON object")
+
+    # Bound pathological but technically valid JSON independently of byte size.
+    nodes = 0
+    stack = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > 100000:
+            raise SyncError(f"{label} contains too many JSON values")
+        if depth > 64:
+            raise SyncError(f"{label} is nested too deeply")
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+    return value
+
+
+def canonical_json(value):
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def identity_of(info):
+    return (info.st_dev, info.st_ino)
+
+
+def fingerprint_of(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def read_regular(path, limit, label, normalize_mode=False, missing_ok=True):
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise SyncError(f"{label} is missing")
+    if stat.S_ISLNK(before.st_mode):
+        raise SyncError(f"{label} must not be a symlink")
+    if not stat.S_ISREG(before.st_mode):
+        raise SyncError(f"{label} is not a regular file")
+    if before.st_size > limit:
+        raise SyncError(f"{label} exceeds the {limit}-byte limit")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SyncError(f"cannot safely open {label}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+        if identity_of(before) != identity_of(opened) or identity_of(opened) != identity_of(current):
+            raise SyncError(f"{label} changed while it was opened")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise SyncError(f"{label} exceeds the {limit}-byte limit")
+        if normalize_mode:
+            os.fchmod(descriptor, 0o600)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            identity_of(opened) != identity_of(after)
+            or identity_of(after) != identity_of(current)
+            or opened.st_size != after.st_size
+            or opened.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise SyncError(f"{label} changed while it was read")
+        raw = b"".join(chunks)
+        return {
+            "raw": raw,
+            "raw_hash": sha256(raw),
+            "mode": stat.S_IMODE(after.st_mode),
+            "fingerprint": fingerprint_of(after),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def credential_blob(path, label, normalize_mode=False, missing_ok=True):
+    blob = read_regular(
+        path,
+        MAX_CREDENTIAL_BYTES,
+        label,
+        normalize_mode=normalize_mode,
+        missing_ok=missing_ok,
+    )
+    if blob is None:
+        return None
+    value = parse_object(blob["raw"], label)
+    blob["value"] = value
+    blob["canonical"] = canonical_json(value)
+    if len(blob["canonical"]) > MAX_CREDENTIAL_BYTES:
+        raise SyncError(f"{label} canonical form exceeds the {MAX_CREDENTIAL_BYTES}-byte limit")
+    blob["hash"] = sha256(blob["canonical"])
+    return blob
+
+
+def state_blob(path, label, missing_ok=True):
+    blob = read_regular(path, MAX_STATE_BYTES, label, missing_ok=missing_ok)
+    if blob is None:
+        return None
+    value = parse_object(blob["raw"], label)
+    if set(value) != {"version", "identity", "base_sha256", "revision"}:
+        raise SyncError(f"{label} has an unsupported schema")
+    if value["version"] != 1:
+        raise SyncError(f"{label} has an unsupported version")
+    if not isinstance(value["identity"], str) or not HASH_RE.fullmatch(value["identity"]):
+        raise SyncError(f"{label} has an invalid identity")
+    base = value["base_sha256"]
+    if base is not None and (not isinstance(base, str) or not HASH_RE.fullmatch(base)):
+        raise SyncError(f"{label} has an invalid base hash")
+    revision = value["revision"]
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise SyncError(f"{label} has an invalid revision")
+    blob["value"] = value
+    blob["canonical"] = canonical_json(value)
+    blob["hash"] = sha256(blob["canonical"])
+    return blob
+
+
+EXPORT_HELPER = r'''
+import hashlib
+import json
+import os
+import stat
+import sys
+
+volume_root, output_root, credential_limit, state_limit = sys.argv[1:]
+limits = {
+    ".credentials.json": int(credential_limit),
+    ".cage-oauth-sync-state.json": int(state_limit),
+}
+outputs = {
+    ".credentials.json": "credentials.raw",
+    ".cage-oauth-sync-state.json": "state.raw",
+}
+
+
+def ident(info):
+    return (info.st_dev, info.st_ino)
+
+
+def export_one(name):
+    source = os.path.join(volume_root, name)
+    try:
+        before = os.lstat(source)
+    except FileNotFoundError:
+        return {"exists": False, "raw_sha256": None, "mode": None}
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("unsafe non-regular OAuth volume state: " + name)
+    if before.st_size > limits[name]:
+        raise RuntimeError("oversized OAuth volume state: " + name)
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(source)
+        if ident(before) != ident(opened) or ident(opened) != ident(current):
+            raise RuntimeError("OAuth volume state changed while opening: " + name)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, limits[name] + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limits[name]:
+                raise RuntimeError("oversized OAuth volume state: " + name)
+        after = os.fstat(descriptor)
+        current = os.lstat(source)
+        if (
+            ident(opened) != ident(after)
+            or ident(after) != ident(current)
+            or opened.st_size != after.st_size
+            or opened.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise RuntimeError("OAuth volume state changed while reading: " + name)
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    destination = os.path.join(output_root, outputs[name])
+    out = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(out, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(out)
+    return {
+        "exists": True,
+        "raw_sha256": hashlib.sha256(data).hexdigest(),
+        "mode": stat.S_IMODE(after.st_mode),
+    }
+
+
+manifest = {
+    "credentials": export_one(".credentials.json"),
+    "state": export_one(".cage-oauth-sync-state.json"),
+}
+data = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+descriptor = os.open(
+    os.path.join(output_root, "manifest.json"),
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    with os.fdopen(descriptor, "wb", closefd=False) as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+finally:
+    os.close(descriptor)
+'''
+
+
+APPLY_HELPER = r'''
+import hashlib
+import os
+import secrets
+import stat
+import sys
+
+(
+    volume_root,
+    input_root,
+    expected_credential_hash,
+    expected_state_hash,
+    credential_present,
+    owner_uid,
+    owner_gid,
+    credential_limit,
+    state_limit,
+) = sys.argv[1:]
+owner_uid = int(owner_uid)
+owner_gid = int(owner_gid)
+credential_limit = int(credential_limit)
+state_limit = int(state_limit)
+directory = os.open(volume_root, os.O_RDONLY | os.O_DIRECTORY)
+
+
+def current_hash(name, limit):
+    try:
+        before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return "-"
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("unsafe non-regular OAuth volume state: " + name)
+    if before.st_size > limit:
+        raise RuntimeError("oversized OAuth volume state: " + name)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("OAuth volume state changed while opening: " + name)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, limit + 1 - total))
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise RuntimeError("oversized OAuth volume state: " + name)
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_size != after.st_size
+            or opened.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise RuntimeError("OAuth volume state changed while reading: " + name)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def read_input(name, limit):
+    path = os.path.join(input_root, name)
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("unsafe staged OAuth sync input: " + name)
+    if info.st_size > limit:
+        raise RuntimeError("oversized staged OAuth sync input: " + name)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("staged OAuth sync input changed: " + name)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise RuntimeError("oversized staged OAuth sync input: " + name)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(name, data):
+    temporary = "." + name.lstrip(".") + ".cage-" + secrets.token_hex(16)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, owner_uid, owner_gid)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+
+
+state_data = read_input("state.json", state_limit)
+if credential_present == "1":
+    credential_data = read_input("credentials.json", credential_limit)
+else:
+    credential_data = None
+
+# Compare immediately before the first mutation. Host-side locks serialize Cage
+# reconcilers; these hashes also catch a concurrent main container changing the
+# shared volume after export.
+if current_hash(".credentials.json", credential_limit) != expected_credential_hash:
+    raise RuntimeError("OAuth credential conflict: volume changed during reconciliation")
+if current_hash(".cage-oauth-sync-state.json", state_limit) != expected_state_hash:
+    raise RuntimeError("OAuth sync-state conflict: volume changed during reconciliation")
+
+if credential_data is not None:
+    atomic_write(".credentials.json", credential_data)
+else:
+    try:
+        info = os.stat(".credentials.json", dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("OAuth credential destination became a directory")
+        os.unlink(".credentials.json", dir_fd=directory)
+atomic_write(".cage-oauth-sync-state.json", state_data)
+os.fsync(directory)
+os.close(directory)
+'''
+
+
+def checked_directory(path, label, create=False):
+    if create:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise SyncError(f"cannot access {label}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SyncError(f"{label} must be a real directory")
+    if info.st_uid != HOST_UID:
+        raise SyncError(f"{label} must be owned by the current user")
+    os.chmod(path, 0o700)
+    return path
+
+
+def acquire_lock(path, timeout=15.0):
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise SyncError(f"cannot open OAuth sync lock: {exc}") from exc
+    os.fchmod(descriptor, 0o600)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return descriptor
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(descriptor)
+                raise SyncError("timed out waiting for another OAuth reconciliation")
+            time.sleep(0.1)
+
+
+def run_helper(arguments, phase):
+    helper_name = f"cage-oauth-{os.getpid()}-{secrets.token_hex(5)}"
+    command = ["docker", "run", "--rm", "--name", helper_name] + arguments
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        subprocess.run(
+            ["docker", "rm", "-f", helper_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        raise SyncError(f"OAuth {phase} helper timed out") from exc
+    except OSError as exc:
+        raise SyncError(f"cannot run OAuth {phase} helper: {exc}") from exc
+    if result.returncode != 0:
+        raise SyncError(f"OAuth {phase} helper failed with status {result.returncode}")
+
+
+def export_volume(stage):
+    run_helper(
+        [
+            "--network", "none",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
+            "--user", f"{HOST_UID}:{HOST_GID}",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "32",
+            "--memory", "96m",
+            "--mount", f"type=volume,src={VOLUME_NAME},dst=/vol,readonly",
+            "--mount", f"type=bind,src={stage},dst=/out",
+            "--entrypoint", "python3",
+            IMAGE,
+            "-I", "-c", EXPORT_HELPER,
+            "/vol", "/out", str(MAX_CREDENTIAL_BYTES), str(MAX_STATE_BYTES),
+        ],
+        "export",
+    )
+
+
+def apply_volume(stage, manifest, credential):
+    run_helper(
+        [
+            "--network", "none",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
+            "--cap-drop", "ALL",
+            "--cap-add", "CHOWN",
+            "--cap-add", "DAC_OVERRIDE",
+            "--cap-add", "FOWNER",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "32",
+            "--memory", "96m",
+            "--mount", f"type=volume,src={VOLUME_NAME},dst=/vol",
+            "--mount", f"type=bind,src={stage},dst=/sync-in,readonly",
+            "--entrypoint", "python3",
+            IMAGE,
+            "-I", "-c", APPLY_HELPER,
+            "/vol",
+            "/sync-in",
+            manifest["credentials"]["raw_sha256"] or MISSING_HASH,
+            manifest["state"]["raw_sha256"] or MISSING_HASH,
+            "1" if credential is not None else "0",
+            str(HOST_UID),
+            str(HOST_GID),
+            str(MAX_CREDENTIAL_BYTES),
+            str(MAX_STATE_BYTES),
+        ],
+        "apply",
+    )
+
+
+def read_manifest(stage):
+    blob = read_regular(
+        os.path.join(stage, "manifest.json"),
+        MAX_STATE_BYTES,
+        "OAuth export manifest",
+        missing_ok=False,
+    )
+    manifest = parse_object(blob["raw"], "OAuth export manifest")
+    if set(manifest) != {"credentials", "state"}:
+        raise SyncError("OAuth export manifest has an unsupported schema")
+    for key in ("credentials", "state"):
+        entry = manifest[key]
+        if not isinstance(entry, dict) or set(entry) != {"exists", "raw_sha256", "mode"}:
+            raise SyncError("OAuth export manifest has an unsupported entry")
+        if not isinstance(entry["exists"], bool):
+            raise SyncError("OAuth export manifest has an invalid existence flag")
+        if entry["exists"]:
+            if not isinstance(entry["raw_sha256"], str) or not HASH_RE.fullmatch(entry["raw_sha256"]):
+                raise SyncError("OAuth export manifest has an invalid hash")
+            if not isinstance(entry["mode"], int):
+                raise SyncError("OAuth export manifest has an invalid mode")
+        elif entry["raw_sha256"] is not None or entry["mode"] is not None:
+            raise SyncError("OAuth export manifest has inconsistent missing-file data")
+    return manifest
+
+
+def verify_export(stage, manifest):
+    credential = credential_blob(
+        os.path.join(stage, "credentials.raw"),
+        "volume OAuth credentials",
+        missing_ok=not manifest["credentials"]["exists"],
+    )
+    state = state_blob(
+        os.path.join(stage, "state.raw"),
+        "volume OAuth sync state",
+        missing_ok=not manifest["state"]["exists"],
+    )
+    for key, blob in (("credentials", credential), ("state", state)):
+        if manifest[key]["exists"] != (blob is not None):
+            raise SyncError("OAuth export helper returned inconsistent files")
+        if blob is not None and manifest[key]["raw_sha256"] != blob["raw_hash"]:
+            raise SyncError("OAuth export helper returned inconsistent content")
+        if blob is not None:
+            blob["source_mode"] = manifest[key]["mode"]
+    return credential, state
+
+
+def ensure_host_unchanged(path, observed):
+    current = credential_blob(path, "host OAuth credentials", missing_ok=observed is None)
+    if (current is None) != (observed is None):
+        raise SyncError("host OAuth credentials changed during reconciliation")
+    if current is not None and (
+        current["raw_hash"] != observed["raw_hash"]
+        or current["fingerprint"] != observed["fingerprint"]
+    ):
+        raise SyncError("host OAuth credentials changed during reconciliation")
+
+
+def atomic_host_write(path, data, observed):
+    ensure_host_unchanged(path, observed)
+    directory = os.path.dirname(path)
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=".credentials.json.cage-", dir=directory)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        ensure_host_unchanged(path, observed)
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def write_stage(path, data):
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+
+
+try:
+    host_directory = os.path.realpath(os.path.abspath(HOST_DIR_ARG))
+    checked_directory(host_directory, "host Codex directory")
+    host_path = os.path.join(host_directory, ".credentials.json")
+    identity = sha256(b"cage-codex-oauth-v1\0" + os.fsencode(host_directory))
+
+    config_directory = os.path.realpath(os.path.abspath(CONFIG_DIR_ARG))
+    checked_directory(config_directory, "Cage config directory")
+    lock_directory = os.path.join(config_directory, "oauth-locks")
+    checked_directory(lock_directory, "OAuth lock directory", create=True)
+    lock_names = sorted(
+        {
+            "identity-" + identity + ".lock",
+            "volume-" + sha256(VOLUME_NAME.encode("utf-8")) + ".lock",
+        }
+    )
+
+    with contextlib.ExitStack() as stack:
+        for name in lock_names:
+            descriptor = acquire_lock(os.path.join(lock_directory, name))
+            stack.callback(os.close, descriptor)
+
+        host = credential_blob(
+            host_path,
+            "host OAuth credentials",
+            normalize_mode=True,
+            missing_ok=True,
+        )
+        with tempfile.TemporaryDirectory(prefix="cage-oauth-sync-") as stage:
+            os.chmod(stage, 0o700)
+            export_volume(stage)
+            manifest = read_manifest(stage)
+            volume, state = verify_export(stage, manifest)
+
+            same_identity = state is not None and state["value"]["identity"] == identity
+            if not same_identity:
+                if state is not None:
+                    print(
+                        "cage: Codex OAuth state identity changed; resetting it from "
+                        "the selected host Codex directory",
+                        file=sys.stderr,
+                    )
+                desired = host
+                previous_revision = 0
+            else:
+                previous_revision = state["value"]["revision"]
+                base = state["value"]["base_sha256"]
+                host_hash = host["hash"] if host is not None else None
+                volume_hash = volume["hash"] if volume is not None else None
+
+                # The host controls credential existence. This means an explicit
+                # host logout removes the volume copy, while a container-side
+                # deletion cannot silently log the host out.
+                if host is None:
+                    desired = None
+                elif volume is None:
+                    desired = host
+                elif host_hash == volume_hash:
+                    desired = host
+                else:
+                    host_changed = host_hash != base
+                    volume_changed = volume_hash != base
+                    if host_changed and volume_changed:
+                        raise SyncError(
+                            "OAuth credential conflict: host and volume both changed; "
+                            "neither copy was overwritten"
+                        )
+                    if volume_changed:
+                        desired = volume
+                        atomic_host_write(host_path, desired["canonical"], host)
+                        host = credential_blob(
+                            host_path,
+                            "host OAuth credentials",
+                            normalize_mode=True,
+                            missing_ok=False,
+                        )
+                    else:
+                        desired = host
+
+            desired_hash = desired["hash"] if desired is not None else None
+            volume_hash = volume["hash"] if volume is not None else None
+            state_core_matches = (
+                same_identity
+                and state["value"]["base_sha256"] == desired_hash
+            )
+            credential_matches = (
+                (volume is None) == (desired is None)
+                and (volume is None or volume_hash == desired_hash)
+            )
+            credential_mode_ok = volume is None or volume["source_mode"] == 0o600
+            state_mode_ok = state is not None and state["source_mode"] == 0o600
+            apply_needed = not (
+                state_core_matches
+                and credential_matches
+                and credential_mode_ok
+                and state_mode_ok
+            )
+
+            if apply_needed:
+                revision = previous_revision + 1 if same_identity else 1
+                desired_state = {
+                    "version": 1,
+                    "identity": identity,
+                    "base_sha256": desired_hash,
+                    "revision": revision,
+                }
+                write_stage(os.path.join(stage, "state.json"), canonical_json(desired_state))
+                if desired is not None:
+                    write_stage(
+                        os.path.join(stage, "credentials.json"),
+                        desired["canonical"],
+                    )
+                apply_volume(stage, manifest, desired)
+except (SyncError, OSError, ValueError) as exc:
+    print(f"ERROR: Codex OAuth credential sync failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+cleanup_cage_runtime() {
+    local original_status=$? oauth_status=0
+    trap - EXIT
+    set +e
+    sync_codex_oauth_credentials
+    oauth_status=$?
+    cleanup_session_sync
+    cleanup_host_cmd_bridge
+    cleanup_mcp_bridge
+    cleanup_proxy
+    if [ "$original_status" -ne 0 ]; then
+        exit "$original_status"
+    fi
+    exit "$oauth_status"
 }
 
 sync_codex_oauth_credentials
@@ -1182,7 +2064,7 @@ fi
 
 if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ] || [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ]; then
     # Cannot use exec: need cleanup traps to run via trap EXIT
-    trap 'sync_codex_oauth_credentials; cleanup_session_sync; cleanup_host_cmd_bridge; cleanup_mcp_bridge; cleanup_proxy' EXIT
+    trap cleanup_cage_runtime EXIT
     docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
 else
     exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"

@@ -14,7 +14,7 @@ class CodexEntrypointTests(unittest.TestCase):
     def entrypoint_python(self):
         src = ENTRYPOINT_CODEX.read_text()
         match = re.search(
-            r"CODEX_CONFIG_PATH=\"\$CODEX_DIR/config\.toml\" python3 - <<'PY'\n(.*?)\nPY",
+            r"CODEX_CONFIG_PATH=\"\$CODEX_DIR/config\.toml\" python3 -I - <<'PY'\n(.*?)\nPY",
             src,
             re.S,
         )
@@ -31,6 +31,7 @@ class CodexEntrypointTests(unittest.TestCase):
                     "CAGE_MCP_SERVERS": '{"databricks-uc":60776}',
                     "MCP_BRIDGE_HOST": "host.docker.internal",
                     "MCP_BRIDGE_PORT_DATABRICKS_UC": "60776",
+                    "MCP_BRIDGE_TOKEN": "b" * 64,
                 }
             )
 
@@ -51,6 +52,7 @@ class CodexEntrypointTests(unittest.TestCase):
         self.assertIn('[mcp_servers."databricks-uc".env]', generated)
         self.assertIn('MCP_BRIDGE_HOST = "host.docker.internal"', generated)
         self.assertIn('MCP_BRIDGE_PORT_DATABRICKS_UC = "60776"', generated)
+        self.assertIn('MCP_BRIDGE_TOKEN = "' + "b" * 64 + '"', generated)
 
     def test_oauth_http_mcp_servers_include_resource_and_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,4 +1,8 @@
 *.txt
+!requirements-dev.txt
+__pycache__/
+*.pyc
+.pytest_cache/
 read_claude_logs.py
 .cage.conf
 .claude/

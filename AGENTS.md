@@ -4,7 +4,14 @@ This file provides guidance to AI coding agents — Claude Code (claude.ai/code)
 
 ## What This Project Is
 
-A Docker-based isolation wrapper for running AI coding assistants (Claude Code, OpenAI Codex CLI) in containers on macOS and Linux. Limits the blast radius so the tool can only write to the mounted repo, not the rest of the host filesystem.
+A Docker-based isolation wrapper for running AI coding assistants (Claude Code, OpenAI Codex CLI) in containers on macOS and Linux. It reduces accidental host filesystem damage by restricting direct writes to configured mounts, while selected state-sync and host-integration features deliberately cross that boundary. See `SECURITY.md` for the effective threat model.
+
+## Active Hardening Work
+
+The July 2026 security and architecture remediation is tracked in
+`docs/hardening/WORKFLOW.md`. Any agent continuing that work must read the
+workflow, progress log, and migration guide before editing. Those files are the
+durable source of truth across context compaction and maintainer handoffs.
 
 ## Build and Run
 
@@ -50,7 +57,9 @@ cage --preset codex-company ~/path/to/repo
 cage --interactive ~/path/to/repo
 cage codex -i ~/path/to/repo
 
-# Yolo mode — skip all permission prompts (safe because containerized)
+# Yolo mode — skip coding-tool permission prompts. This does not contain
+# credential use, external connector effects, writable Git metadata, host
+# bridges, or deliberate network bypass.
 # Yolo defaults to --net gate (domain-gated networking)
 cage -y ~/path/to/repo
 cage codex -y ~/path/to/repo
@@ -127,8 +136,8 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
-- Runs `docker run` with security hardening (cap_drop ALL, no-new-privileges) and tool-specific mounts:
-  - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the only writable host path. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
+- Runs `docker run` with `cap_drop ALL` followed by the capabilities currently needed for UID/GID remapping; AppArmor and seccomp are unconfined for bubblewrap compatibility, and `no-new-privileges` is not currently set. Treat the container as accidental-damage isolation rather than a hostile-code boundary.
+  - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the main direct writable host mount. Explicit read-write extra mounts and selected host-side state synchronization can also write outside it. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
   - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
@@ -145,7 +154,8 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
 - Merges the `mcpServers` key from host `/host-claude-json` (read-only), central-config HTTP MCP definitions, and the stdio bridge into the volume's `~/.claude.json`, expanding `${VAR}` refs from the env (servers with unset, defaultless vars are skipped with a warning)
 - Copies `settings.json` from host read-only mount into writable volume
-- Symlinks `CLAUDE.md` and `agents/` from host if present
+- Atomically generates `CLAUDE.md` with accurate Cage trust context and appends
+  the host file if present; replaces the `agents/` destination before linking it
 - Sets `git safe.directory` to handle UID mismatch between host and container
 - Sets `user.name`/`user.email` from env vars resolved from the preset identity
 - Writes `~/.ssh/config` with SSH host alias if the preset identity sets `ssh_host`
@@ -171,7 +181,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`netgate-proxy.py`** (host-side, runs when `--net gate` is active):
 - Python3 forward proxy that gates outbound HTTP/HTTPS by domain
+- Requires a fresh 256-bit per-launch HTTP Basic proxy credential before DNS,
+  prompts, or upstream connections; Cage injects the authenticated proxy URL
+  automatically
 - Handles HTTPS via CONNECT method (sees hostname without TLS decryption)
+- Resolves once, rejects mixed/non-public results, and connects to the validated
+  numeric endpoint; CONNECT is restricted to 443/8443
 - Holds unknown domains' connections open while prompting the user (macOS `osascript` dialog, or terminal prompt on Linux)
 - Saves user decisions to allowlist files in `~/.claude/netgate/`
 - Pre-allows AWS and OpenAI domains via `netgate/defaults.json`
@@ -181,28 +196,45 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`mcp-bridge.py`** (host-side, runs when selected `mcp_packs` include stdio servers):
 - Python3 TCP relay that bridges host-side MCP commands into the container
-- For each configured server, listens on a random TCP port on 127.0.0.1
-- On incoming connection (from container via `host.docker.internal`), spawns the configured command and relays bidirectionally between TCP and subprocess stdio
-- Auth tokens are resolved on the host at connection time — handles token expiry naturally
+- For each configured server, listens on a random TCP port reachable through
+  `host.docker.internal` and requires a fresh 256-bit per-launch handshake before
+  spawning anything
+- Parses configured commands as argv with `shell=False`, runs them from the host
+  home directory, and exposes only a minimal environment plus explicitly selected
+  variables
+- Removes repository/read-write-mount entries from host `PATH`, rejects
+  configured executables under those mounts, and pins the resolved executable at
+  bridge startup
+- Relays MCP bytes unchanged and drains bounded subprocess stderr into Cage's
+  private bridge log
 - Startup protocol: prints `SERVER:name=PORT:N` per server, then `READY` (same pattern as netgate-proxy.py)
 
 **`mcp-relay`** (runs inside container, installed at `/usr/local/bin/mcp-relay`):
 - Tiny Python script that connects container stdio to the host MCP bridge via TCP
-- Usage: `mcp-relay <server-name>` — reads `MCP_BRIDGE_HOST` and `MCP_BRIDGE_PORT_<NAME>` env vars
+- Usage: `mcp-relay <server-name>` — reads the bridge host, port, and per-launch
+  authentication token from its environment
 - Configured as the MCP server command in Claude Code's `~/.claude.json` (the file Claude reads `mcpServers` from) by the entrypoint
-- If the repo has `.mcp.json` with matching server names, cage patches it before launch and restores the original on exit
+- If the repo has `.mcp.json` with matching server names, Cage generates a
+  private patched overlay and mounts it read-only; the repository file is never
+  rewritten
 
 **`host-cmd-bridge.py`** (host-side, runs when selected presets include `host_commands`):
-- Same pattern as `mcp-bridge.py`: per-command TCP listener on `127.0.0.1`, spawns the host command on each incoming connection, relays stdio bidirectionally
-- Unlike MCP bridge, subprocess stderr is forwarded to the bridge's own stderr so command errors surface in the cage terminal (MCP bridge sends to DEVNULL to protect JSON-RPC framing)
+- Uses the same authenticated, bounded, `shell=False`, minimal-environment host
+  process boundary as the MCP bridge
+- Uses a framed protocol that preserves caller arguments, stdin, stdout, stderr,
+  structured errors, and final exit status; limits and disconnects terminate the
+  subprocess process group
 - Startup protocol: prints `COMMAND:name=PORT:N` per command, then `READY`
 - Use case: token-refresh commands that need host keychain/auth context (e.g. `[host_commands.ztoken] command = "ztoken token -n codex"` so Codex's `auth.command = "ztoken"` config keeps working inside the container across indefinite sessions)
 
 **`host-cmd-relay`** (runs inside container, installed at `/usr/local/bin/host-cmd-relay`):
-- Container-side stdio-to-TCP relay — reads `HOST_CMD_BRIDGE_HOST` and `HOST_CMD_BRIDGE_PORT_<NAME>`
+- Container-side framed stdio-to-TCP relay — reads the host, port, and per-launch
+  authentication token from its environment
 - Per-command shims are written to `/usr/local/bin/<name>` by the entrypoint (two-line wrappers that `exec host-cmd-relay <name> "$@"`), so tools inside the container find the command by name in `PATH`
 
-**`Makefile`**: Install/uninstall targets. `make install` copies files to `~/.local/share/cage/` and symlinks to `~/.local/bin/cage`.
+**`Makefile`**: Install/uninstall targets. Both route through `install.sh`; source
+installs use the same staged, ownership-checked, rollback-capable path as release
+installs.
 
 **`install.sh`**: Curl-pipe-bash installer. Downloads the latest GitHub Release tarball, verifies checksum, extracts to `~/.local/share/cage/`, and symlinks the binary. Also supports `--uninstall`.
 
@@ -297,6 +329,9 @@ uses the URL and optional client ID; shared Codex fields such as
 - GitHub CLI auth is off by default. Set `gh_auth = true` in the selected identity. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `gh_account` in the identity for account selection
 - Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
+- Netgate uses a fresh per-launch proxy credential so unrelated local, bridge,
+  or LAN clients cannot use the listener; processes inside the selected container
+  receive that credential automatically
 - Git push requires the selected identity to set `ssh_key` pointing to a private key. Passphrase-protected keys work but will prompt each time (ssh-agent is not available in the container)
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
 - When `--net gate`, MCP bridge, host command bridge, or session sync is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)

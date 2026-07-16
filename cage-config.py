@@ -15,11 +15,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     import tomllib
@@ -31,7 +34,77 @@ except ModuleNotFoundError:  # pragma: no cover - depends on host Python
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SKILL_NAME_RE = re.compile(r"^[a-z0-9-]+$")
-TABLE_RE = re.compile(r"^\s*\[[^\]]+\]\s*(?:#.*)?$")
+TRANSPORT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+HEADER_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+TABLE_RE = re.compile(r"^\s*\[\[?[^\]\r\n]+\]\]?\s*(?:#.*)?$")
+PROJECTS_TABLE_RE = re.compile(r"^\s*\[projects\]\s*(?:#.*)?$")
+
+TOP_LEVEL_KEYS = {
+    "version",
+    "default_preset",
+    "defaults",
+    "auth",
+    "identities",
+    "mcp_packs",
+    "skill_packs",
+    "host_commands",
+    "presets",
+    "projects",
+}
+DEFAULT_KEYS = {"default_preset", "net", "session_sync"}
+AUTH_KEYS = {
+    "tool",
+    "env",
+    "mode",
+    "aws_profile",
+    "aws_region",
+    "host_codex_dir",
+    "host_agents_dir",
+    "copy_auth",
+    "codex_copy_auth",
+}
+IDENTITY_KEYS = {
+    "git_user_name",
+    "git_user_email",
+    "ssh_key",
+    "ssh_host",
+    "gh_auth",
+    "gh_account",
+}
+MCP_PACK_KEYS = {"env", "servers"}
+MCP_SERVER_KEYS = {
+    "name",
+    "type",
+    "command",
+    "url",
+    "auth",
+    "bearer_token_env_var",
+    "oauth_resource",
+    "oauth_scopes",
+    "oauth_client_id",
+    "oauth_client_id_env_var",
+    "headers",
+    "env",
+}
+SKILL_PACK_KEYS = {"source", "skills"}
+HOST_COMMAND_KEYS = {"command"}
+PRESET_KEYS = {
+    "tool",
+    "auth",
+    "identity",
+    "net",
+    "session_sync",
+    "env",
+    "extra_env",
+    "claude_auth",
+    "aws_profile",
+    "aws_region",
+    "mcp_packs",
+    "skill_packs",
+    "host_commands",
+    "extra_mounts",
+}
 
 
 class ConfigError(Exception):
@@ -107,6 +180,7 @@ def load_config(path: Path) -> dict[str, Any]:
     version = data.get("version", 1)
     if version != 1:
         raise ConfigError(f"unsupported config version: {version!r}")
+    validate_schema(data)
     return data
 
 
@@ -139,7 +213,7 @@ def as_str_list(value: Any, label: str) -> list[str]:
 def require_name(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{label} must be a non-empty string")
-    if not NAME_RE.match(value):
+    if not NAME_RE.fullmatch(value):
         raise ConfigError(f"{label} has invalid characters: {value!r}")
     return value
 
@@ -147,15 +221,150 @@ def require_name(value: Any, label: str) -> str:
 def require_skill_name(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{label} must be a non-empty string")
-    if not SKILL_NAME_RE.match(value):
+    if not SKILL_NAME_RE.fullmatch(value):
         raise ConfigError(f"{label} must contain only lowercase letters, digits, and hyphens: {value!r}")
     return value
 
 
 def require_env_name(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not ENV_RE.match(value):
+    if not isinstance(value, str) or not ENV_RE.fullmatch(value):
         raise ConfigError(f"{label} must be an environment variable name")
     return value
+
+
+def require_transport_name(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{label} must be a non-empty string")
+    if not TRANSPORT_NAME_RE.fullmatch(value):
+        raise ConfigError(f"{label} must contain only letters, digits, underscores, and hyphens")
+    return value
+
+
+def transport_key(name: str) -> str:
+    return name.upper().replace("-", "_")
+
+
+def is_sensitive_header_name(name: str) -> bool:
+    lower_name = name.lower()
+    return (
+        lower_name in {"authorization", "proxy-authorization", "cookie", "x-api-key"}
+        or "token" in lower_name
+        or "secret" in lower_name
+        or lower_name.endswith("-key")
+    )
+
+
+def validate_headers(value: Any, label: str) -> tuple[dict[str, str], list[str], bool]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{label} must be a table")
+    output: dict[str, str] = {}
+    env_names: list[str] = []
+    has_sensitive = False
+    for raw_name, raw_value in value.items():
+        if not isinstance(raw_name, str) or not HTTP_HEADER_NAME_RE.fullmatch(raw_name):
+            raise ConfigError(f"{label} contains an invalid HTTP header name: {raw_name!r}")
+        if not isinstance(raw_value, str) or "\n" in raw_value or "\r" in raw_value:
+            raise ConfigError(f"{label}.{raw_name} must be a single-line string")
+        refs = list(HEADER_ENV_REF_RE.finditer(raw_value))
+        looks_sensitive = is_sensitive_header_name(raw_name)
+        has_sensitive = has_sensitive or looks_sensitive
+        if looks_sensitive and not refs:
+            raise ConfigError(
+                f"{label}.{raw_name} must reference an environment variable instead of a literal secret"
+            )
+        for match in refs:
+            env_names.append(require_env_name(match.group(1), f"{label}.{raw_name}"))
+            if looks_sensitive and match.group(2) not in (None, ""):
+                raise ConfigError(
+                    f"{label}.{raw_name} cannot contain a literal fallback for a sensitive header"
+                )
+        output[raw_name] = raw_value
+    return output, env_names, has_sensitive
+
+
+def reject_unknown_keys(value: dict[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        joined = ", ".join(repr(key) for key in unknown)
+        raise ConfigError(f"unknown key(s) in {label}: {joined}")
+
+
+def validate_named_table(
+    data: dict[str, Any],
+    table_name: str,
+    allowed_keys: set[str],
+) -> dict[str, Any]:
+    table = as_table(data, table_name)
+    for name, value in table.items():
+        require_name(name, f"{table_name} name")
+        if not isinstance(value, dict):
+            raise ConfigError(f"{table_name}.{name} must be a table")
+        reject_unknown_keys(value, allowed_keys, f"{table_name}.{name}")
+    return table
+
+
+def validate_schema(data: dict[str, Any]) -> None:
+    reject_unknown_keys(data, TOP_LEVEL_KEYS, "top-level config")
+    defaults = as_table(data, "defaults")
+    reject_unknown_keys(defaults, DEFAULT_KEYS, "defaults")
+    validate_named_table(data, "auth", AUTH_KEYS)
+    validate_named_table(data, "identities", IDENTITY_KEYS)
+    mcp_packs = validate_named_table(data, "mcp_packs", MCP_PACK_KEYS)
+    validate_named_table(data, "skill_packs", SKILL_PACK_KEYS)
+    host_commands = validate_named_table(data, "host_commands", HOST_COMMAND_KEYS)
+    presets = validate_named_table(data, "presets", PRESET_KEYS)
+    as_table(data, "projects")
+
+    for pack_name, pack in mcp_packs.items():
+        for index, server in enumerate(as_list(pack.get("servers"), f"mcp_packs.{pack_name}.servers")):
+            if not isinstance(server, dict):
+                raise ConfigError(f"mcp_packs.{pack_name}.servers entries must be tables")
+            reject_unknown_keys(server, MCP_SERVER_KEYS, f"mcp_packs.{pack_name}.servers[{index}]")
+            require_transport_name(server.get("name"), f"mcp_packs.{pack_name}.servers[{index}].name")
+            if server.get("headers") is not None:
+                validate_headers(
+                    server["headers"],
+                    f"mcp_packs.{pack_name}.servers[{index}].headers",
+                )
+
+    for name, command in host_commands.items():
+        require_transport_name(name, "host command name")
+        value = command.get("command")
+        if not isinstance(value, str) or not value.strip() or "\n" in value:
+            raise ConfigError(f"host_commands.{name}.command must be a non-empty single line")
+
+    for preset_name, preset in presets.items():
+        for index, item in enumerate(
+            as_list(preset.get("host_commands"), f"presets.{preset_name}.host_commands")
+        ):
+            label = f"presets.{preset_name}.host_commands[{index}]"
+            if isinstance(item, str):
+                require_transport_name(item, label)
+            elif isinstance(item, dict):
+                reject_unknown_keys(item, {"name", "command"}, label)
+                require_transport_name(item.get("name"), f"{label}.name")
+                command = item.get("command")
+                if not isinstance(command, str) or not command.strip() or "\n" in command:
+                    raise ConfigError(f"{label}.command must be a non-empty single line")
+            else:
+                raise ConfigError(f"{label} must be a string or table")
+
+        for index, item in enumerate(
+            as_list(preset.get("extra_mounts"), f"presets.{preset_name}.extra_mounts")
+        ):
+            label = f"presets.{preset_name}.extra_mounts[{index}]"
+            if isinstance(item, str):
+                if not item or "\n" in item:
+                    raise ConfigError(f"{label} must be a non-empty path without newlines")
+            elif isinstance(item, dict):
+                reject_unknown_keys(item, {"path", "mode"}, label)
+                mount_path = item.get("path")
+                if not isinstance(mount_path, str) or not mount_path or "\n" in mount_path:
+                    raise ConfigError(f"{label}.path must be a non-empty path without newlines")
+                if item.get("mode", "ro") not in {"ro", "rw"}:
+                    raise ConfigError(f"{label}.mode must be ro or rw")
+            else:
+                raise ConfigError(f"{label} must be a string or table")
 
 
 def bool_to_flag(value: Any, label: str) -> str:
@@ -681,6 +890,7 @@ def resolve_config(
 
     pack_names = as_str_list(preset.get("mcp_packs"), f"presets.{preset_name}.mcp_packs")
     seen_servers: set[str] = set()
+    seen_server_keys: dict[str, str] = {}
     for pack_name in pack_names:
         require_name(pack_name, "mcp pack name")
         pack = mcp_packs.get(pack_name)
@@ -691,10 +901,17 @@ def resolve_config(
         for server in as_list(pack.get("servers"), f"mcp_packs.{pack_name}.servers"):
             if not isinstance(server, dict):
                 raise ConfigError(f"mcp_packs.{pack_name}.servers entries must be tables")
-            name = require_name(server.get("name"), f"mcp server in {pack_name}.name")
+            name = require_transport_name(server.get("name"), f"mcp server in {pack_name}.name")
             if name in seen_servers:
                 raise ConfigError(f"duplicate MCP server name across selected packs: {name}")
             seen_servers.add(name)
+            normalized_name = transport_key(name)
+            if normalized_name in seen_server_keys:
+                raise ConfigError(
+                    "MCP server names collide after relay normalization: "
+                    f"{seen_server_keys[normalized_name]!r} and {name!r}"
+                )
+            seen_server_keys[normalized_name] = name
             server_type = server.get("type", "stdio")
             if server_type == "stdio":
                 if server.get("auth") == "oauth":
@@ -709,6 +926,17 @@ def resolve_config(
                 url = server.get("url")
                 if not isinstance(url, str) or not url:
                     raise ConfigError(f"http MCP server {name!r} requires url")
+                parsed_url = urlsplit(url)
+                if (
+                    parsed_url.scheme not in {"http", "https"}
+                    or not parsed_url.hostname
+                    or parsed_url.username is not None
+                    or parsed_url.password is not None
+                    or parsed_url.fragment
+                ):
+                    raise ConfigError(
+                        f"http MCP server {name!r} requires an http(s) URL without credentials or fragment"
+                    )
                 out = {"name": name, "type": "http", "url": url}
                 server_auth = server.get("auth", "")
                 if server_auth is None:
@@ -725,6 +953,8 @@ def resolve_config(
                         bearer, f"mcp server {name}.bearer_token_env_var"
                     )
                     env.append(out["bearer_token_env_var"])
+                if (bearer or server_auth == "oauth") and parsed_url.scheme != "https":
+                    raise ConfigError(f"authenticated HTTP MCP server {name!r} must use https")
                 if server_auth == "oauth":
                     out["auth"] = "oauth"
                     oauth_resource = optional_str(
@@ -758,9 +988,19 @@ def resolve_config(
                         out["oauth_scopes"] = scopes
                 headers = server.get("headers")
                 if headers is not None:
-                    if not isinstance(headers, dict):
-                        raise ConfigError(f"mcp server {name}.headers must be a table")
-                    out["headers"] = {str(k): str(v) for k, v in headers.items()}
+                    if tool == "codex":
+                        raise ConfigError(
+                            f"mcp server {name}.headers are not supported for Codex presets; "
+                            "use bearer_token_env_var or OAuth"
+                        )
+                    out["headers"], header_env, sensitive_headers = validate_headers(
+                        headers, f"mcp server {name}.headers"
+                    )
+                    env.extend(header_env)
+                    if sensitive_headers and parsed_url.scheme != "https":
+                        raise ConfigError(
+                            f"MCP server {name!r} with sensitive headers must use https"
+                        )
                 collect_env(env, server.get("env"), f"mcp server {name}.env")
                 resolved.remote_mcp.append(out)
             else:
@@ -797,16 +1037,18 @@ def resolve_config(
             resolved.skill_mounts.append({"name": skill_name, "path": str(skill_dir)})
 
     seen_host_commands: set[str] = set()
+    seen_host_command_keys: dict[str, str] = {}
     for item in as_list(preset.get("host_commands"), f"presets.{preset_name}.host_commands"):
         if isinstance(item, str):
-            require_name(item, "host command name")
+            require_transport_name(item, "host command name")
             cmd_def = host_command_defs.get(item)
             if not isinstance(cmd_def, dict):
                 raise ConfigError(f"host command not found: {item}")
             command = cmd_def.get("command")
             name = item
         elif isinstance(item, dict):
-            name = require_name(item.get("name"), "inline host command name")
+            reject_unknown_keys(item, {"name", "command"}, "inline host command")
+            name = require_transport_name(item.get("name"), "inline host command name")
             command = item.get("command")
         else:
             raise ConfigError(f"presets.{preset_name}.host_commands entries must be strings or tables")
@@ -817,14 +1059,26 @@ def resolve_config(
         if name in seen_host_commands:
             raise ConfigError(f"duplicate host command in preset {preset_name!r}: {name}")
         seen_host_commands.add(name)
+        normalized_name = transport_key(name)
+        if normalized_name in seen_host_command_keys:
+            raise ConfigError(
+                "host command names collide after relay normalization: "
+                f"{seen_host_command_keys[normalized_name]!r} and {name!r}"
+            )
+        seen_host_command_keys[normalized_name] = name
         resolved.host_commands.append({"name": name, "command": command.strip()})
 
     for item in as_list(preset.get("extra_mounts"), f"presets.{preset_name}.extra_mounts"):
         if isinstance(item, str):
+            if not item or "\n" in item:
+                raise ConfigError(
+                    f"presets.{preset_name}.extra_mounts entries must be non-empty paths without newlines"
+                )
             resolved.extra_mounts.append(item)
         elif isinstance(item, dict):
+            reject_unknown_keys(item, {"path", "mode"}, f"presets.{preset_name}.extra_mounts entry")
             path = item.get("path")
-            if not isinstance(path, str) or not path:
+            if not isinstance(path, str) or not path or "\n" in path:
                 raise ConfigError(f"presets.{preset_name}.extra_mounts entry requires path")
             mode = item.get("mode", "ro")
             if mode not in {"ro", "rw"}:
@@ -912,6 +1166,10 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("Skills:")
         for skill in resolved.skill_mounts:
             print(f"  - {skill['name']} ({skill['path']})")
+    if resolved.host_commands:
+        print("Host commands:")
+        for command in resolved.host_commands:
+            print(f"  - {command['name']} (executes on host)")
     if resolved.extra_env:
         print("Env forwarded:")
         for name in resolved.extra_env:
@@ -929,24 +1187,65 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         for mount in resolved.extra_mounts:
             print(f"  - {mount}")
 
+    print("Capabilities:")
+    print("  - repository: read/write, including .git")
+    if resolved.tool == "claude":
+        print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
+    elif resolved.codex_copy_auth == "0":
+        print("  - credentials: host Codex auth.json copy disabled")
+    else:
+        print("  - credentials: automated host Codex state/auth reuse")
+    if resolved.stdio_mcp or resolved.host_commands:
+        print("  - host execution: enabled by selected bridge integrations")
+    else:
+        print("  - host execution: no selected bridge integrations")
+    if resolved.remote_mcp:
+        print("  - external connectors: enabled")
+    if resolved.net == "gate":
+        print("  - network: proxy approval helper (deliberate bypass remains possible)")
+    elif resolved.net == "off":
+        print("  - network: Docker network disabled for the main tool container")
+    else:
+        print("  - network: open")
+    if resolved.tool == "claude" and resolved.session_sync == "1":
+        print("  - host state writeback: Claude session sync enabled")
+    if resolved.ssh_key:
+        print(f"  - SSH private key: mounted read-only ({resolved.ssh_key})")
+
     if not doctor:
         return 0
 
     errors: list[str] = []
     warnings: list[str] = []
+    if shutil.which("docker") is None:
+        errors.append("docker command not found")
     if resolved.tool == "claude" and resolved.claude_auth == "api-key" and not os.environ.get("ANTHROPIC_API_KEY"):
         errors.append("ANTHROPIC_API_KEY is required for Claude api-key auth")
     if resolved.tool == "claude" and resolved.claude_auth == "bedrock":
         aws_creds = Path.home() / ".aws" / "credentials"
-        if not aws_creds.exists():
-            warnings.append("~/.aws/credentials not found for Claude Bedrock auth")
-    if resolved.host_codex_dir and not Path(resolved.host_codex_dir).exists():
-        warnings.append(f"Codex config directory does not exist: {resolved.host_codex_dir}")
-    if resolved.host_agents_dir and not Path(resolved.host_agents_dir).exists():
-        warnings.append(f"Agents directory does not exist: {resolved.host_agents_dir}")
+        if not aws_creds.is_file():
+            errors.append("~/.aws/credentials must be a regular file for Claude Bedrock auth")
+    if resolved.host_codex_dir and not Path(resolved.host_codex_dir).is_dir():
+        warnings.append(f"Codex config directory is missing or not a directory: {resolved.host_codex_dir}")
+    if resolved.host_agents_dir and not Path(resolved.host_agents_dir).is_dir():
+        warnings.append(f"Agents directory is missing or not a directory: {resolved.host_agents_dir}")
+    if resolved.ssh_key and not Path(expand_path_string(resolved.ssh_key)).is_file():
+        errors.append(f"SSH key is missing or not a regular file: {resolved.ssh_key}")
     for env_name in resolved.extra_env:
         if not os.environ.get(env_name):
             warnings.append(f"env var is unset: {env_name}")
+    for mount in resolved.extra_mounts:
+        raw_path = mount.removeprefix("rw=")
+        if not Path(expand_path_string(raw_path)).exists():
+            warnings.append(f"extra mount does not exist and will be skipped: {raw_path}")
+    for command in resolved.host_commands:
+        try:
+            argv = shlex.split(command["command"])
+        except ValueError as exc:
+            errors.append(f"host command {command['name']!r} has invalid quoting: {exc}")
+            continue
+        if argv and "/" not in argv[0] and shutil.which(argv[0]) is None:
+            warnings.append(f"host command executable not found in PATH: {argv[0]}")
 
     if warnings:
         print("Warnings:")
@@ -1116,69 +1415,29 @@ def command_show(args: argparse.Namespace) -> int:
 
 
 SAMPLE_CONFIG = """# cage central configuration
+# This starter is intentionally minimal and uses existing host Codex state.
+# Add identities, MCP packs, skill packs, host commands, and extra mounts only
+# after the base launch works. See README.md for advanced examples.
 version = 1
-default_preset = "codex-work"
+default_preset = "codex-local"
 
 [defaults]
 net = "gate"
 session_sync = true
 
-[auth.codex-work]
+[auth.codex-local]
 tool = "codex"
-host_codex_dir = "~/.codex-work"
+host_codex_dir = "~/.codex"
 host_agents_dir = "~/.agents"
 copy_auth = true
 
-[auth.codex-company-proxy]
+[presets.codex-local]
 tool = "codex"
-host_codex_dir = "~/.codex-company"
-host_agents_dir = "~/.agents"
-copy_auth = false
-env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
-
-[identities.work]
-git_user_name = "Your Name"
-git_user_email = "you@example.com"
-gh_auth = true
-gh_account = "work"
-
-[mcp_packs.linear]
-env = ["LINEAR_API_KEY"]
-servers = [
-  { name = "linear", type = "http", url = "https://mcp.linear.app/mcp", bearer_token_env_var = "LINEAR_API_KEY" },
-]
-
-[mcp_packs.local-tools]
-servers = [
-  { name = "jira", type = "stdio", command = "npx -y @company/jira-mcp" },
-]
-
-[skill_packs.agent-basics]
-source = "~/.agents"
-skills = ["agents-best-practices"]
-
-[skill_packs.external-systems]
-source = "~/.agents"
-skills = ["linear-ticket-flow", "dash0-dashboard-flow"]
-
-[presets.codex-work]
-tool = "codex"
-auth = "codex-work"
-identity = "work"
-mcp_packs = ["linear", "local-tools"]
-skill_packs = ["agent-basics", "external-systems"]
-net = "gate"
-
-[presets.codex-company-debug]
-tool = "codex"
-auth = "codex-company-proxy"
-identity = "work"
-mcp_packs = ["linear"]
-skill_packs = ["agent-basics", "external-systems"]
+auth = "codex-local"
 net = "gate"
 
 [projects]
-# "/Users/me/code/project-a" = "codex-work"
+# "/Users/me/code/project-a" = "codex-local"
 """
 
 
@@ -1188,7 +1447,7 @@ def command_init(args: argparse.Namespace) -> int:
         print("Use --force to overwrite, or 'cage config edit'.")
         return 0
     args.config.parent.mkdir(parents=True, exist_ok=True)
-    args.config.write_text(SAMPLE_CONFIG, encoding="utf-8")
+    atomic_write_text(args.config, SAMPLE_CONFIG)
     print(f"Wrote {args.config}")
     return 0
 
@@ -1214,15 +1473,23 @@ def replace_projects_section(text: str, projects: dict[str, str]) -> str:
     lines = text.splitlines()
     start = None
     end = len(lines)
+    header = "[projects]"
+    preserved_comments: list[str] = []
     for i, line in enumerate(lines):
-        if line.strip() == "[projects]":
+        if PROJECTS_TABLE_RE.fullmatch(line):
             start = i
+            header = line
             for j in range(i + 1, len(lines)):
-                if TABLE_RE.match(lines[j]):
+                if TABLE_RE.fullmatch(lines[j]):
                     end = j
                     break
+                if not lines[j].strip() or lines[j].lstrip().startswith("#"):
+                    preserved_comments.append(lines[j])
             break
-    section = ["[projects]"]
+    section = [header]
+    section.extend(preserved_comments)
+    if preserved_comments and preserved_comments[-1].strip():
+        section.append("")
     for path, preset in sorted(projects.items()):
         section.append(f"{toml_quote(path)} = {toml_quote(preset)}")
     if start is None:
@@ -1234,6 +1501,38 @@ def replace_projects_section(text: str, projects: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    if path.is_symlink():
+        try:
+            destination = path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ConfigError(f"refusing to write through broken config symlink: {path}") from exc
+        if not destination.is_file():
+            raise ConfigError(f"config symlink target must be a regular file: {destination}")
+    else:
+        destination = path
+    mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o600
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        temp_path.chmod(mode)
+        os.replace(temp_path, destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def command_set_project(args: argparse.Namespace) -> int:
     data = load_config(args.config)
     presets = as_table(data, "presets")
@@ -1243,7 +1542,13 @@ def command_set_project(args: argparse.Namespace) -> int:
     project_path = normalize_project_path(args.path)
     projects[project_path] = args.preset
     text = args.config.read_text(encoding="utf-8")
-    args.config.write_text(replace_projects_section(text, projects), encoding="utf-8")
+    updated = replace_projects_section(text, projects)
+    # Validate the complete result before replacing the source file.
+    try:
+        tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"refusing to write invalid TOML: {exc}") from exc
+    atomic_write_text(args.config, updated)
     print(f"Set {project_path} -> {args.preset}")
     return 0
 

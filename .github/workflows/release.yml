@@ -5,14 +5,47 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  release:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Run validation
+        run: |
+          python -m pytest -q
+          python -m py_compile cage-config.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
+          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh
+          docker compose config
+
+      - name: Run Docker integration smoke tests
+        if: matrix.python-version == '3.12'
+        env:
+          CAGE_RUN_DOCKER_SMOKE: '1'
+        run: python -m pytest -q tests/test_docker_smoke.py
+
+  package:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Verify version matches tag
         run: |
@@ -32,25 +65,28 @@ jobs:
              docker-compose.yml \
              Dockerfile Dockerfile.codex \
              entrypoint.sh entrypoint-codex.sh \
-             install.sh Makefile README.md \
+             install.sh Makefile README.md SECURITY.md CHANGELOG.md \
              "$DIST/"
           cp -r netgate "$DIST/"
+          cp -r docs "$DIST/"
           tar czf "${DIST}.tar.gz" "$DIST"
           shasum -a 256 "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          DIST="cage-${VERSION}"
-          gh release create "v${VERSION}" \
-            --title "cage ${VERSION}" \
-            --generate-notes \
-            "${DIST}.tar.gz" \
-            "${DIST}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cage-release-${{ github.ref_name }}
+          path: |
+            cage-${{ env.VERSION }}.tar.gz
+            cage-${{ env.VERSION }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   docker:
+    needs: package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         include:
@@ -60,6 +96,8 @@ jobs:
             dockerfile: Dockerfile.codex
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Extract version from tag
         run: |
@@ -92,3 +130,26 @@ jobs:
           tags: |
             ghcr.io/sindycate/cage/${{ matrix.image }}:${{ env.VERSION }}
             ghcr.io/sindycate/cage/${{ matrix.image }}:latest
+
+  release:
+    needs: [package, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cage-release-${{ github.ref_name }}
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          DIST="cage-${VERSION}"
+          gh release create "v${VERSION}" \
+            --title "cage ${VERSION}" \
+            --generate-notes \
+            "dist/${DIST}.tar.gz" \
+            "dist/${DIST}.tar.gz.sha256"

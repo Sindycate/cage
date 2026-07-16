@@ -142,6 +142,136 @@ class CageConfigTests(unittest.TestCase):
         with self.assertRaises(cage_config.ConfigError):
             self.resolve(data)
 
+    def test_transport_name_normalization_collisions_are_rejected(self):
+        data = self.base_config()
+        data["mcp_packs"]["collision"] = {
+            "servers": [
+                {"name": "JIRA", "type": "stdio", "command": "jira-mcp"},
+            ]
+        }
+        data["presets"]["codex-main"]["mcp_packs"] = ["local", "collision"]
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "relay normalization"):
+            self.resolve(data)
+
+    def test_authenticated_http_mcp_requires_https(self):
+        data = self.base_config()
+        data["mcp_packs"]["linear"]["servers"][0]["url"] = "http://mcp.example.test/mcp"
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "must use https"):
+            self.resolve(data)
+
+    def test_sensitive_header_requires_environment_reference(self):
+        with self.assertRaisesRegex(cage_config.ConfigError, "literal secret"):
+            cage_config.validate_headers(
+                {"Authorization": "Bearer hard-coded-token"},
+                "server.headers",
+            )
+
+    def test_claude_header_environment_reference_is_forwarded_automatically(self):
+        data = {
+            "version": 1,
+            "default_preset": "claude-main",
+            "auth": {"claude-main": {"tool": "claude", "mode": "api-key"}},
+            "mcp_packs": {
+                "custom": {
+                    "servers": [
+                        {
+                            "name": "custom",
+                            "type": "http",
+                            "url": "https://mcp.example.test/mcp",
+                            "headers": {"Authorization": "Bearer ${CUSTOM_TOKEN}"},
+                        }
+                    ]
+                }
+            },
+            "presets": {
+                "claude-main": {
+                    "tool": "claude",
+                    "auth": "claude-main",
+                    "mcp_packs": ["custom"],
+                }
+            },
+        }
+
+        resolved = cage_config.resolve_config(
+            data, Path("/tmp/config.toml"), "/tmp/project"
+        )
+
+        self.assertEqual(resolved.extra_env, ["CUSTOM_TOKEN"])
+        self.assertEqual(
+            resolved.remote_mcp[0]["headers"]["Authorization"],
+            "Bearer ${CUSTOM_TOKEN}",
+        )
+
+    def test_codex_custom_headers_fail_instead_of_being_silently_ignored(self):
+        data = self.base_config()
+        data["mcp_packs"]["linear"]["servers"][0]["headers"] = {
+            "X-Tenant": "example"
+        }
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "not supported for Codex"):
+            self.resolve(data)
+
+    def test_name_validators_reject_final_newline(self):
+        for validator, value in [
+            (cage_config.require_name, "server\n"),
+            (cage_config.require_skill_name, "skill\n"),
+            (cage_config.require_env_name, "TOKEN\n"),
+        ]:
+            with self.subTest(validator=validator.__name__):
+                with self.assertRaises(cage_config.ConfigError):
+                    validator(value, "test")
+
+    def test_load_config_rejects_unknown_security_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "[auth.work]",
+                        'tool = "codex"',
+                        "copy_aut = false",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(cage_config.ConfigError, "copy_aut"):
+                cage_config.load_config(config)
+
+    def test_schema_rejects_unknown_inline_keys_in_unused_preset(self):
+        data = {
+            "version": 1,
+            "presets": {
+                "unused": {
+                    "tool": "codex",
+                    "host_commands": [
+                        {"name": "token", "command": "token", "unexpected": True}
+                    ],
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "unexpected"):
+            cage_config.validate_schema(data)
+
+    def test_schema_rejects_newline_in_unused_extra_mount(self):
+        data = {
+            "version": 1,
+            "presets": {
+                "unused": {
+                    "tool": "codex",
+                    "extra_mounts": ["/tmp/first\n/tmp/second"],
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "without newlines"):
+            cage_config.validate_schema(data)
+
     def test_resolves_selected_skill_packs(self):
         data = self.base_config()
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,12 +364,17 @@ class CageConfigTests(unittest.TestCase):
             data["presets"]["codex-main"]["skill_packs"] = ["external-systems"]
             resolved = self.resolve(data)
             out = io.StringIO()
-            with patch("sys.stdout", out):
+            with (
+                patch("sys.stdout", out),
+                patch.object(cage_config.shutil, "which", return_value="/usr/bin/docker"),
+            ):
                 result = cage_config.explain(resolved, doctor=True)
 
         self.assertEqual(result, 0)
         self.assertIn("Skill packs: external-systems", out.getvalue())
         self.assertIn("linear-ticket-flow", out.getvalue())
+        self.assertIn("Capabilities:", out.getvalue())
+        self.assertIn("host execution: enabled", out.getvalue())
         self.assertIn("Doctor: ok", out.getvalue())
 
     def test_missing_auth_reference_is_rejected(self):
@@ -435,6 +570,56 @@ class CageConfigTests(unittest.TestCase):
         self.assertIn('"/new" = "b"', updated)
         self.assertNotIn('"/old" = "a"', updated)
         self.assertIn("[presets.a]", updated)
+
+    def test_replace_projects_section_preserves_comment_and_array_table(self):
+        text = (
+            "version = 1\n\n"
+            "[projects] # project routing\n"
+            "# This comment should survive.\n"
+            '"/old" = "a"\n\n'
+            "[[widgets]]\n"
+            'name = "keep"\n'
+        )
+
+        updated = cage_config.replace_projects_section(text, {"/new": "b"})
+        parsed = cage_config.tomllib.loads(updated)
+
+        self.assertIn("[projects] # project routing", updated)
+        self.assertIn("# This comment should survive.", updated)
+        self.assertEqual(parsed["projects"], {"/new": "b"})
+        self.assertEqual(parsed["widgets"], [{"name": "keep"}])
+
+    def test_starter_config_is_minimal_and_resolvable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            cage_config.command_init(SimpleNamespace(config=config, force=False))
+            data = cage_config.load_config(config)
+            resolved = cage_config.resolve_config(data, config, "/tmp/example")
+            config_mode = config.stat().st_mode & 0o777
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                cage_config.explain(resolved)
+
+        self.assertEqual(resolved.preset_name, "codex-local")
+        self.assertEqual(resolved.tool, "codex")
+        self.assertEqual(resolved.mcp_pack_names, [])
+        self.assertEqual(resolved.skill_pack_names, [])
+        self.assertEqual(resolved.host_commands, [])
+        self.assertEqual(config_mode, 0o600)
+        self.assertNotIn("Claude session sync", out.getvalue())
+
+    def test_atomic_write_preserves_config_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "dotfiles-config.toml"
+            link = root / "config.toml"
+            target.write_text("version = 1\n", encoding="utf-8")
+            link.symlink_to(target)
+
+            cage_config.atomic_write_text(link, "version = 1\n# updated\n")
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_text(), "version = 1\n# updated\n")
 
     def test_interactive_selection_resolves_existing_blocks(self):
         data = self.base_config()
