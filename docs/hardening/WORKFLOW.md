@@ -103,7 +103,8 @@ Packet states are `pending`, `in progress`, `verification`, `complete`, or
 The exact versions may change after integration review.
 
 - **Checkpoint 1 — boundary safety:** P0-A, the safe portion of P0-B, accurate
-  warnings, and regression tests. Release candidate: `v0.23.0`.
+  warnings, and regression tests. Published source checkpoint: `v0.23.0`;
+  release-workflow correction: `v0.23.1`.
 - **Checkpoint 2 — state and network:** remaining P0-B/P0-C plus OAuth and
   concurrency protections.
 - **Checkpoint 3 — controlled capabilities:** bridges, limits, mounts, trust

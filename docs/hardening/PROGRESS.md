@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-16 — v0.23.1 release-workflow correction
+
+The v0.23.0 source commit and tag reached GitHub, but both CI and Release failed
+inside `actions/setup-python@v5` before any project test. The authenticated job
+view showed that pip caching searched for `requirements.txt`/`pyproject.toml`
+instead of the repository's tracked `requirements-dev.txt`.
+
+Correction:
+
+- set `cache-dependency-path: requirements-dev.txt` in both CI and Release;
+- bumped the next immutable checkpoint to `0.23.1`; v0.23.0 is not described as
+  a completed release because no archive or container image was published;
+- require the same full local gate, new commit/tag, and remote workflow/artifact
+  verification before declaring v0.23.1 released.
+
 ## 2026-07-16 — v0.23.0 local release candidate verified
 
 Checkpoint: boundary, state, network, bridge, configuration, installer, and

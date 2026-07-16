@@ -7,6 +7,13 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.1 — 2026-07-16
+
+- fixed CI and release setup by pointing `setup-python`'s pip cache at the
+  repository's actual `requirements-dev.txt` dependency file. Version 0.23.0
+  remains an unreleased tag because its workflows stopped before running tests
+  or publishing artifacts.
+
 ## 0.23.0 — 2026-07-16
 
 ### Security and correctness

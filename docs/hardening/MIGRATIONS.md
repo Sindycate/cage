@@ -8,10 +8,17 @@ when that version is committed and tagged.
 
 No migrations recorded yet.
 
+## 0.23.1 — 2026-07-16
+
+No user-side migration. This patch corrects the GitHub Actions pip-cache
+dependency path; it supersedes the failed, unpublished v0.23.0 workflow run and
+is the first release artifact containing all v0.23.0 hardening changes below.
+
 ## 0.23.0 — 2026-07-16
 
-These changes are included in Cage 0.23.0. Review every section that matches a
-capability used by your presets before upgrading.
+These changes were prepared in the v0.23.0 source/tag and first published in
+v0.23.1. Review every section that matches a capability used by your presets
+before upgrading.
 
 ### Project `.mcp.json` overlay
 
