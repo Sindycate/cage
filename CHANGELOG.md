@@ -7,6 +7,14 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.2 — 2026-07-16
+
+- supplied the repository explicitly to `gh release create` in the checkout-free
+  final release job;
+- made real-Docker integration smoke tests run in both Python matrix jobs after
+  GitHub unexpectedly skipped the previous conditional step. v0.23.1 published
+  both versioned container images but did not create its GitHub Release object.
+
 ## 0.23.1 — 2026-07-16
 
 - fixed CI and release setup by pointing `setup-python`'s pip cache at the

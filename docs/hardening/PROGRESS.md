@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-16 — v0.23.2 final-release correction
+
+The v0.23.1 CI, package, Codex image, and Claude image jobs succeeded. The final
+release job downloaded the artifact but failed immediately in `gh release
+create`; the job intentionally had no checkout and the command did not supply a
+repository, leaving `gh` without Git context for repository discovery.
+
+Correction:
+
+- pass `--repo "$GITHUB_REPOSITORY"` to the checkout-free release command;
+- remove the brittle Python-version condition that GitHub skipped and enforce
+  the opt-in real-Docker suite in both Python 3.11 and 3.12 jobs;
+- bump the next immutable complete-release attempt to `0.23.2` while preserving
+  the already published versioned v0.23.1 container images.
+
 ## 2026-07-16 — v0.23.1 release-workflow correction
 
 The v0.23.0 source commit and tag reached GitHub, but both CI and Release failed

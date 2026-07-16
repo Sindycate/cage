@@ -8,16 +8,24 @@ when that version is committed and tagged.
 
 No migrations recorded yet.
 
+## 0.23.2 — 2026-07-16
+
+No user-side migration. This patch supplies explicit repository context to the
+checkout-free GitHub Release job and enforces real-Docker smoke tests in every
+Python matrix job. It is the first complete GitHub Release containing the v0.23
+hardening changes.
+
 ## 0.23.1 — 2026-07-16
 
 No user-side migration. This patch corrects the GitHub Actions pip-cache
 dependency path; it supersedes the failed, unpublished v0.23.0 workflow run and
-is the first release artifact containing all v0.23.0 hardening changes below.
+published both versioned container images. Its final GitHub Release job failed
+before creating the release object.
 
 ## 0.23.0 — 2026-07-16
 
-These changes were prepared in the v0.23.0 source/tag and first published in
-v0.23.1. Review every section that matches a capability used by your presets
+These changes were prepared in the v0.23.0 source/tag and first fully published
+in v0.23.2. Review every section that matches a capability used by your presets
 before upgrading.
 
 ### Project `.mcp.json` overlay

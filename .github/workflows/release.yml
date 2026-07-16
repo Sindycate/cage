@@ -35,7 +35,6 @@ jobs:
           docker compose config
 
       - name: Run Docker integration smoke tests
-        if: matrix.python-version == '3.12'
         env:
           CAGE_RUN_DOCKER_SMOKE: '1'
         run: python -m pytest -q tests/test_docker_smoke.py
@@ -150,6 +149,8 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           DIST="cage-${VERSION}"
           gh release create "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
             --title "cage ${VERSION}" \
             --generate-notes \
             "dist/${DIST}.tar.gz" \
