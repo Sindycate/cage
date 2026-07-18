@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.23.2"
+CAGE_VERSION="0.23.3"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -288,6 +288,15 @@ _load_config() {
 
 _load_config
 
+# Docker Desktop and Colima may not share macOS's /var/folders system temp
+# directory with their VM. Bind-mounted private staging must therefore live
+# under Cage's canonical config directory, which is normally inside the
+# Docker-shared user home.
+if ! CAGE_STAGE_DIR="$(cd "$CAGE_CONFIG_DIR" && pwd -P)"; then
+    echo "ERROR: cannot resolve Cage config directory '$CAGE_CONFIG_DIR'" >&2
+    exit 1
+fi
+
 # Resolve tool from the selected preset.
 if [ -n "${CAGE_TOOL_RESOLVED:-}" ]; then
     CAGE_TOOL="$CAGE_TOOL_RESOLVED"
@@ -388,6 +397,25 @@ if [ -n "${EXTRA_MOUNTS:-}" ]; then    # newline-delimited resolved config
 fi
 for spec in "${EXTRA_MOUNT_SPECS[@]+"${EXTRA_MOUNT_SPECS[@]}"}"; do   # CLI flags
     _add_extra_mount "${spec%%$'\t'*}" "${spec#*$'\t'}"
+done
+
+# Private Docker bind sources must not also be reachable through a writable
+# container mount. Otherwise a nested read-only file mount could be modified
+# through the writable parent alias.
+if [ "$CAGE_STAGE_DIR" = "$REPO_PATH" ] || [[ "$CAGE_STAGE_DIR" == "$REPO_PATH"/* ]]; then
+    echo "ERROR: Cage config directory '$CAGE_STAGE_DIR' is inside the writable repo mount '$REPO_PATH'" >&2
+    echo "Move XDG_CONFIG_HOME outside every Cage-writable mount." >&2
+    exit 1
+fi
+for _mount_entry in "${_EXTRA_MOUNT_SEEN[@]+"${_EXTRA_MOUNT_SEEN[@]}"}"; do
+    if [ "${_mount_entry%%$'\t'*}" = "rw" ]; then
+        _writable_root="${_mount_entry#*$'\t'}"
+        if [ "$CAGE_STAGE_DIR" = "$_writable_root" ] || [[ "$CAGE_STAGE_DIR" == "$_writable_root"/* ]]; then
+            echo "ERROR: Cage config directory '$CAGE_STAGE_DIR' is inside read-write extra mount '$_writable_root'" >&2
+            echo "Move XDG_CONFIG_HOME outside every Cage-writable mount." >&2
+            exit 1
+        fi
+    fi
 done
 
 REPO_BASENAME="$(basename "$REPO_PATH")"
@@ -695,7 +723,8 @@ if [ -n "${MCP_SERVERS:-}" ]; then
             # repository is container-writable, so a cleanup-time restore would
             # otherwise follow a container-controlled symlink on the host.
             if [ -e "$REPO_PATH/.mcp.json" ] || [ -L "$REPO_PATH/.mcp.json" ]; then
-                MCP_PROJECT_CONFIG=$(mktemp "${TMPDIR:-/tmp}/cage-mcp.XXXXXX")
+                MCP_PROJECT_CONFIG=$(mktemp "$CAGE_STAGE_DIR/.cage-mcp.XXXXXX")
+                chmod 600 "$MCP_PROJECT_CONFIG"
                 _bridged_names=()
                 while IFS= read -r _server_line; do
                     _bridged_names+=("$(printf '%s\n' "$_server_line" | sed 's/^SERVER:\(.*\)=PORT:.*/\1/')")
@@ -1758,7 +1787,14 @@ try:
             normalize_mode=True,
             missing_ok=True,
         )
-        with tempfile.TemporaryDirectory(prefix="cage-oauth-sync-") as stage:
+        # macOS exposes its system temporary directory through /var/folders,
+        # which Docker Desktop and Colima may not share with their VM. Stage
+        # under the already validated user config directory instead: normal
+        # Cage launches require that home-backed path to be Docker-shareable.
+        with tempfile.TemporaryDirectory(
+            prefix=".cage-oauth-sync-",
+            dir=config_directory,
+        ) as stage:
             os.chmod(stage, 0o700)
             export_volume(stage)
             manifest = read_manifest(stage)

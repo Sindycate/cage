@@ -7,6 +7,16 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.3 — 2026-07-18
+
+- fixed Codex launches on macOS Docker/Colima contexts that do not share the
+  host `/var/folders` temporary directory with their VM;
+- moved Docker-bind-mounted OAuth and project `.mcp.json` staging into Cage's
+  canonical private config directory, while retaining mode-restricted files,
+  automatic cleanup, and the read-only project overlay;
+- reject a Cage config directory located inside the repository or another
+  read-write Cage mount, preventing writable aliases to private staging files.
+
 ## 0.23.2 — 2026-07-16
 
 - supplied the repository explicitly to `gh release create` in the checkout-free

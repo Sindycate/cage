@@ -43,10 +43,8 @@ exit 0
     )
 
 
-def write_mcp_config(path: Path) -> None:
-    path.write_text(
-        "\n".join(
-            [
+def write_mcp_config(path: Path, extra_mount: Path | None = None) -> None:
+    lines = [
                 "version = 1",
                 'default_preset = "codex-test"',
                 "[auth.codex-test]",
@@ -61,11 +59,15 @@ def write_mcp_config(path: Path) -> None:
                 'auth = "codex-test"',
                 'mcp_packs = ["local"]',
                 'net = "open"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    ]
+    if extra_mount is not None:
+        lines.append(
+            "extra_mounts = [{ path = "
+            + json.dumps(str(extra_mount))
+            + ', mode = "rw" }]'
+        )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_fake_mcp_bridge(path: Path) -> None:
@@ -98,8 +100,15 @@ while True:
 
 
 class HostBoundaryTests(unittest.TestCase):
-    def launch_with_mcp(self, root: Path, repo: Path) -> tuple[subprocess.CompletedProcess, Path, Path]:
-        xdg = root / "xdg"
+    def launch_with_mcp(
+        self,
+        root: Path,
+        repo: Path,
+        *,
+        xdg: Path | None = None,
+        extra_mount: Path | None = None,
+    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
+        xdg = xdg or root / "xdg"
         home = root / "home"
         bin_dir = root / "bin"
         capture = root / "container-mcp.json"
@@ -108,7 +117,7 @@ class HostBoundaryTests(unittest.TestCase):
         home.mkdir(parents=True)
         bin_dir.mkdir(parents=True)
         write_fake_docker(bin_dir / "docker")
-        write_mcp_config(xdg / "cage" / "config.toml")
+        write_mcp_config(xdg / "cage" / "config.toml", extra_mount)
         launcher_dir = root / "launcher"
         launcher_dir.mkdir()
         shutil.copy2(CAGE, launcher_dir / "cage")
@@ -180,6 +189,38 @@ class HostBoundaryTests(unittest.TestCase):
             overlay_source = Path(overlay_mount.split(":", 1)[0])
             self.assertFalse(overlay_source.exists())
             self.assertFalse(overlay_source.is_relative_to(repo))
+            self.assertEqual(overlay_source.parent, (root / "xdg" / "cage").resolve())
+
+    def test_private_stage_rejects_writable_repository_alias(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+
+            result, capture, _ = self.launch_with_mcp(root, repo, xdg=repo / "xdg")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("inside the writable repo mount", result.stderr)
+            self.assertFalse(capture.exists())
+
+    def test_private_stage_rejects_read_write_extra_mount_alias(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            shared = root / "shared"
+            repo.mkdir()
+            shared.mkdir()
+
+            result, capture, _ = self.launch_with_mcp(
+                root,
+                repo,
+                xdg=shared / "xdg",
+                extra_mount=shared,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("inside read-write extra mount", result.stderr)
+            self.assertFalse(capture.exists())
 
     def test_symlinked_project_mcp_fails_closed_without_restore_write(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:

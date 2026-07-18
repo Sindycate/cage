@@ -3,6 +3,40 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-18 — v0.23.3 macOS/Colima bind-path correction
+
+A normal post-upgrade Codex launch exposed a v0.23.x regression: the OAuth
+reconciler created its private helper stage under macOS `/var/folders`, while
+the active Colima Docker VM shared the user home but not that system temporary
+tree. Docker therefore rejected the bind before Codex started. Canonicalizing
+the path to `/private/var` was insufficient because that tree was also outside
+the VM's shares.
+
+Correction:
+
+- stage OAuth helper exchange files under the already validated, canonical Cage
+  config directory instead of the operating-system temporary directory;
+- move the private project `.mcp.json` overlay to the same Docker-shareable
+  directory, closing the sibling latent failure;
+- reject a config/staging directory nested below the repository or a read-write
+  extra mount so the container cannot mutate a read-only overlay through a
+  writable alias;
+- preserve mode-0700 temporary directories, mode-0600 files, normal/error
+  cleanup, no writable host credential mount, and the read-only project overlay.
+
+Evidence for the release candidate:
+
+- the exact `/var/folders/.../cage-oauth-*` Docker error reproduced against the
+  local Colima daemon, while an equivalent bind below `/Users` succeeded;
+- the new regression test fails on v0.23.2 placement and passes after the fix;
+- the focused OAuth and host-boundary suites pass, including cleanup after a
+  failed reconciliation and project-overlay source cleanup;
+- the complete suite passes (`116 passed, 2 skipped`), both opt-in real-Docker
+  smoke tests pass, and shell/Python syntax, Compose, version, and diff checks
+  pass;
+- independent re-review found no remaining release blocker. The external
+  release workflow remains required before publication is considered verified.
+
 ## 2026-07-16 — v0.23.2 final-release correction
 
 The v0.23.1 CI, package, Codex image, and Claude image jobs succeeded. The final

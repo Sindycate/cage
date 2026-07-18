@@ -318,6 +318,30 @@ class OAuthSyncHardeningTests(unittest.TestCase):
         main_mounts = [mount for entry in entries for mount in entry["legacy_mounts"]]
         self.assertIn(f"{codex_home}:/host-codex:ro", main_mounts)
 
+    def test_oauth_helper_stage_uses_the_checked_config_directory(self):
+        codex_home = self.make_codex_home("codex-stage", {"token": "safe"})
+        system_temp = self.base / "system-temp"
+        system_temp.mkdir()
+
+        result = self.launch(codex_home, TMPDIR=system_temp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        entries = [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+        helper_stages = {
+            Path(source).parent
+            for entry in entries
+            if entry["helper"]
+            for destination, source in entry["mounts"].items()
+            if destination in {"/out", "/sync-in"}
+        }
+        self.assertTrue(helper_stages)
+        self.assertEqual(helper_stages, {(self.xdg / "cage").resolve()})
+        self.assertEqual(list((self.xdg / "cage").glob(".cage-oauth-sync-*")), [])
+
+        failed = self.launch(codex_home, FAKE_MAIN_ACTION="malformed")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(list((self.xdg / "cage").glob(".cage-oauth-sync-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

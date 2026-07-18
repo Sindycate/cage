@@ -8,6 +8,41 @@ when that version is committed and tagged.
 
 No migrations recorded yet.
 
+## 0.23.3 — 2026-07-18
+
+Who is affected: Codex users on macOS Docker Desktop or Colima configurations
+that do not share `/var/folders` with the Docker VM. The same issue could affect
+repositories whose project `.mcp.json` needed Cage's private stdio-MCP overlay.
+
+Previous behavior: Cage created Docker-bind-mounted staging files under the
+host operating system's temporary directory. The path existed for Cage's host
+process but not inside some Docker VMs, so Docker rejected the launch with
+`bind source path does not exist`.
+
+New behavior: Cage creates those short-lived, private staging files under the
+canonical Cage config directory, normally `~/.config/cage`, which is inside the
+Docker-shared user home on standard macOS setups. Existing file modes, content
+validation, and success/error cleanup remain enforced. Cage rejects a config
+directory inside the repository or another read-write Cage mount because that
+would expose the same staging inode through a writable container path.
+
+Migration:
+
+1. Install Cage 0.23.3 or later with the normal installer.
+2. Re-run the same `cage` command; no credential or preset change is required.
+3. If `XDG_CONFIG_HOME` points outside every directory shared with the Docker
+   daemon, either share that path with Docker or move Cage's config back under
+   the user home.
+4. If the config directory is inside the repository or a configured read-write
+   extra mount, move it to a private path outside all Cage-writable mounts.
+
+Verification: the launch proceeds past OAuth reconciliation without a missing
+`cage-oauth-sync-*` bind-source error. Presets using a bridged project
+`.mcp.json` should likewise proceed without a missing `.cage-mcp.*` source.
+
+Rollback: restore 0.23.2 and set `TMPDIR` to a private directory under the
+Docker-shared user home for each launch. No persistent data migration is needed.
+
 ## 0.23.2 — 2026-07-16
 
 No user-side migration. This patch supplies explicit repository context to the
