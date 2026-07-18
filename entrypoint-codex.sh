@@ -90,9 +90,127 @@ if [ -d /host-codex ]; then
 fi
 
 reconcile_codex_auth /host-codex "$CODEX_DIR" "${CODEX_COPY_AUTH:-1}"
-for _sensitive_file in auth.json .credentials.json config.toml; do
-    [ -f "$CODEX_DIR/$_sensitive_file" ] && chmod 600 "$CODEX_DIR/$_sensitive_file"
-done
+
+# Root deliberately lacks CAP_FOWNER. Secure each sensitive file through one
+# no-follow descriptor, assign that inode to the remapped user, then fork and
+# set its mode after dropping to that owner. Path swaps can make the launch fail
+# but cannot redirect chmod onto a repository or other writable host mount.
+CAGE_CODEX_STATE_DIR="$CODEX_DIR" \
+CAGE_TARGET_UID="$(id -u "$TARGET_USER")" \
+CAGE_TARGET_GID="$(id -g "$TARGET_USER")" \
+python3 -I - <<'PY'
+import os
+import stat
+import sys
+
+state_dir = os.environ["CAGE_CODEX_STATE_DIR"]
+target_uid = int(os.environ["CAGE_TARGET_UID"])
+target_gid = int(os.environ["CAGE_TARGET_GID"])
+names = ("auth.json", ".credentials.json", "config.toml")
+
+
+def identity(value):
+    return value.st_dev, value.st_ino
+
+
+def refuse(name, detail):
+    sys.stderr.write(
+        "cage: refusing unsafe sensitive Codex state %s: %s\n" % (name, detail)
+    )
+    raise SystemExit(1)
+
+
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+try:
+    directory_fd = os.open(state_dir, directory_flags)
+except OSError as exc:
+    refuse("directory", exc)
+
+try:
+    if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+        refuse("directory", "state path is not a directory")
+
+    for name in names:
+        try:
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            refuse(name, exc)
+
+        if not stat.S_ISREG(before.st_mode):
+            refuse(name, "expected a regular non-symlink file")
+        if before.st_nlink != 1:
+            refuse(name, "hard-linked sensitive files are not allowed")
+
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        try:
+            descriptor = os.open(name, flags, dir_fd=directory_fd)
+        except OSError as exc:
+            refuse(name, exc)
+
+        try:
+            opened = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if identity(before) != identity(opened) or identity(opened) != identity(current):
+                refuse(name, "file changed while it was being opened")
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                refuse(name, "opened state is not a private regular file")
+
+            os.fchown(descriptor, target_uid, target_gid)
+            owned = os.fstat(descriptor)
+            if (
+                identity(opened) != identity(owned)
+                or owned.st_uid != target_uid
+                or owned.st_gid != target_gid
+            ):
+                refuse(name, "ownership normalization did not reach the opened file")
+
+            child = os.fork()
+            if child == 0:
+                try:
+                    os.setgroups([])
+                    os.setgid(target_gid)
+                    os.setuid(target_uid)
+                    os.fchmod(descriptor, 0o600)
+                    secured = os.fstat(descriptor)
+                    if (
+                        identity(owned) != identity(secured)
+                        or secured.st_uid != target_uid
+                        or secured.st_gid != target_gid
+                        or stat.S_IMODE(secured.st_mode) != 0o600
+                    ):
+                        raise OSError("mode verification failed")
+                    os._exit(0)
+                except BaseException as exc:
+                    message = "cage: could not secure Codex state %s: %s\n" % (name, exc)
+                    os.write(2, message.encode("utf-8", "replace"))
+                    os._exit(1)
+
+            _, child_status = os.waitpid(child, 0)
+            if not os.WIFEXITED(child_status) or os.WEXITSTATUS(child_status) != 0:
+                refuse(name, "could not set mode as the remapped owner")
+
+            secured = os.fstat(descriptor)
+            try:
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                refuse(name, "file changed while its mode was being set: %s" % exc)
+            if identity(secured) != identity(current):
+                refuse(name, "file changed while its mode was being set")
+            if (
+                not stat.S_ISREG(secured.st_mode)
+                or secured.st_nlink != 1
+                or secured.st_uid != target_uid
+                or secured.st_gid != target_gid
+                or stat.S_IMODE(secured.st_mode) != 0o600
+            ):
+                refuse(name, "private owner or mode verification failed")
+        finally:
+            os.close(descriptor)
+finally:
+    os.close(directory_fd)
+PY
 
 # Reconcile MCP servers selected by cage's central config into a marked,
 # generated block. This always runs so switching to a preset with no MCP pack

@@ -3,6 +3,38 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-18 — v0.23.4 remapped-owner mode correction
+
+After v0.23.3 fixed host-to-Docker staging, a normal Codex launch reached the
+entrypoint and exposed a second ownership-ordering regression. The OAuth helper
+correctly stored `.credentials.json` as the host UID/GID, and the entrypoint
+correctly remapped/chowned state to the Codex user, but it then ran an
+unsuppressed `chmod 600` as root. Cage deliberately drops `CAP_FOWNER`, so Linux
+rejected the mode change after root ceased to own the inode.
+
+Correction:
+
+- retain the narrower main-container capability set and normalize each
+  sensitive inode through a pinned, no-follow descriptor;
+- assign the opened inode to the mapped Codex user, then fork, drop to that
+  owner, and apply mode `0600` to the descriptor rather than the path;
+- reject symlinked, hard-linked, non-regular, or detected concurrently replaced
+  sensitive files without redirecting the mode change to another mount.
+
+Evidence for the release candidate:
+
+- reproduced root `chmod` failure in a disposable container with Cage's exact
+  CHOWN/DAC_OVERRIDE/SETGID/SETUID capability set and no `CAP_FOWNER`;
+- added a real-Docker entrypoint regression that failed on the old ordering and
+  now verifies credential owner/mode state, plus a negative symlink test that
+  confirms an owner-mapped target outside the state directory is unchanged;
+- ran the patched entrypoint successfully inside the real local v0.23.3 Codex
+  image with a dummy owner-mapped credential and the macOS UID/GID shape;
+- the complete suite passes (`116 passed, 4 skipped`), all four opt-in
+  real-Docker smoke tests pass, and shell/Python syntax, Compose, workflow YAML,
+  version, and diff checks pass;
+- independent security re-review returned `SHIP` with no blocking findings.
+
 ## 2026-07-18 — v0.23.3 macOS/Colima bind-path correction
 
 A normal post-upgrade Codex launch exposed a v0.23.x regression: the OAuth

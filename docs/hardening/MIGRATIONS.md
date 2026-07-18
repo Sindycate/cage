@@ -8,6 +8,40 @@ when that version is committed and tagged.
 
 No migrations recorded yet.
 
+## 0.23.4 — 2026-07-18
+
+Who is affected: Codex users on v0.23.0 through v0.23.3 whose persistent volume
+contains `.credentials.json`, `auth.json`, or a copied `config.toml`. OAuth
+users normally encounter the failure first on `.credentials.json`.
+
+Previous behavior: the entrypoint assigned persistent files to the remapped
+Codex user, then attempted to set mode `0600` as container root. Cage
+intentionally omits Linux `CAP_FOWNER`; root was therefore not the file owner
+and `chmod` aborted startup with `Operation not permitted`.
+
+New behavior: Cage keeps `CAP_FOWNER` disabled and performs private mode
+normalization as the mapped Codex owner on an already-open, no-follow file
+descriptor. Sensitive Codex files are explicitly assigned to that owner and
+must be regular, single-link files. Symlinks, non-regular files, hard links, and
+detected path replacements fail closed without redirecting `chmod` elsewhere.
+
+Migration:
+
+1. Install Cage 0.23.4 or later with the normal installer.
+2. Re-run the original `cage` command. Do not delete or recreate credentials.
+3. If Cage rejects unsafe sensitive state, inspect the named volume before
+   replacing anything; convert only the reported symlink, hard link, or
+   non-file into the intended regular private file, or reset that disposable
+   volume.
+
+Verification: startup proceeds past the sensitive-mode step. Existing
+`.credentials.json`, `auth.json`, and `config.toml` files are mode `0600` and
+owned by the mapped Codex user.
+
+Rollback: no persistent data migration occurs. Restoring v0.23.3 also restores
+the startup defect for affected volumes, so prefer upgrading; if a rollback is
+unavoidable, preserve the volume and credentials for a later fixed launch.
+
 ## 0.23.3 — 2026-07-18
 
 Who is affected: Codex users on macOS Docker Desktop or Colima configurations

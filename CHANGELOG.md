@@ -7,6 +7,15 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.4 — 2026-07-18
+
+- fixed Codex startup after OAuth synchronization when private state is owned
+  by the remapped container user and root intentionally lacks `CAP_FOWNER`;
+- normalize sensitive-file modes through a no-follow descriptor as the mapped
+  owner instead of widening the main container's Linux capabilities;
+- reject symlinked, hard-linked, non-regular, or concurrently replaced
+  sensitive Codex state without following the path to another mount.
+
 ## 0.23.3 — 2026-07-18
 
 - fixed Codex launches on macOS Docker/Colima contexts that do not share the
