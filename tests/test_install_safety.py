@@ -10,6 +10,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
 CAGE = ROOT / "cage"
+SYSTEM_BASH = "/bin/bash"
 
 
 class InstallerSafetyTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class InstallerSafetyTests(unittest.TestCase):
             CAGE_BIN_DIR=str(home / ".local" / "bin"),
         )
         return subprocess.run(
-            ["bash", str(INSTALLER), "--uninstall"],
+            [SYSTEM_BASH, str(INSTALLER), "--uninstall"],
             cwd=ROOT,
             env=env,
             text=True,
@@ -68,6 +69,7 @@ class InstallerSafetyTests(unittest.TestCase):
         archive: pathlib.Path,
         checksum: pathlib.Path,
         version: str,
+        discover_version: bool = False,
     ):
         bin_dir = home / ".local" / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -75,12 +77,23 @@ class InstallerSafetyTests(unittest.TestCase):
         fake_curl.write_text(
             "#!/bin/sh\n"
             "out=\n"
+            "url=\n"
+            "auth_header=0\n"
             "while [ \"$#\" -gt 0 ]; do\n"
             "  case \"$1\" in\n"
+            "    '') exit 40 ;;\n"
             "    -o) out=$2; shift 2 ;;\n"
+            "    -H) auth_header=1; shift 2 ;;\n"
+            "    http*) url=$1; shift ;;\n"
             "    *) shift ;;\n"
             "  esac\n"
             "done\n"
+            "if [ -z \"$out\" ]; then\n"
+            "  [ \"$auth_header\" -eq 0 ] || exit 41\n"
+            "  [ \"$url\" = 'https://api.github.com/repos/Sindycate/cage/releases/latest' ] || exit 42\n"
+            "  printf '{\"tag_name\":\"v%s\"}\\n' \"$TEST_VERSION\"\n"
+            "  exit 0\n"
+            "fi\n"
             "case \"$out\" in\n"
             "  *.sha256) cp \"$TEST_CHECKSUM\" \"$out\" ;;\n"
             "  *) cp \"$TEST_TARBALL\" \"$out\" ;;\n"
@@ -90,18 +103,26 @@ class InstallerSafetyTests(unittest.TestCase):
         fake_curl.chmod(0o755)
         (bin_dir / "docker").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (bin_dir / "docker").chmod(0o755)
+        (bin_dir / "gh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (bin_dir / "gh").chmod(0o755)
         env = os.environ.copy()
         env.update(
             HOME=str(home),
             CAGE_INSTALL_DIR=str(install_dir),
             CAGE_BIN_DIR=str(bin_dir),
-            CAGE_VERSION=version,
             TEST_TARBALL=str(archive),
             TEST_CHECKSUM=str(checksum),
+            TEST_VERSION=version,
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
         )
+        env.pop("GH_TOKEN", None)
+        env.pop("GITHUB_TOKEN", None)
+        if discover_version:
+            env.pop("CAGE_VERSION", None)
+        else:
+            env["CAGE_VERSION"] = version
         return subprocess.run(
-            ["bash", str(INSTALLER)],
+            [SYSTEM_BASH, str(INSTALLER)],
             cwd=ROOT,
             env=env,
             text=True,
@@ -124,7 +145,7 @@ class InstallerSafetyTests(unittest.TestCase):
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
         )
         return subprocess.run(
-            ["bash", str(INSTALLER), "--from-source"],
+            [SYSTEM_BASH, str(INSTALLER), "--from-source"],
             cwd=ROOT,
             env=env,
             text=True,
@@ -132,6 +153,7 @@ class InstallerSafetyTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
     def test_refuses_home_as_install_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             home = pathlib.Path(temp)
@@ -281,8 +303,35 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue((install_dir / ".cage-install").is_file())
             self.assertFalse((install_dir / ".cage-install").is_symlink())
             self.assertEqual(
-                subprocess.check_output([str(install_dir / "cage"), "--version"], text=True).strip(),
+                subprocess.check_output(
+                    [str(install_dir / "cage"), "--version"], text=True
+                ).strip(),
                 subprocess.check_output([str(CAGE), "--version"], text=True).strip(),
+            )
+
+    def test_unauthenticated_latest_release_lookup_installs_cleanly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            home = root / "home"
+            install_dir = root / "install"
+            home.mkdir()
+            archive, checksum = self.make_release(root, "9.9.9", "9.9.9")
+
+            result = self.run_install(
+                home,
+                install_dir,
+                archive,
+                checksum,
+                "9.9.9",
+                discover_version=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                subprocess.check_output(
+                    [str(home / ".local" / "bin" / "cage")], text=True
+                ).strip(),
+                "cage 9.9.9",
             )
 
 

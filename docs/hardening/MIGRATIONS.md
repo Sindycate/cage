@@ -8,6 +8,23 @@ when that version is committed and tagged.
 
 No migrations recorded yet.
 
+## 0.23.5 — 2026-07-18
+
+Who is affected: users running the public curl-pipe installer without
+`GH_TOKEN`, `GITHUB_TOKEN`, or a usable `gh auth token`, particularly with the
+system Bash 3.2 shipped by macOS.
+
+Previous behavior: latest-release lookup expanded an empty Bash array while
+`set -u` was active, aborting with `GH_AUTH_HEADER[@]: unbound variable` before
+the release could be downloaded.
+
+New behavior: authenticated lookup remains available when a token exists;
+otherwise the installer makes the same public GitHub API request without an
+optional header argument.
+
+Migration: rerun the normal installer command. No config, credentials, Docker
+volumes, or project state need to be changed.
+
 ## 0.23.4 — 2026-07-18
 
 Who is affected: Codex users on v0.23.0 through v0.23.3 whose persistent volume

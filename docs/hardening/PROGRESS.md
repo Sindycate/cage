@@ -3,6 +3,33 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-18 — v0.23.5 unauthenticated installer portability
+
+An isolated consumer-side verification after v0.23.4 publication exposed a
+pre-existing macOS Bash 3.2 incompatibility in latest-release discovery: with
+no GitHub token available, expanding the empty optional header array under
+`set -u` aborted the documented curl-pipe install command.
+
+Correction:
+
+- replace the optional array expansion with an explicit authenticated/public
+  request branch;
+- retain `GH_TOKEN`, `GITHUB_TOKEN`, and `gh auth token` precedence;
+- add a full staged-install regression with no token and a failing fake `gh`,
+  exercising the version-discovery path instead of pinning `CAGE_VERSION`;
+- gate normal CI and tagged releases on the installer safety suite under the
+  macOS system `/bin/bash` in addition to the existing Linux matrix.
+
+Evidence for the release candidate:
+
+- the documented unauthenticated install path failed before the fix and then
+  installed the real public v0.23.4 archive successfully in an isolated home;
+- all ten installer safety tests pass under macOS `/bin/bash` 3.2.57;
+- the complete suite passes (`117 passed, 4 skipped`), all four opt-in
+  real-Docker smoke tests pass, and syntax, Compose, workflow YAML, version, and
+  diff checks pass;
+- independent installer and workflow review returned `SHIP` with no blockers.
+
 ## 2026-07-18 — v0.23.4 remapped-owner mode correction
 
 After v0.23.3 fixed host-to-Docker staging, a normal Codex launch reached the

@@ -7,6 +7,15 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.5 — 2026-07-18
+
+- fixed unauthenticated public installs on macOS Bash 3.2, where expanding an
+  empty optional GitHub-auth header array under `set -u` aborted version lookup;
+- preserve optional `GH_TOKEN`, `GITHUB_TOKEN`, and `gh auth token` support while
+  issuing the public release request without an auth argument when none exists;
+- gate CI and releases on the installer safety suite running under macOS's
+  system `/bin/bash`, so Bash 3.2 compatibility remains continuously checked.
+
 ## 0.23.4 — 2026-07-18
 
 - fixed Codex startup after OAuth synchronization when private state is owned
