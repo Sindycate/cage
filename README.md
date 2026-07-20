@@ -231,6 +231,10 @@ global AGENTS guidance, hooks, and rules) and governed credentials, but does not
 import or replace shared-host sessions, history, SQLite indexes, logs, memories,
 or caches. If history is unexpectedly absent, preserve the volume and
 investigate it; do not reset or delete the volume as a first recovery step.
+The import helpers enforce that allowlist before removing any destination and
+abort the launch on every unsupported file or directory name. CI and tagged
+releases exercise the real Codex entrypoint with conflicting host and volume
+runtime state so this boundary cannot regress silently.
 
 Host command definitions should name the executable when Codex supplies its own
 arguments. For example, a custom provider whose Codex auth configuration runs

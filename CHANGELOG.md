@@ -7,6 +7,18 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.8 — 2026-07-20
+
+- enforce the Codex host-import allowlist inside the file and directory copy
+  helpers before they resolve or remove any volume destination;
+- require imported profile configuration names to be safe single basenames,
+  rejecting path traversal before destination construction;
+- fail closed if a future caller attempts to import runtime-owned sessions,
+  archived sessions, history, SQLite state, logs, memories, goals, caches, shell
+  snapshots, or any other unsupported name;
+- expand unit and real-Docker release gates to verify the complete resumable
+  state set remains byte-for-byte unchanged under conflicting host state.
+
 ## 0.23.7 — 2026-07-20
 
 - copy Codex `rules/` configuration without preserving the host UID, avoiding

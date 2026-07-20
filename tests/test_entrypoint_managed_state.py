@@ -409,26 +409,40 @@ class EntrypointManagedStateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (host / "AGENTS.md").write_text("host guidance\n", encoding="utf-8")
-            (host / "sessions").mkdir()
-            (host / "sessions" / "host.jsonl").write_text(
-                '{"source":"host"}\n',
-                encoding="utf-8",
-            )
-            (host / "history.jsonl").write_text("host history\n", encoding="utf-8")
-            (host / "state_5.sqlite").write_bytes(b"host database")
 
             (codex / "config.toml").write_text('model = "volume"\n', encoding="utf-8")
             (codex / ".credentials.json").write_text(
                 '{"oauth":"volume"}\n',
                 encoding="utf-8",
             )
-            (codex / "sessions").mkdir()
-            (codex / "sessions" / "volume.jsonl").write_text(
-                '{"source":"volume"}\n',
-                encoding="utf-8",
+
+            runtime_files = (
+                "history.jsonl",
+                "session_index.jsonl",
+                "state_5.sqlite",
+                "state_5.sqlite-wal",
+                "logs_2.sqlite",
+                "memories_1.sqlite",
+                "goals_1.sqlite",
             )
-            (codex / "history.jsonl").write_text("volume history\n", encoding="utf-8")
-            (codex / "state_5.sqlite").write_bytes(b"volume database")
+            runtime_directories = (
+                "sessions",
+                "archived_sessions",
+                "log",
+                "memories",
+                "cache",
+                "shell_snapshots",
+            )
+            for name in runtime_files:
+                (host / name).write_bytes(("host:" + name).encode())
+                (codex / name).write_bytes(("volume:" + name).encode())
+            for name in runtime_directories:
+                (host / name).mkdir()
+                (host / name / "host-only.bin").write_bytes(b"host")
+                (codex / name).mkdir()
+                (codex / name / "volume.bin").write_bytes(
+                    ("volume:" + name).encode()
+                )
 
             script = (
                 self.host_import_functions
@@ -452,13 +466,101 @@ class EntrypointManagedStateTests(unittest.TestCase):
                 'model = "profile"\n',
             )
             self.assertEqual((codex / "AGENTS.md").read_text(), "host guidance\n")
+            for name in runtime_files:
+                self.assertEqual(
+                    (codex / name).read_bytes(),
+                    ("volume:" + name).encode(),
+                )
+            for name in runtime_directories:
+                self.assertEqual(
+                    (codex / name / "volume.bin").read_bytes(),
+                    ("volume:" + name).encode(),
+                )
+                self.assertFalse((codex / name / "host-only.bin").exists())
+
+    def test_codex_host_import_helpers_reject_runtime_names_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / "codex"
+            source_file = root / "source.jsonl"
+            source_directory = root / "source-sessions"
+            codex.mkdir()
+            source_file.write_text("host history\n", encoding="utf-8")
+            source_directory.mkdir()
+            (source_directory / "host.jsonl").write_text(
+                "host session\n",
+                encoding="utf-8",
+            )
+            (codex / "history.jsonl").write_text(
+                "volume history\n",
+                encoding="utf-8",
+            )
+            (codex / "sessions").mkdir()
+            (codex / "sessions" / "volume.jsonl").write_text(
+                "volume session\n",
+                encoding="utf-8",
+            )
+
+            file_script = (
+                self.host_import_functions
+                + '\nCODEX_DIR="$1"\ncopy_host_codex_entry "$2" history.jsonl\n'
+            )
+            file_result = subprocess.run(
+                ["bash", "-c", file_script, "bash", str(codex), str(source_file)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(file_result.returncode, 0)
+            self.assertIn("refusing unsupported", file_result.stderr)
+            self.assertEqual(
+                (codex / "history.jsonl").read_text(),
+                "volume history\n",
+            )
+
+            escaped_destination = root / "escaped.config.toml"
+            escaped_destination.write_text("volume profile\n", encoding="utf-8")
+            traversal_script = (
+                self.host_import_functions
+                + '\nCODEX_DIR="$1"\ncopy_host_codex_entry "$2" ../escaped.config.toml\n'
+            )
+            traversal_result = subprocess.run(
+                ["bash", "-c", traversal_script, "bash", str(codex), str(source_file)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(traversal_result.returncode, 0)
+            self.assertIn("refusing unsafe", traversal_result.stderr)
+            self.assertEqual(
+                escaped_destination.read_text(),
+                "volume profile\n",
+            )
+
+            directory_script = (
+                self.host_import_functions
+                + '\nCODEX_DIR="$1"\ncopy_host_codex_directory "$2" sessions\n'
+            )
+            directory_result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    directory_script,
+                    "bash",
+                    str(codex),
+                    str(source_directory),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(directory_result.returncode, 0)
+            self.assertIn("refusing unsupported", directory_result.stderr)
             self.assertEqual(
                 (codex / "sessions" / "volume.jsonl").read_text(),
-                '{"source":"volume"}\n',
+                "volume session\n",
             )
             self.assertFalse((codex / "sessions" / "host.jsonl").exists())
-            self.assertEqual((codex / "history.jsonl").read_text(), "volume history\n")
-            self.assertEqual((codex / "state_5.sqlite").read_bytes(), b"volume database")
 
     def test_embedded_python_uses_isolated_import_mode(self):
         self.assertNotIn("python3 - <<'PY'", ENTRYPOINT_CLAUDE.read_text())

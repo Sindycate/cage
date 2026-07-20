@@ -59,19 +59,39 @@ reconcile_codex_auth() {
 copy_host_codex_entry() {
     local source="$1"
     local name="$2"
-    local destination="$CODEX_DIR/$name"
-    rm -rf -- "$destination"
+    local destination
+    case "$name" in
+        ""|.|..|*/*)
+            echo "cage: refusing unsafe host Codex file import name: $name" >&2
+            return 1
+            ;;
+    esac
+    case "$name" in
+        config.toml|?*.config.toml|AGENTS.md|AGENTS.override.md|hooks.json|.credentials.json)
+            ;;
+        *)
+            echo "cage: refusing unsupported host Codex file import: $name" >&2
+            return 1
+            ;;
+    esac
+    destination="$CODEX_DIR/$name"
     [ -f "$source" ] || {
         echo "cage: expected regular host Codex state: $name" >&2
         return 1
     }
+    rm -rf -- "$destination"
     install -m 600 -- "$source" "$destination"
 }
 
 copy_host_codex_directory() {
     local source="$1"
     local name="$2"
-    local destination="$CODEX_DIR/$name"
+    local destination
+    if [ "$name" != "rules" ]; then
+        echo "cage: refusing unsupported host Codex directory import: $name" >&2
+        return 1
+    fi
+    destination="$CODEX_DIR/$name"
     [ -d "$source" ] && [ ! -L "$source" ] || {
         echo "cage: expected host Codex configuration directory: $name" >&2
         return 1

@@ -3,6 +3,38 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-20 — v0.23.8 fail-closed Codex runtime-state import invariant
+
+Post-recovery review confirmed that `v0.23.7` prevents the reported overwrite,
+but its destination restriction lived only in the caller's static import list.
+The copy helpers themselves would still remove an arbitrary destination if a
+future caller passed one directly.
+
+Defense in depth:
+
+- enforce the exact supported file allowlist inside `copy_host_codex_entry`
+  before destination resolution or removal;
+- reject empty, special, or path-containing file names before the profile-file
+  pattern is evaluated;
+- permit only `rules/` inside `copy_host_codex_directory`, likewise before any
+  destination mutation;
+- reject unsupported names with a clear launch error, preserving the original
+  volume entry;
+- expand isolated and real-Docker coverage across sessions, archived sessions,
+  history and session indexes, SQLite databases/WALs, logs, memories, goals,
+  caches, and shell snapshots under conflicting shared-host state;
+- retain CI and tagged-release execution of the real entrypoint fixture.
+
+Local evidence: all managed-state tests pass (`11 passed`), the complete suite
+passes (`125 passed, 5 skipped`), all five real-Docker smoke tests pass, and all
+14 installer/supply-chain tests pass. Shell/Python syntax, workflow/dependabot
+YAML, Compose, version, and diff checks also pass. Publication and public-
+installer evidence remain required for the `v0.23.8` release.
+
+The preceding `v0.23.7` CI and release workflows completed successfully, and
+the public curl installer was independently verified to install `cage 0.23.7`
+from its checksum-verified GitHub Release archive.
+
 ## 2026-07-20 — v0.23.6 remote validation failure and v0.23.7 correction
 
 The `v0.23.6` tag triggered both CI and the release workflow, but neither

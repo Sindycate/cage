@@ -8,6 +8,17 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.23.8 — 2026-07-20
+
+No configuration migration. This release adds defense in depth to the `0.23.7`
+state-preservation behavior: both host-import helpers reject every unsupported
+destination before removing anything from the project volume. Unit and
+real-Docker release gates cover sessions, archived sessions, history, SQLite
+state and WALs, logs, memories, goals, caches, and shell snapshots.
+
+Rollback: `0.23.7` retains the corrected static allowlist, but lacks the helper-
+level fail-closed invariant and comprehensive regression fixture added here.
+
 ## 0.23.7 — 2026-07-20
 
 No additional configuration migration. This version supersedes the failed,

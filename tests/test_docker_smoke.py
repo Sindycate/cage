@@ -27,27 +27,47 @@ class DockerSmokeTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             fake_bin = temp_path / "bin"
             host_codex = temp_path / "host-codex"
+            volume_codex = temp_path / "volume-codex"
             fake_bin.mkdir()
             host_codex.mkdir()
+            volume_codex.mkdir()
             (host_codex / "config.toml").write_text(
                 'model = "host-config"\n',
                 encoding="utf-8",
             )
-            (host_codex / "sessions").mkdir()
-            (host_codex / "sessions" / "host.jsonl").write_text(
-                '{"source":"host"}\n',
-                encoding="utf-8",
-            )
-            (host_codex / "history.jsonl").write_text(
-                "host history\n",
-                encoding="utf-8",
-            )
-            (host_codex / "state_5.sqlite").write_bytes(b"host database")
             (host_codex / "rules").mkdir()
             (host_codex / "rules" / "host.rules").write_text(
                 'prefix_rule(pattern=["git", "status"], decision="allow")\n',
                 encoding="utf-8",
             )
+
+            runtime_files = (
+                "history.jsonl",
+                "session_index.jsonl",
+                "state_5.sqlite",
+                "state_5.sqlite-wal",
+                "logs_2.sqlite",
+                "memories_1.sqlite",
+                "goals_1.sqlite",
+            )
+            runtime_directories = (
+                "sessions",
+                "archived_sessions",
+                "log",
+                "memories",
+                "cache",
+                "shell_snapshots",
+            )
+            for name in runtime_files:
+                (host_codex / name).write_bytes(("host:" + name).encode())
+                (volume_codex / name).write_bytes(("volume:" + name).encode())
+            for name in runtime_directories:
+                (host_codex / name).mkdir()
+                (host_codex / name / "host-only.bin").write_bytes(b"host")
+                (volume_codex / name).mkdir()
+                (volume_codex / name / "volume.bin").write_bytes(
+                    ("volume:" + name).encode()
+                )
 
             write_executable(
                 fake_bin / "gosu",
@@ -62,11 +82,16 @@ class DockerSmokeTests(unittest.TestCase):
                 fake_bin / "codex",
                 "#!/bin/sh\n"
                 "grep -q 'host-config' \"$HOME/.codex/config.toml\" && "
-                "grep -q 'volume' \"$HOME/.codex/sessions/volume.jsonl\" && "
-                "[ ! -e \"$HOME/.codex/sessions/host.jsonl\" ] && "
-                "grep -q 'volume history' \"$HOME/.codex/history.jsonl\" && "
                 "grep -q 'git' \"$HOME/.codex/rules/host.rules\" && "
-                "[ \"$(cat \"$HOME/.codex/state_5.sqlite\")\" = 'volume database' ]\n",
+                "for name in history.jsonl session_index.jsonl state_5.sqlite "
+                "state_5.sqlite-wal logs_2.sqlite memories_1.sqlite goals_1.sqlite; do "
+                "cmp -s \"$HOME/.codex/$name\" \"/volume-codex-source/$name\" || exit 1; "
+                "done && "
+                "for name in sessions archived_sessions log memories cache shell_snapshots; do "
+                "cmp -s \"$HOME/.codex/$name/volume.bin\" "
+                "\"/volume-codex-source/$name/volume.bin\" || exit 1; "
+                "[ ! -e \"$HOME/.codex/$name/host-only.bin\" ] || exit 1; "
+                "done\n",
             )
 
             result = subprocess.run(
@@ -90,6 +115,8 @@ class DockerSmokeTests(unittest.TestCase):
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "--mount",
                     f"type=bind,src={host_codex},dst=/host-codex-source,readonly",
+                    "--mount",
+                    f"type=bind,src={volume_codex},dst=/volume-codex-source,readonly",
                     "-e",
                     "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     "-e",
@@ -109,10 +136,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
                     "cp -R /host-codex-source /host-codex && "
                     "chown -R 21001:21001 /host-codex && "
-                    "mkdir -p /workspace /home/codex/.codex/sessions && "
-                    "printf '{\"source\":\"volume\"}\\n' > /home/codex/.codex/sessions/volume.jsonl && "
-                    "printf 'volume history\\n' > /home/codex/.codex/history.jsonl && "
-                    "printf 'volume database' > /home/codex/.codex/state_5.sqlite && "
+                    "mkdir -p /workspace /home/codex && "
+                    "cp -R /volume-codex-source /home/codex/.codex && "
                     "exec /entrypoint.sh --version",
                 ],
                 cwd=ROOT,
