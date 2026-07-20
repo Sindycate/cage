@@ -7,6 +7,15 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.7 — 2026-07-20
+
+- copy Codex `rules/` configuration without preserving the host UID, avoiding
+  an entrypoint failure when Cage intentionally lacks `CAP_FOWNER`;
+- strengthen the Docker entrypoint regression with a deterministic host/source
+  UID mismatch;
+- supersede the failed, unpublished `v0.23.6` release attempt while retaining
+  all of its Codex history, host-token, and supply-chain corrections.
+
 ## 0.23.6 — 2026-07-20
 
 - preserve Codex sessions, history, SQLite indexes, logs, memories, and caches

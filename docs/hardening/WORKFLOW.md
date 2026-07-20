@@ -108,7 +108,7 @@ The exact versions may change after integration review.
   bind-path correction: `v0.23.3`; remapped-owner mode correction: `v0.23.4`;
   unauthenticated installer portability correction: `v0.23.5`; Codex
   state-preservation, host-token compatibility, and verifiable-release
-  correction: `v0.23.6`.
+  correction attempt: `v0.23.6`; host-UID rules-copy correction: `v0.23.7`.
 - **Checkpoint 2 — state and network:** remaining P0-B/P0-C plus OAuth and
   concurrency protections.
 - **Checkpoint 3 — controlled capabilities:** bridges, limits, mounts, trust

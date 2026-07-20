@@ -8,6 +8,13 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.23.7 — 2026-07-20
+
+No additional configuration migration. This version supersedes the failed,
+unpublished `v0.23.6` release attempt and includes the `0.23.6` migrations
+below. Its entrypoint additionally copies Codex `rules/` without preserving the
+host UID so the import works with Cage's intentionally reduced capabilities.
+
 ## 0.23.6 — 2026-07-20
 
 ### Codex volume history and host token commands

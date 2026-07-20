@@ -77,7 +77,11 @@ copy_host_codex_directory() {
         return 1
     }
     rm -rf -- "$destination"
-    cp -a --no-dereference -- "$source" "$destination"
+    # Do not preserve host ownership. Cage deliberately omits CAP_FOWNER, so a
+    # recursive archive copy can chown a destination inode to the host UID and
+    # then fail while restoring its mode. The final recursive chown below makes
+    # the copied configuration readable by the remapped Codex user.
+    cp -R --no-dereference -- "$source" "$destination"
 }
 
 import_host_codex_state() {

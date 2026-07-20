@@ -89,7 +89,7 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "--mount",
-                    f"type=bind,src={host_codex},dst=/host-codex,readonly",
+                    f"type=bind,src={host_codex},dst=/host-codex-source,readonly",
                     "-e",
                     "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     "-e",
@@ -107,6 +107,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "-c",
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
+                    "cp -R /host-codex-source /host-codex && "
+                    "chown -R 21001:21001 /host-codex && "
                     "mkdir -p /workspace /home/codex/.codex/sessions && "
                     "printf '{\"source\":\"volume\"}\\n' > /home/codex/.codex/sessions/volume.jsonl && "
                     "printf 'volume history\\n' > /home/codex/.codex/history.jsonl && "

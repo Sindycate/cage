@@ -3,6 +3,28 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-20 — v0.23.6 remote validation failure and v0.23.7 correction
+
+The `v0.23.6` tag triggered both CI and the release workflow, but neither
+published a release. Their Linux Docker smoke job reproduced a capability and
+ownership mismatch hidden by the local macOS bind-mount implementation:
+`cp -a` assigned imported Codex `rules/` entries to the host runner UID, then
+failed to restore their permissions because Cage deliberately omits
+`CAP_FOWNER`.
+
+Correction candidate:
+
+- copy the allowlisted `rules/` tree recursively without preserving host
+  ownership, then retain the existing remapped-user recursive chown;
+- make the Docker regression stage `/host-codex` with a deliberately different
+  numeric owner so the failure is deterministic across host platforms;
+- use the next immutable release version, `v0.23.7`; do not move or reuse the
+  failed `v0.23.6` tag.
+
+Required evidence remains a passing complete local suite, passing Docker smoke
+suite, successful remote CI/release jobs, and a verified public installer
+archive reporting `cage 0.23.7`.
+
 ## 2026-07-20 — P1-A/P1-B Codex state and token-command regressions in verification
 
 Reported regressions:
