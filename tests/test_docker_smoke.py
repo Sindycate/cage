@@ -22,6 +22,107 @@ def write_executable(path, content):
     "set CAGE_RUN_DOCKER_SMOKE=1 to run local Docker integration smoke tests",
 )
 class DockerSmokeTests(unittest.TestCase):
+    def test_codex_entrypoint_preserves_volume_owned_history(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            host_codex = temp_path / "host-codex"
+            fake_bin.mkdir()
+            host_codex.mkdir()
+            (host_codex / "config.toml").write_text(
+                'model = "host-config"\n',
+                encoding="utf-8",
+            )
+            (host_codex / "sessions").mkdir()
+            (host_codex / "sessions" / "host.jsonl").write_text(
+                '{"source":"host"}\n',
+                encoding="utf-8",
+            )
+            (host_codex / "history.jsonl").write_text(
+                "host history\n",
+                encoding="utf-8",
+            )
+            (host_codex / "state_5.sqlite").write_bytes(b"host database")
+            (host_codex / "rules").mkdir()
+            (host_codex / "rules" / "host.rules").write_text(
+                'prefix_rule(pattern=["git", "status"], decision="allow")\n',
+                encoding="utf-8",
+            )
+
+            write_executable(
+                fake_bin / "gosu",
+                "#!/bin/sh\n"
+                "user=$1\n"
+                "shift\n"
+                "exec setpriv --reuid \"$(id -u \"$user\")\" "
+                "--regid \"$(id -g \"$user\")\" --init-groups \"$@\"\n",
+            )
+            write_executable(fake_bin / "git", "#!/bin/sh\nexit 0\n")
+            write_executable(
+                fake_bin / "codex",
+                "#!/bin/sh\n"
+                "grep -q 'host-config' \"$HOME/.codex/config.toml\" && "
+                "grep -q 'volume' \"$HOME/.codex/sessions/volume.jsonl\" && "
+                "[ ! -e \"$HOME/.codex/sessions/host.jsonl\" ] && "
+                "grep -q 'volume history' \"$HOME/.codex/history.jsonl\" && "
+                "grep -q 'git' \"$HOME/.codex/rules/host.rules\" && "
+                "[ \"$(cat \"$HOME/.codex/state_5.sqlite\")\" = 'volume database' ]\n",
+            )
+
+            result = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--cap-drop",
+                    "ALL",
+                    "--cap-add",
+                    "CHOWN",
+                    "--cap-add",
+                    "DAC_OVERRIDE",
+                    "--cap-add",
+                    "SETGID",
+                    "--cap-add",
+                    "SETUID",
+                    "--mount",
+                    f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
+                    "--mount",
+                    f"type=bind,src={fake_bin},dst=/test-bin,readonly",
+                    "--mount",
+                    f"type=bind,src={host_codex},dst=/host-codex,readonly",
+                    "-e",
+                    "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "-e",
+                    "HOME=/home/codex",
+                    "-e",
+                    "HOST_UID=22001",
+                    "-e",
+                    "HOST_GID=22001",
+                    "-e",
+                    "WORKSPACE_DIR=/workspace",
+                    "-e",
+                    "CODEX_COPY_AUTH=0",
+                    "python:3.12-slim",
+                    "sh",
+                    "-c",
+                    "groupadd -g 22000 codex && "
+                    "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
+                    "mkdir -p /workspace /home/codex/.codex/sessions && "
+                    "printf '{\"source\":\"volume\"}\\n' > /home/codex/.codex/sessions/volume.jsonl && "
+                    "printf 'volume history\\n' > /home/codex/.codex/history.jsonl && "
+                    "printf 'volume database' > /home/codex/.codex/state_5.sqlite && "
+                    "exec /entrypoint.sh --version",
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_codex_sensitive_modes_are_set_by_the_remapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             fake_bin = Path(temp_dir) / "bin"

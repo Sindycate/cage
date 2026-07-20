@@ -377,6 +377,22 @@ class CageConfigTests(unittest.TestCase):
         self.assertIn("host execution: enabled", out.getvalue())
         self.assertIn("Doctor: ok", out.getvalue())
 
+    def test_doctor_warns_when_host_command_embeds_fixed_arguments(self):
+        data = self.base_config()
+        data["presets"]["codex-main"]["host_commands"] = ["ztoken"]
+        resolved = self.resolve(data)
+        out = io.StringIO()
+        with (
+            patch("sys.stdout", out),
+            patch.object(cage_config.shutil, "which", return_value="/usr/bin/tool"),
+        ):
+            result = cage_config.explain(resolved, doctor=True)
+
+        self.assertEqual(result, 0)
+        self.assertIn("host command 'ztoken' embeds fixed arguments", out.getvalue())
+        self.assertIn("de-duplicates an identical caller suffix", out.getvalue())
+        self.assertIn("Doctor: ok with warnings", out.getvalue())
+
     def test_missing_auth_reference_is_rejected(self):
         data = self.base_config()
         data["presets"]["codex-main"]["auth"] = "missing"

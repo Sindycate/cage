@@ -34,10 +34,14 @@ if [ -f "$CODEX_DIR/config.toml" ] && grep -q "projects\\.\"${WORK_DIR}\"" "$COD
     WAS_TRUSTED=1
 fi
 
-# Copy host Codex config into the writable volume. When copy_auth is disabled,
-# auth.json is explicitly removed. Codex MCP OAuth's .credentials.json is also
-# reconciled by the host launcher before/after the container runs so rotated
-# refresh tokens do not diverge between the host Codex dir and this volume.
+# Import only host-owned Codex configuration and credentials into the writable
+# per-repository volume. Runtime-owned state (sessions, history, SQLite indexes,
+# logs, memories, caches, and similar entries) must remain volume-local: copying
+# or replacing it from a shared host Codex directory can hide or destroy the
+# repository's resumable history. When copy_auth is disabled, auth.json is
+# explicitly removed. Codex MCP OAuth's .credentials.json is also reconciled by
+# the host launcher before/after the container runs so rotated refresh tokens do
+# not diverge between the host Codex dir and this volume.
 reconcile_codex_auth() {
     local host_dir="$1"
     local codex_dir="$2"
@@ -57,35 +61,47 @@ copy_host_codex_entry() {
     local name="$2"
     local destination="$CODEX_DIR/$name"
     rm -rf -- "$destination"
-    case "$name" in
-        config.toml|.credentials.json|instructions.md)
-            [ -f "$source" ] || {
-                echo "cage: expected regular host Codex state: $name" >&2
-                return 1
-            }
-            install -m 600 -- "$source" "$destination"
-            ;;
-        *)
-            cp -a --no-dereference -- "$source" "$destination"
-            ;;
-    esac
+    [ -f "$source" ] || {
+        echo "cage: expected regular host Codex state: $name" >&2
+        return 1
+    }
+    install -m 600 -- "$source" "$destination"
+}
+
+copy_host_codex_directory() {
+    local source="$1"
+    local name="$2"
+    local destination="$CODEX_DIR/$name"
+    [ -d "$source" ] && [ ! -L "$source" ] || {
+        echo "cage: expected host Codex configuration directory: $name" >&2
+        return 1
+    }
+    rm -rf -- "$destination"
+    cp -a --no-dereference -- "$source" "$destination"
+}
+
+import_host_codex_state() {
+    local host_dir="$1"
+    local name source
+    [ -d "$host_dir" ] || return 0
+    for source in \
+        "$host_dir"/config.toml \
+        "$host_dir"/*.config.toml \
+        "$host_dir"/AGENTS.md \
+        "$host_dir"/AGENTS.override.md \
+        "$host_dir"/hooks.json \
+        "$host_dir"/.credentials.json; do
+        [ -e "$source" ] || continue
+        name="${source##*/}"
+        copy_host_codex_entry "$source" "$name"
+    done
+    if [ -e "$host_dir/rules" ]; then
+        copy_host_codex_directory "$host_dir/rules" rules
+    fi
 }
 
 if [ -d /host-codex ]; then
-    for f in /host-codex/*; do
-        [ -e "$f" ] || continue
-        name="$(basename "$f")"
-        [ "$name" = "auth.json" ] && continue
-        copy_host_codex_entry "$f" "$name"
-    done
-    # Also copy dotfiles
-    for f in /host-codex/.*; do
-        [ -e "$f" ] || continue
-        name="$(basename "$f")"
-        [ "$name" = "." ] || [ "$name" = ".." ] && continue
-        copy_host_codex_entry "$f" "$name"
-    done
-    # cp ran as root and preserved host mode bits; re-own so the codex user can read them
+    import_host_codex_state /host-codex
     chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" 2>/dev/null || true
 fi
 

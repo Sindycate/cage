@@ -72,12 +72,12 @@ Excluded unless needed by an included fix:
 | P0-A | Remove `.mcp.json` host mutation/path injection and isolate host Python imports | complete | adversarial path, import-shadowing, and symlink tests |
 | P0-B | Remove stale generated auth/MCP state without adding credential toil | complete | preset-switch and repeat-launch tests |
 | P0-C | Harden Netgate listener, resolution, prompts, and resource usage | complete | SSRF, body-limit, prompt, and public-destination tests |
-| P1-A | Harden OAuth synchronization and durable-state ownership | complete | malformed, symlink, mtime, account-switch, and race tests |
-| P1-B | Harden MCP/host-command bridges and repair relay protocol | complete | auth, argv, status, timeout, cleanup, and collision tests |
+| P1-A | Harden OAuth synchronization and durable-state ownership | verification | malformed, symlink, mtime, account-switch, history-preservation, and race tests |
+| P1-B | Harden MCP/host-command bridges and repair relay protocol | verification | auth, argv, legacy-argument compatibility, status, timeout, cleanup, and collision tests |
 | P1-C | Add resource limits, mount validation, locking, and crash recovery | pending | real-Docker integration tests |
 | P2-A | Repair config schema/editor, trust handling, and starter config | complete | strict-schema and round-trip tests |
 | P2-B | Add trust modes, capability manifest, dry-run, and state tooling | pending | CLI acceptance tests and migration guide |
-| P2-C | Harden installer, builds, release workflow, and supply chain | in progress | CI release gate, installer safety, SBOM/provenance checks |
+| P2-C | Harden installer, builds, release workflow, and supply chain | verification | CI release gate, installer safety, SBOM/provenance checks |
 | P3 | Consolidate architecture and remove duplicated orchestration | pending | behavior parity and cross-platform matrix |
 
 Packet states are `pending`, `in progress`, `verification`, `complete`, or
@@ -106,7 +106,9 @@ The exact versions may change after integration review.
   warnings, and regression tests. Published source checkpoint: `v0.23.0`;
   release-workflow corrections: `v0.23.1` and `v0.23.2`; macOS/Colima
   bind-path correction: `v0.23.3`; remapped-owner mode correction: `v0.23.4`;
-  unauthenticated installer portability correction: `v0.23.5`.
+  unauthenticated installer portability correction: `v0.23.5`; Codex
+  state-preservation, host-token compatibility, and verifiable-release
+  correction: `v0.23.6`.
 - **Checkpoint 2 — state and network:** remaining P0-B/P0-C plus OAuth and
   concurrency protections.
 - **Checkpoint 3 — controlled capabilities:** bridges, limits, mounts, trust

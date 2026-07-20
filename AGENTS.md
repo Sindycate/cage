@@ -122,7 +122,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 # Host command bridge — expose host commands (e.g. token minters) inside the container
 # In config.toml:
 #   [host_commands.ztoken]
-#   command = "ztoken token -n codex"
+#   command = "ztoken"
 #   [presets.codex-company]
 #   host_commands = ["ztoken"]
 ```
@@ -141,7 +141,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
   - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
-  - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth, `OPENAI_API_KEY` env var if set. MCP OAuth `.credentials.json` is synchronized by the host launcher between the host Codex dir and the per-repo Docker volume before launch and after exit, so rotating refresh tokens do not diverge. If the preset selects `skill_packs`, each selected skill directory is mounted read-only at `/host-agent-skills/<name>` and copied into `$HOME/.agents/skills` inside the container. If no `skill_packs` are selected, the selected auth block's host agents directory is mounted read-only at `/host-agents` and copied wholesale so globally-installed skills (`npx skills add … -g`) are visible inside the container
+  - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth and supported global configuration, `OPENAI_API_KEY` env var if set. The entrypoint allowlists user `config.toml`, profile `*.config.toml` files, global `AGENTS.md`/`AGENTS.override.md`, `hooks.json`, and `rules/`, plus explicitly governed credentials; per-repository sessions, history, SQLite indexes, logs, memories, and caches remain volume-local and must never be replaced from the shared host directory. MCP OAuth `.credentials.json` is synchronized by the host launcher between the host Codex dir and the per-repo Docker volume before launch and after exit, so rotating refresh tokens do not diverge. If the preset selects `skill_packs`, each selected skill directory is mounted read-only at `/host-agent-skills/<name>` and copied into `$HOME/.agents/skills` inside the container. If no `skill_packs` are selected, the selected auth block's host agents directory is mounted read-only at `/host-agents` and copied wholesale so globally-installed skills (`npx skills add … -g`) are visible inside the container
   - **GitHub CLI (both tools, opt-in via preset identity `gh_auth = true`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
   - Per-repo named Docker volume for persistent state
   - SSH key read-only for git push (if the preset identity configures `ssh_key`)
@@ -164,7 +164,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`entrypoint-codex.sh`** (runs inside Codex container on every start):
 - Same root→user pattern as Claude entrypoint (UID/GID remapping via `gosu`)
-- Copies config/state files from `/host-codex` (read-only mount of `~/.codex`) into writable volume; MCP OAuth `.credentials.json` is reconciled by the host launcher before and after the container run
+- Imports only supported static global configuration (`config.toml`, profile config files, global AGENTS guidance, hooks, and rules), `auth.json` (when enabled), and reconciled `.credentials.json` from `/host-codex`; runtime-owned sessions/history/SQLite/log/memory/cache state remains in the per-repository volume
 - Copies selected `/host-agent-skills/<name>` directories into `$HOME/.agents/skills` when `skill_packs` are selected; otherwise copies `/host-agents` (read-only mount of `~/.agents/`, the npm `skills` CLI registry) into writable home if present, so globally-installed skills work inside the container
 - Appends central-config MCP servers to the writable container `~/.codex/config.toml` only. Stdio servers use `mcp-relay`; HTTP servers use native Codex `mcp_servers` entries. Duplicate server names already present in host config fail clearly rather than silently overriding
 - Skips `auth.json` when the selected auth block has `copy_auth = false` (for non-OpenAI providers like Azure OpenAI)
@@ -225,7 +225,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   structured errors, and final exit status; limits and disconnects terminate the
   subprocess process group
 - Startup protocol: prints `COMMAND:name=PORT:N` per command, then `READY`
-- Use case: token-refresh commands that need host keychain/auth context (e.g. `[host_commands.ztoken] command = "ztoken token -n codex"` so Codex's `auth.command = "ztoken"` config keeps working inside the container across indefinite sessions)
+- Use case: token-refresh commands that need host keychain/auth context (e.g. `[host_commands.ztoken] command = "ztoken"` so Codex's auth command and args are forwarded exactly once inside the container). For compatibility with pre-0.23 definitions, an exact caller suffix already embedded in the configured command is de-duplicated; `cage config doctor` warns so the definition can be simplified.
 
 **`host-cmd-relay`** (runs inside container, installed at `/usr/local/bin/host-cmd-relay`):
 - Container-side framed stdio-to-TCP relay — reads the host, port, and per-launch
@@ -238,7 +238,19 @@ installs.
 
 **`install.sh`**: Curl-pipe-bash installer. Downloads the latest GitHub Release tarball, verifies checksum, extracts to `~/.local/share/cage/`, and symlinks the binary. Also supports `--uninstall`.
 
-**`.github/workflows/release.yml`**: Creates a GitHub Release with tarball and SHA-256 checksum when a `v*` tag is pushed. Also builds and pushes multi-arch (amd64/arm64) Docker images to `ghcr.io/sindycate/cage/` via `docker/build-push-action`. Verifies that the tag matches `CAGE_VERSION` in the cage script.
+**`scripts/build-release.py`**: Builds the source release tarball and checksum
+with a fixed file allowlist, normalized ownership and timestamps, deterministic
+ordering, and a timestamp-free gzip header. `SOURCE_DATE_EPOCH` is set from the
+tagged source commit by the release workflow.
+
+**`.github/workflows/release.yml`**: Creates a GitHub Release with a reproducible
+tarball, SHA-256 checksum, and SPDX SBOM when a `v*` tag is pushed. It signs
+GitHub provenance and SBOM attestations for the source archive, then builds and
+pushes multi-arch (amd64/arm64) Docker images to `ghcr.io/sindycate/cage/` with
+BuildKit SBOM/max-level provenance metadata and signed GitHub provenance. All
+workflow actions use immutable commit pins maintained by Dependabot. The
+workflow verifies that the tag matches `CAGE_VERSION` and creates the GitHub
+Release only after validation and both images succeed.
 
 ## Versioning & Release Flow
 
@@ -325,6 +337,7 @@ uses the URL and optional client ID; shared Codex fields such as
 - **Session history sync** (Claude, default on): cage mirrors the entire `~/.claude/projects/-<repo-slug>/` subtree between host and per-repo Docker volume on entry/exit — session JSONLs, `memory/` (persistent memory), per-session `subagents/` and `tool-results/`. All host-side writes happen from the host cage script running as the host user; the container's read-only `/host-claude` mount is unchanged. Merge rules: `*.jsonl` uses size-based "larger wins" (append-only invariant); all other files use mtime-based "newer wins". First-run migration copies the pre-existing `-workspace-<name>/` subtree into the new slug with `cwd` rewritten in every JSONL (including `*/subagents/*.jsonl`), leaving that old session-history dir intact as a fallback. Disable with `session_sync = false` in central config defaults or preset
 - Claude auth is configured in central `auth` blocks: `mode = "bedrock"` mounts `~/.aws/credentials`; `mode = "api-key"` passes `ANTHROPIC_API_KEY`
 - Codex auth uses `host_codex_dir` in the selected auth block, or `~/.codex` when omitted. Set `copy_auth = false` to skip copying `auth.json` for non-OpenAI providers like Azure OpenAI
+- Codex runtime state is per-repository volume data. Host import is allowlisted to user/profile TOML configuration, global AGENTS guidance, hooks/rules, plus the separately governed `auth.json` and `.credentials.json`; never copy or replace shared-host `sessions`, `archived_sessions`, `history.jsonl`, SQLite state, logs, memories, or caches over a project volume
 - Codex skills: set `host_agents_dir` in the selected Codex auth block to define the canonical/fallback agents registry, usually `~/.agents/`. Prefer preset-level `skill_packs` for choosing which skills are available in a cage session. Mounts are conditional on the host paths existing; selected `skill_packs` hard-fail if a selected skill is missing `SKILL.md`
 - GitHub CLI auth is off by default. Set `gh_auth = true` in the selected identity. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `gh_account` in the identity for account selection
 - Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
@@ -336,6 +349,6 @@ uses the URL and optional client ID; shared Codex fields such as
 - Allowlists: global at `~/.claude/netgate/global.json`, per-project at `~/.claude/netgate/project-{hash}.json`
 - When `--net gate`, MCP bridge, host command bridge, or session sync is active, cage does NOT use `exec docker run` (needs shell alive for cleanup)
 - MCP bridge runs stdio MCP commands from selected `mcp_packs` on the host and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
-- Host command bridge uses selected `host_commands`: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
+- Host command bridge uses selected `host_commands`: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Caller arguments are appended; if they exactly equal fixed arguments already present after the configured executable, Cage de-duplicates that suffix solely for pre-0.23 compatibility. Prefer executable-only definitions when the client supplies arguments. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
 - Extra named mounts from preset `extra_mounts`, or `--mount-ro`/`--mount-rw` flags, bind-mount additional host directories at their **same absolute host path** inside the container (mirroring the repo mount), read-only by default. Paths are validated against the same reserved-path guard as the repo (`_is_reserved_mount_path`, a shared function); tildes are expanded and relative paths resolve against cage's launch cwd. Non-existent paths and paths overlapping the repo are **warn-and-skipped**; reserved container paths **hard-fail**. Extra mounts do **not** affect the container/volume name hash (derived from `REPO_PATH` only). Adding a mount requires relaunching cage (Docker fixes bind mounts at `docker run` time). No entrypoint involvement — these are plain bind mounts used in place, not copied into the volume
 - **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

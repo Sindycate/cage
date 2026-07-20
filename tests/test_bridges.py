@@ -485,6 +485,56 @@ while True:
                 time.sleep(0.1)
                 self.assertFalse(marker.exists())
 
+    def test_host_command_deduplicates_exact_legacy_argument_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = Path(tmp) / "token-tool"
+            tool.write_text(
+                "#!/bin/sh\nprintf '%s:%s\\n' \"$#\" \"$*\"\n",
+                encoding="utf-8",
+            )
+            tool.chmod(0o755)
+            command = shlex.join([str(tool), "token", "-n", "codex"])
+
+            with RunningBridge(
+                HOST_BRIDGE,
+                "--command",
+                "COMMAND",
+                "token-tool",
+                command,
+            ) as bridge:
+                bridge_env = {
+                    **safe_test_env(),
+                    **relay_env("HOST_CMD", "token-tool", bridge.port),
+                }
+                duplicate = subprocess.run(
+                    [
+                        sys.executable,
+                        str(HOST_RELAY),
+                        "token-tool",
+                        "token",
+                        "-n",
+                        "codex",
+                    ],
+                    env=bridge_env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                )
+                additional = subprocess.run(
+                    [sys.executable, str(HOST_RELAY), "token-tool", "--refresh"],
+                    env=bridge_env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                )
+
+            self.assertEqual(duplicate.returncode, 0, duplicate.stderr)
+            self.assertEqual(duplicate.stdout, "3:token -n codex\n")
+            self.assertEqual(additional.returncode, 0, additional.stderr)
+            self.assertEqual(additional.stdout, "4:token -n codex --refresh\n")
+
     def test_host_command_gets_only_base_and_configured_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             code = (

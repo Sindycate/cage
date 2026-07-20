@@ -7,6 +7,25 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.23.6 — 2026-07-20
+
+- preserve Codex sessions, history, SQLite indexes, logs, memories, and caches
+  as per-repository volume state instead of replacing them from the selected
+  shared host Codex directory on every launch;
+- repair legacy host token-command definitions by de-duplicating an exact caller
+  argument suffix, recommend executable-only definitions such as `command =
+  "ztoken"`, and surface fixed-argument use through `cage config doctor`;
+- add regression coverage for volume-owned Codex history and host-command
+  argument compatibility;
+- pin every GitHub Actions dependency to an immutable commit and enable weekly
+  Dependabot refreshes for those pins;
+- build the source release archive deterministically, publish an SPDX SBOM, and
+  sign both provenance and SBOM attestations through GitHub;
+- attach SBOM and max-level provenance metadata to both multi-architecture
+  container images, plus a signed GitHub provenance attestation;
+- gate release-workflow changes with tests for immutable action references,
+  required supply-chain metadata, and reproducible archive contents.
+
 ## 0.23.5 — 2026-07-18
 
 - fixed unauthenticated public installs on macOS Bash 3.2, where expanding an

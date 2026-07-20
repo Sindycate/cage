@@ -54,6 +54,17 @@ class EntrypointManagedStateTests(unittest.TestCase):
             raise AssertionError("reconcile_codex_auth function not found")
         cls.auth_function = match.group(1)
 
+        match = re.search(
+            r"(copy_host_codex_entry\(\) \{\n.*?\n\}\n\n"
+            r"copy_host_codex_directory\(\) \{\n.*?\n\}\n\n"
+            r"import_host_codex_state\(\) \{\n.*?\n\})",
+            source,
+            re.S,
+        )
+        if not match:
+            raise AssertionError("Codex host-state import functions not found")
+        cls.host_import_functions = match.group(1)
+
     def run_python(self, code, env):
         return subprocess.run(
             [sys.executable, "-c", code],
@@ -379,6 +390,75 @@ class EntrypointManagedStateTests(unittest.TestCase):
             result = reconcile("1")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((codex / "auth.json").exists())
+
+    def test_codex_host_import_preserves_volume_owned_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host = root / "host"
+            codex = root / "codex"
+            host.mkdir()
+            codex.mkdir()
+
+            (host / "config.toml").write_text('model = "host"\n', encoding="utf-8")
+            (host / ".credentials.json").write_text(
+                '{"oauth":"host"}\n',
+                encoding="utf-8",
+            )
+            (host / "work.config.toml").write_text(
+                'model = "profile"\n',
+                encoding="utf-8",
+            )
+            (host / "AGENTS.md").write_text("host guidance\n", encoding="utf-8")
+            (host / "sessions").mkdir()
+            (host / "sessions" / "host.jsonl").write_text(
+                '{"source":"host"}\n',
+                encoding="utf-8",
+            )
+            (host / "history.jsonl").write_text("host history\n", encoding="utf-8")
+            (host / "state_5.sqlite").write_bytes(b"host database")
+
+            (codex / "config.toml").write_text('model = "volume"\n', encoding="utf-8")
+            (codex / ".credentials.json").write_text(
+                '{"oauth":"volume"}\n',
+                encoding="utf-8",
+            )
+            (codex / "sessions").mkdir()
+            (codex / "sessions" / "volume.jsonl").write_text(
+                '{"source":"volume"}\n',
+                encoding="utf-8",
+            )
+            (codex / "history.jsonl").write_text("volume history\n", encoding="utf-8")
+            (codex / "state_5.sqlite").write_bytes(b"volume database")
+
+            script = (
+                self.host_import_functions
+                + '\nCODEX_DIR="$1"\nimport_host_codex_state "$2"\n'
+            )
+            result = subprocess.run(
+                ["bash", "-c", script, "bash", str(codex), str(host)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((codex / "config.toml").read_text(), 'model = "host"\n')
+            self.assertEqual(
+                (codex / ".credentials.json").read_text(),
+                '{"oauth":"host"}\n',
+            )
+            self.assertEqual(
+                (codex / "work.config.toml").read_text(),
+                'model = "profile"\n',
+            )
+            self.assertEqual((codex / "AGENTS.md").read_text(), "host guidance\n")
+            self.assertEqual(
+                (codex / "sessions" / "volume.jsonl").read_text(),
+                '{"source":"volume"}\n',
+            )
+            self.assertFalse((codex / "sessions" / "host.jsonl").exists())
+            self.assertEqual((codex / "history.jsonl").read_text(), "volume history\n")
+            self.assertEqual((codex / "state_5.sqlite").read_bytes(), b"volume database")
 
     def test_embedded_python_uses_isolated_import_mode(self):
         self.assertNotIn("python3 - <<'PY'", ENTRYPOINT_CLAUDE.read_text())

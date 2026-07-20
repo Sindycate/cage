@@ -6,7 +6,83 @@ when that version is committed and tagged.
 
 ## Unreleased
 
-No migrations recorded yet.
+No user-visible migrations yet.
+
+## 0.23.6 — 2026-07-20
+
+### Codex volume history and host token commands
+
+Who is affected: Codex users who launched a per-repository Cage volume after
+0.23.4 while the selected host Codex directory also contained runtime state,
+and users whose host command embeds the same arguments supplied by Codex (for
+example, both layers specifying `ztoken token -n codex`).
+
+Previous behavior: the Codex entrypoint removed every same-named volume entry
+before importing the host Codex directory. Shared-host `sessions`,
+`history.jsonl`, SQLite indexes, logs, memories, and caches could therefore
+replace the repository volume's own resumable state. Separately, the repaired
+host-command protocol appended caller arguments to fixed configured arguments;
+an unchanged legacy token definition could receive the same suffix twice and
+leave the provider request unauthenticated.
+
+New behavior: host import is allowlisted to supported static global
+configuration (`config.toml`, profile `*.config.toml` files, global AGENTS
+guidance, hooks, and rules); `auth.json` and MCP OAuth `.credentials.json`
+continue through their existing explicit policies. All runtime-owned Codex state
+remains untouched in the per-repository volume. Host commands continue
+forwarding arguments, but an exact caller suffix already present after the
+configured executable is de-duplicated for compatibility. `cage config doctor`
+warns when a host command embeds fixed arguments.
+
+Migration:
+
+1. Preserve every affected Docker volume. Do not reset or delete it merely
+   because history is missing from the Codex list.
+2. Install the corrected release and launch the repository normally. This stops
+   further replacement but cannot reconstruct files already removed by an older
+   entrypoint.
+3. Prefer an executable-only token bridge definition such as
+   `[host_commands.ztoken] command = "ztoken"` when the Codex provider auth table
+   already supplies `args = ["token", "-n", "codex"]`.
+4. Run `cage config doctor --preset NAME /path/to/repo` and resolve the
+   fixed-argument warning. The exact-suffix compatibility behavior permits the
+   legacy definition during migration.
+5. Treat recovery of already replaced history as a separate read-only-first
+   operation against the exact affected volume or an existing backup; do not
+   merge or rewrite session stores without preserving the originals.
+
+Rollback: restoring 0.23.4 or 0.23.5 reintroduces destructive host-state
+replacement. If rollback is unavoidable, back up the affected volume first and
+avoid launching Codex until the entrypoint import is patched.
+
+### Verifiable release artifacts
+
+Who is affected: release consumers who mirror, audit, or verify Cage source
+archives or container images. Normal installation and launch configuration are
+unchanged.
+
+Previous behavior: releases published a source tarball and SHA-256 checksum,
+and pushed two multi-architecture images. Workflow action dependencies used
+moving major-version tags. Releases did not publish an SBOM or signed provenance
+records.
+
+New behavior: workflow actions are pinned to immutable commits and refreshed by
+Dependabot. The source archive is reproducible for a fixed source revision and
+build epoch, ships with an SPDX SBOM, and receives signed GitHub provenance and
+SBOM attestations. Both container images carry BuildKit SBOM and max-level
+provenance metadata plus signed GitHub provenance attestations.
+
+Migration: none. Existing installers continue to verify the archive checksum.
+Consumers that require provenance can additionally run `gh attestation verify`
+using the commands in `README.md`.
+
+Verification: download the archive, checksum, and SBOM from the GitHub Release;
+verify the checksum and both source attestations; then verify the versioned
+`codex` and `claude-code` GHCR images by OCI reference.
+
+Rollback: older releases remain installable with their checksums but do not gain
+attestations retroactively. Restoring the old workflow removes these records
+from future releases and should be treated as a supply-chain regression.
 
 ## 0.23.5 — 2026-07-18
 

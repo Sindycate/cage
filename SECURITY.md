@@ -80,6 +80,27 @@ can modify Git hooks and configuration, corrupt repository metadata, or delete
 data that `git checkout` cannot recover. Keep independent backups and inspect
 repository metadata after running untrusted or unusually broad tasks.
 
+## Release integrity and provenance
+
+Tagged source releases include a SHA-256 checksum and SPDX SBOM. The release
+workflow creates signed GitHub provenance and SBOM attestations for the source
+archive. Published container images include BuildKit SBOM and max-level
+provenance metadata and a signed GitHub provenance attestation. Workflow action
+dependencies are pinned to immutable commits and tracked by Dependabot.
+
+These records make the source revision, build workflow, and detected components
+auditable. They do not establish that the source, dependencies, container image,
+or resulting runtime behavior is safe. Consumers must verify attestations and
+apply their own vulnerability and trust policy.
+
+Container builds intentionally resolve current coding-tool and operating-system
+packages so `cage update` and rebuild workflows can refresh them. The published
+SBOM and provenance identify what a release build actually contained, but the
+container images are not claimed to be bit-for-bit reproducible from mutable
+upstream package repositories. Consumers that require immutable deployment
+identity should retain and use the verified image digest rather than relying on
+a registry tag alone.
+
 ## Reporting a vulnerability
 
 Please use the repository's GitHub private vulnerability-reporting or security

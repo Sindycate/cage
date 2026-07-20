@@ -359,6 +359,22 @@ def parse_client_argv(payload):
     return value
 
 
+def effective_command_argv(base_argv, client_argv):
+    """Append caller arguments except for the exact legacy duplicate case.
+
+    Before Cage 0.23.0, host-command shims did not forward caller arguments, so
+    existing token-minter definitions commonly embedded the complete invocation
+    (for example, ``ztoken token -n codex``). Newer Codex auth configuration
+    supplies those arguments to the shim. Appending an identical suffix would
+    execute the arguments twice and make authentication fail. Preserve general
+    argument forwarding while de-duplicating only that exact compatibility case.
+    """
+    fixed_arguments = base_argv[1:]
+    if fixed_arguments and client_argv == fixed_arguments:
+        return list(base_argv)
+    return list(base_argv) + list(client_argv)
+
+
 def terminate_process_group(proc, grace_seconds=2.0):
     if proc.poll() is not None:
         return
@@ -398,7 +414,7 @@ def run_command(conn, base_argv, client_argv, cwd, child_env, runtime, limits):
     send_lock = threading.Lock()
     try:
         proc = subprocess.Popen(
-            base_argv + client_argv,
+            effective_command_argv(base_argv, client_argv),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

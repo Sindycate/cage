@@ -3,6 +3,112 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-20 — P1-A/P1-B Codex state and token-command regressions in verification
+
+Reported regressions:
+
+- Codex history disappeared from the repository-specific resume list after the
+  0.23.4/0.23.5 upgrade;
+- a custom provider using the host `ztoken` bridge began returning an upstream
+  `400` response complaining that `realm` was missing.
+
+Root causes:
+
+- the 0.23.4 hardened host-state copy removed every same-named destination
+  before import, so shared-host sessions, history, SQLite indexes, logs,
+  memories, and caches could replace the per-repository volume's runtime state;
+- the 0.23.0 bridge correctly began forwarding caller arguments, but the
+  documented legacy token command already embedded `token -n codex`, so newer
+  Codex auth configuration could supply the identical suffix a second time.
+
+Correction:
+
+- narrowed Codex host import to documented static configuration surfaces
+  (`config.toml`, profile files, global AGENTS guidance, hooks, and rules);
+  `auth.json` and `.credentials.json` retain their existing explicit policies,
+  while all resumable/runtime state remains volume-owned;
+- retained general host-command argument forwarding but de-duplicated only an
+  exact caller suffix already present after the configured executable;
+- changed the recommended token bridge to `command = "ztoken"` and added a
+  `cage config doctor` warning for definitions with fixed arguments;
+- documented that the correction prevents further replacement but cannot
+  reconstruct files already removed by a prior launch. Affected volumes must be
+  preserved for a separate read-only-first recovery attempt.
+
+Evidence:
+
+- focused managed-state, bridge, and configuration suites pass (`61 passed`);
+- the complete suite passes (`124 passed, 5 skipped`);
+- all five opt-in real-Docker smoke tests pass, including a new actual-entrypoint
+  case with conflicting host/volume sessions, history, and SQLite state;
+- Python and shell syntax, workflow/dependabot YAML parsing, Compose validation,
+  and `git diff --check` pass;
+- no personal Cage configuration or existing history volume was edited during
+  the correction; runtime inspection/recovery remains separately approval-gated.
+
+Required before returning P1-A/P1-B to complete:
+
+- independently review the host-import allowlist, exact-suffix compatibility
+  rule, tests, and recovery guidance;
+- restore GitHub authentication, publish a new version/tag, and verify a normal
+  custom-provider launch plus persistent history across two launches;
+- record remote release and runtime evidence here. Until then, no hotfix release
+  is claimed.
+
+## 2026-07-20 — P2-C supply-chain hardening in verification
+
+Implemented locally:
+
+- replaced every remote GitHub Actions moving tag with a verified full commit
+  pin and added weekly Dependabot updates for the pinned revisions;
+- extracted source packaging into a deterministic Python builder with an
+  explicit payload, normalized ownership/timestamps, stable ordering, and a
+  timestamp-free gzip header;
+- added an SPDX SBOM for the source archive plus signed GitHub provenance and
+  SBOM attestations;
+- enabled BuildKit SBOM and max-level provenance for both multi-architecture
+  images and added a signed GitHub provenance attestation for each image digest;
+- made the final release job re-check the downloaded archive checksum and SBOM
+  before creating the GitHub Release;
+- documented verification commands and the limit that provenance and SBOMs do
+  not establish artifact safety.
+
+Local evidence:
+
+- supply-chain and installer suites pass (`14 passed`), including byte-identical
+  archives from two independent builds and rejection of non-SHA action refs;
+- the complete unit suite passes (`121 passed, 4 skipped`) and all four opt-in
+  real-Docker smoke tests pass;
+- Python and shell syntax, workflow YAML parsing, Compose validation, and
+  `git diff --check` pass;
+- each pinned revision was resolved from the official action repository's
+  current major-version tag before editing.
+
+Accepted container-build boundary:
+
+- release images intentionally resolve current coding-tool and operating-system
+  packages; making those builds bit-reproducible would conflict with the current
+  tool-refresh product behavior unless a separate dependency-locking design is
+  introduced;
+- the supported immutable identity is the pushed image digest, tied to its
+  source and workflow by provenance and described by its SBOM. Version tags are
+  never intentionally reused under the release policy, while `latest` remains a
+  moving convenience tag;
+- consumers requiring immutable deployment identity must retain the verified
+  digest rather than relying on a mutable registry tag alone.
+
+Required before P2-C is complete:
+
+- independently review the release diff and generated-artifact boundaries;
+- restore GitHub CLI authentication before publication; the 2026-07-20 check
+  still reports invalid tokens for both configured accounts, so no commit, push,
+  version tag, or release was claimed;
+- publish one new version/tag and verify the source provenance, source SBOM
+  attestation, release SBOM asset, both image attestations, and BuildKit metadata
+  from the remote workflow and registries;
+- record the immutable release evidence here before changing the packet state to
+  `complete`.
+
 ## 2026-07-18 — v0.23.5 unauthenticated installer portability
 
 An isolated consumer-side verification after v0.23.4 publication exposed a

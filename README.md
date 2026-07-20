@@ -8,7 +8,7 @@ Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 - Runs Claude Code or Codex CLI inside a Docker container with an isolated home
 - Mounts the target repo read-write and makes extra host mounts explicit
-- Reuses host credentials and settings automatically for a low-friction workflow
+- Reuses host credentials and supported configuration automatically for a low-friction workflow
 - Per-repo persistent state via Docker volumes (sessions, onboarding survive restarts)
 
 Cage's current security boundary is designed primarily for accidental filesystem
@@ -225,6 +225,29 @@ Codex directory and the per-repo Docker volume before launch and after exit.
 This keeps providers that rotate MCP OAuth refresh tokens, such as Dash0, from
 leaving stale token copies in either place.
 
+Codex runtime state remains owned by that per-repository volume. Cage imports
+supported static global configuration (`config.toml`, profile config files,
+global AGENTS guidance, hooks, and rules) and governed credentials, but does not
+import or replace shared-host sessions, history, SQLite indexes, logs, memories,
+or caches. If history is unexpectedly absent, preserve the volume and
+investigate it; do not reset or delete the volume as a first recovery step.
+
+Host command definitions should name the executable when Codex supplies its own
+arguments. For example, a custom provider whose Codex auth configuration runs
+`ztoken token -n codex` should use:
+
+```toml
+[host_commands.ztoken]
+command = "ztoken"
+
+[presets.codex-company]
+host_commands = ["ztoken"]
+```
+
+Cage still de-duplicates an exact caller suffix already embedded in a legacy
+host-command definition, but `cage config doctor` warns about that compatibility
+path so the definition can be simplified.
+
 For Claude OAuth MCP servers, select the same central MCP pack from a Claude
 preset and authenticate inside the cage session with Claude's `/mcp` command.
 No container port publishing is required for this first version; if the browser
@@ -368,6 +391,36 @@ To force-rebuild the versioned image Cage actually launches:
 cage --rebuild ~/path/to/repo
 cage codex --rebuild ~/path/to/repo
 ```
+
+### Verify release provenance
+
+Tagged releases publish the source archive, its SHA-256 checksum, and an SPDX
+SBOM. GitHub also records signed provenance and SBOM attestations for the source
+archive. The two GHCR images carry BuildKit SBOM and max-level provenance
+metadata plus a signed GitHub provenance attestation.
+
+```bash
+VERSION="$(cage --version | awk '{print $NF}')"
+gh release download "v${VERSION}" --repo Sindycate/cage \
+  --pattern "cage-${VERSION}.tar.gz" \
+  --pattern "cage-${VERSION}.tar.gz.sha256" \
+  --pattern "cage-${VERSION}.spdx.json"
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 -c "cage-${VERSION}.tar.gz.sha256"
+else
+  sha256sum --check "cage-${VERSION}.tar.gz.sha256"
+fi
+gh attestation verify "cage-${VERSION}.tar.gz" --repo Sindycate/cage
+gh attestation verify "cage-${VERSION}.tar.gz" --repo Sindycate/cage \
+  --predicate-type https://spdx.dev/Document/v2.3
+gh attestation verify \
+  "oci://ghcr.io/sindycate/cage/codex:${VERSION}" \
+  --repo Sindycate/cage
+```
+
+Repeat the image command with `claude-code` to verify that image. Attestations
+link an artifact to its source and build workflow; an SBOM inventories detected
+components. Neither is a guarantee that the artifact is vulnerability-free.
 
 ### Uninstall
 

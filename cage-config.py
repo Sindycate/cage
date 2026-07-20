@@ -1246,6 +1246,12 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             continue
         if argv and "/" not in argv[0] and shutil.which(argv[0]) is None:
             warnings.append(f"host command executable not found in PATH: {argv[0]}")
+        if len(argv) > 1:
+            warnings.append(
+                f"host command {command['name']!r} embeds fixed arguments; Cage "
+                "de-duplicates an identical caller suffix for compatibility, but an "
+                "executable-only command is clearer when the client supplies arguments"
+            )
 
     if warnings:
         print("Warnings:")
