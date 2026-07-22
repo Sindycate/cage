@@ -56,6 +56,9 @@ cage config doctor --preset codex-company ~/path/to/repo
 cage --preset codex-company ~/path/to/repo
 cage --interactive ~/path/to/repo
 cage codex -i ~/path/to/repo
+# Bare cage opens the same TUI for the current directory. It can launch once,
+# remember an internal project configuration, or save a reusable configuration.
+cage
 
 # Yolo mode — skip coding-tool permission prompts. This does not contain
 # credential use, external connector effects, writable Git metadata, host
@@ -131,8 +134,17 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
-- Supports `--interactive`/`-i` for one-shot ad-hoc launches. Interactive mode prompts from existing central config objects (tool, auth, identity, MCP packs, host commands, net mode, Claude session sync), resolves them as an in-memory `interactive` preset, and never writes back to `config.toml`
+- Bare `cage` and `--interactive`/`-i` open `cage-tui.py` before any Docker,
+  bridge, sync, or volume operation. The curses UI can launch once, remember a
+  hidden project-owned preset, save reusable presets, and manage all central
+  config objects. It returns a private launch artifact that is revalidated by
+  `cage-config.py`; cancellation is a state no-op. If curses is unavailable,
+  Cage falls back to the legacy launch-only numbered prompt
 - Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
+- TUI config mutations are typed, dependency-aware, concurrency-checked, and
+  atomic. They preserve untouched TOML blocks, source permissions, and symlink
+  targets; keep ten private backups under the config directory; and never load
+  backup files as config fragments
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
@@ -327,7 +339,8 @@ uses the URL and optional client ID; shared Codex fields such as
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
 - Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
-- Interactive mode is a one-shot composition layer over central config blocks. It is mutually exclusive with `--preset`, requires a TTY, and must not save selections unless a separate config-authoring feature is explicitly added
+- Interactive mode is mutually exclusive with `--preset`, requires a TTY, and
+  uses the config-authoring TUI. Direct `cage PATH` launches remain unchanged
 - Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
 - Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. When `skill_packs` are selected, cage mounts and copies only those skills; when no `skill_packs` are selected, it falls back to copying the whole `host_agents_dir`
 - OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. cage also syncs Codex MCP OAuth `.credentials.json` between host and volume before launch and after exit to preserve rotated refresh tokens. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.

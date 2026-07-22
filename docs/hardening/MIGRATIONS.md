@@ -8,6 +8,35 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.24.0 — 2026-07-22
+
+### Interactive configuration launcher
+
+Bare `cage` now opens a curses launcher for the current directory. Existing
+`cage PATH` and `cage --preset NAME PATH` commands remain direct launches, and
+`cage --interactive [PATH]` opens the same UI. No config migration is required:
+the UI edits the existing canonical `~/.config/cage/config.toml` and does not
+introduce fragments or merge precedence.
+
+"Remember for this project" creates an internal preset whose name starts with
+`__cage_project_` and maps the canonical project path to it. These internal
+presets are hidden from ordinary reusable-configuration lists but remain plain
+TOML for recovery. Named saves remain normal `[presets.NAME]` entries.
+
+Preset `yolo = true|false` is now supported. Explicit `--yolo` or `--no-yolo`
+wins over the saved value. Existing network precedence is unchanged.
+
+Every UI save validates and locks the source, rejects concurrent changes,
+preserves the source mode and symlink target, atomically replaces the file, and
+keeps up to ten mode-0600 backups in `~/.config/cage/backups/`. Backups are not
+loaded during normal resolution. Config UI actions do not inspect, migrate,
+reset, or remove Docker volumes; Codex runtime state and Claude session-sync
+rules are unchanged.
+
+Rollback: install `0.23.8`. The canonical TOML remains readable after removing
+the optional `yolo` keys. Internal project preset names are ordinary valid
+preset names and may be kept or replaced with named presets.
+
 ## 0.23.8 — 2026-07-20
 
 No configuration migration. This release adds defense in depth to the `0.23.7`

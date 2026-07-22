@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.23.8"
+CAGE_VERSION="0.24.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -101,10 +101,13 @@ if [[ "${1:-}" == "claude" || "${1:-}" == "codex" ]]; then
 fi
 
 YOLO=0
+YOLO_EXPLICIT=-1
 REBUILD=0
 NET_MODE=""  # empty = not explicitly set
 CAGE_PRESET_FLAG=""
 INTERACTIVE=0
+LEGACY_INTERACTIVE=0
+TUI_RESULT=""
 EXTRA_MOUNT_SPECS=()   # entries are "ro<TAB><path>" / "rw<TAB><path>" from CLI flags
 
 while [[ "${1:-}" == -* ]]; do
@@ -120,6 +123,12 @@ while [[ "${1:-}" == -* ]]; do
             ;;
         -y|--yolo)
             YOLO=1
+            YOLO_EXPLICIT=1
+            shift
+            ;;
+        --no-yolo)
+            YOLO=0
+            YOLO_EXPLICIT=0
             shift
             ;;
         -i|--interactive)
@@ -181,8 +190,16 @@ case "${NET_MODE:-open}" in
     *) echo "Invalid --net mode: $NET_MODE (use open, gate, or off)" >&2; exit 1 ;;
 esac
 
+if [ "$INTERACTIVE" -eq 1 ] && [ $# -eq 0 ] && [ "$SHOW_HELP" -eq 0 ]; then
+    set -- .
+fi
+if [ $# -eq 0 ] && [ "$SHOW_HELP" -eq 0 ]; then
+    INTERACTIVE=1
+    set -- .
+fi
+
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] /path/to/repo [tool-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]"
     echo ""
     echo "Tools:"
     echo "  claude    Run Claude Code (default)"
@@ -207,8 +224,9 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Options:"
     echo "  --preset NAME     Use a central config preset (one-shot override)"
-    echo "  -i, --interactive Choose an ad-hoc one-shot preset from configured blocks"
+    echo "  -i, --interactive Open the configuration and launch TUI (path defaults to cwd)"
     echo "  -y, --yolo         Skip all permission prompts"
+    echo "  --no-yolo          Override a saved yolo setting for this launch"
     echo "  --net open         Full network access (default without --yolo)"
     echo "  --net gate         Domain-gated network via proxy (default with --yolo)"
     echo "  --net off          No network access at all"
@@ -219,6 +237,7 @@ if [ $# -lt 1 ]; then
     echo "  --help, -h         Show this help and exit"
     echo ""
     echo "Examples:"
+    echo "  cage                         Open the TUI for the current directory"
     echo "  cage setup"
     echo "  cage config edit"
     echo "  cage mcp login dash0 ~/projects/myapp"
@@ -238,6 +257,50 @@ fi
 
 REPO_PATH="$(cd "$1" && pwd -P)"
 shift
+
+# The TUI runs before any Docker inspection, state synchronization, bridge
+# startup, or volume operation. It returns only a private launch decision.
+if [ "$INTERACTIVE" -eq 1 ]; then
+    if [ ! -f "$CAGE_CONFIG_DIR/config.toml" ]; then
+        echo "ERROR: central config not found at $CAGE_CONFIG_DIR/config.toml" >&2
+        echo "Run: cage config init" >&2
+        exit 1
+    fi
+    if [ ! -r /dev/tty ]; then
+        echo "ERROR: interactive mode requires a TTY" >&2
+        exit 1
+    fi
+    _early_config_dir="$(cd "$CAGE_CONFIG_DIR" && pwd -P)"
+    if [ "$_early_config_dir" = "$REPO_PATH" ] || [[ "$_early_config_dir" == "$REPO_PATH"/* ]]; then
+        echo "ERROR: Cage config directory '$_early_config_dir' is inside the writable repo mount '$REPO_PATH'" >&2
+        echo "Move XDG_CONFIG_HOME outside every Cage-writable mount before using the TUI." >&2
+        exit 1
+    fi
+    TUI_RESULT="$(mktemp "$CAGE_CONFIG_DIR/.tui-result.XXXXXX")"
+    chmod 600 "$TUI_RESULT"
+    _cleanup_tui_result() { [ -z "${TUI_RESULT:-}" ] || rm -f -- "$TUI_RESULT"; }
+    trap _cleanup_tui_result EXIT
+    set +e
+    _tui_args=(
+        --backend "$SCRIPT_DIR/cage-config.py"
+        --config "$CAGE_CONFIG_DIR/config.toml"
+        --repo "$REPO_PATH"
+        --result "$TUI_RESULT"
+    )
+    [ -n "$NET_MODE" ] && _tui_args+=(--net-override "$NET_MODE")
+    [ -n "$CAGE_TOOL" ] && _tui_args+=(--tool-override "$CAGE_TOOL")
+    [ "$YOLO_EXPLICIT" -eq 1 ] && _tui_args+=(--yolo-override on)
+    [ "$YOLO_EXPLICIT" -eq 0 ] && _tui_args+=(--yolo-override off)
+    python3 -I "$SCRIPT_DIR/cage-tui.py" "${_tui_args[@]}"
+    _tui_status=$?
+    set -e
+    if [ "$_tui_status" -eq 70 ]; then
+        echo "WARNING: curses UI unavailable; using the launch-only prompt." >&2
+        LEGACY_INTERACTIVE=1
+    elif [ "$_tui_status" -ne 0 ]; then
+        exit "$_tui_status"
+    fi
+fi
 
 # Refuse to mount onto sensitive container paths. A host dir is bind-mounted at
 # its real host path inside the container, so these would collide with the
@@ -259,7 +322,7 @@ _init_config_vars() {
     GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" HOST_AGENTS_DIR="" GH_AUTH="" GH_ACCOUNT=""
     MCP_SERVERS="" SKILL_MOUNTS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
-    CAGE_PRESET="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS=""
+    CAGE_PRESET="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS="" CAGE_YOLO=""
 }
 
 _load_config() {
@@ -270,7 +333,9 @@ _load_config() {
         exit 1
     fi
     local resolve_args=(--config "$CAGE_CONFIG_DIR/config.toml")
-    if [ "$INTERACTIVE" -eq 1 ]; then
+    if [ -n "${TUI_RESULT:-}" ] && [ "$LEGACY_INTERACTIVE" -eq 0 ]; then
+        resolve_args+=(ui-resolve --repo "$REPO_PATH" --result "$TUI_RESULT")
+    elif [ "$INTERACTIVE" -eq 1 ]; then
         if [ ! -r /dev/tty ]; then
             echo "ERROR: interactive mode requires a TTY" >&2
             exit 1
@@ -278,6 +343,7 @@ _load_config() {
         resolve_args+=(interactive-resolve --repo "$REPO_PATH")
         [ -n "${NET_MODE:-}" ] && resolve_args+=(--net "$NET_MODE")
         [ "$YOLO" -eq 1 ] && resolve_args+=(--yolo)
+        [ "$YOLO_EXPLICIT" -eq 0 ] && resolve_args+=(--no-yolo)
     else
         resolve_args+=(resolve --repo "$REPO_PATH")
         [ -n "${CAGE_PRESET_FLAG:-}" ] && resolve_args+=(--preset "$CAGE_PRESET_FLAG")
@@ -287,6 +353,15 @@ _load_config() {
 }
 
 _load_config
+
+if [ "$YOLO_EXPLICIT" -eq -1 ] && [ -n "${CAGE_YOLO:-}" ]; then
+    YOLO="$CAGE_YOLO"
+fi
+if [ -n "${TUI_RESULT:-}" ]; then
+    rm -f -- "$TUI_RESULT"
+    TUI_RESULT=""
+    trap - EXIT
+fi
 
 # Docker Desktop and Colima may not share macOS's /var/folders system temp
 # directory with their VM. Bind-mounted private staging must therefore live

@@ -1,5 +1,7 @@
 import os
 import base64
+import hashlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -10,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 NETGATE = ROOT / "netgate-proxy.py"
 ENTRYPOINT_CODEX = ROOT / "entrypoint-codex.sh"
+ENTRYPOINT_CLAUDE = ROOT / "entrypoint.sh"
 
 
 def write_executable(path, content):
@@ -31,6 +34,25 @@ class DockerSmokeTests(unittest.TestCase):
             fake_bin.mkdir()
             host_codex.mkdir()
             volume_codex.mkdir()
+            control_config = temp_path / "config.toml"
+            control_config.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            request = temp_path / "request.json"
+            request.write_text(json.dumps({
+                "expected_sha256": hashlib.sha256(control_config.read_bytes()).hexdigest(),
+                "operations": [{
+                    "action": "upsert", "collection": "presets", "name": "main",
+                    "value": {"tool": "codex", "net": "gate"},
+                }],
+            }), encoding="utf-8")
+            saved = subprocess.run(
+                [sys.executable, str(ROOT / "cage-config.py"), "--config", str(control_config),
+                 "ui-commit", "--repo", str(temp_path), "--request", str(request)],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(saved.returncode, 0, saved.stderr)
             (host_codex / "config.toml").write_text(
                 'model = "host-config"\n',
                 encoding="utf-8",
@@ -138,7 +160,7 @@ class DockerSmokeTests(unittest.TestCase):
                     "chown -R 21001:21001 /host-codex && "
                     "mkdir -p /workspace /home/codex && "
                     "cp -R /volume-codex-source /home/codex/.codex && "
-                    "exec /entrypoint.sh --version",
+                    "/entrypoint.sh --version && /entrypoint.sh --version",
                 ],
                 cwd=ROOT,
                 text=True,
@@ -146,6 +168,67 @@ class DockerSmokeTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 timeout=30,
                 check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_claude_entrypoint_preserves_session_tree_across_config_save_and_two_launches(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            control_config = temp_path / "config.toml"
+            control_config.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "claude"\n',
+                encoding="utf-8",
+            )
+            request = temp_path / "request.json"
+            request.write_text(json.dumps({
+                "expected_sha256": hashlib.sha256(control_config.read_bytes()).hexdigest(),
+                "operations": [{
+                    "action": "upsert", "collection": "presets", "name": "main",
+                    "value": {"tool": "claude", "net": "gate", "session_sync": True},
+                }],
+            }), encoding="utf-8")
+            saved = subprocess.run(
+                [sys.executable, str(ROOT / "cage-config.py"), "--config", str(control_config),
+                 "ui-commit", "--repo", str(temp_path), "--request", str(request)],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(saved.returncode, 0, saved.stderr)
+            write_executable(
+                fake_bin / "gosu",
+                "#!/bin/sh\nuser=$1\nshift\nexec setpriv --reuid \"$(id -u \"$user\")\" "
+                "--regid \"$(id -g \"$user\")\" --init-groups \"$@\"\n",
+            )
+            write_executable(fake_bin / "git", "#!/bin/sh\nexit 0\n")
+            write_executable(fake_bin / "jq", "#!/bin/sh\nexit 0\n")
+            write_executable(
+                fake_bin / "claude",
+                "#!/bin/sh\n"
+                "grep -q volume-session \"$HOME/.claude/projects/repo/session.jsonl\" && "
+                "grep -q volume-memory \"$HOME/.claude/projects/repo/memory/MEMORY.md\"\n",
+            )
+
+            result = subprocess.run(
+                [
+                    "docker", "run", "--rm", "--cap-drop", "ALL",
+                    "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE",
+                    "--cap-add", "SETGID", "--cap-add", "SETUID",
+                    "--mount", f"type=bind,src={ENTRYPOINT_CLAUDE},dst=/entrypoint.sh,readonly",
+                    "--mount", f"type=bind,src={fake_bin},dst=/test-bin,readonly",
+                    "-e", "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "-e", "HOME=/home/claude", "-e", "HOST_UID=22001", "-e", "HOST_GID=22001",
+                    "-e", "WORKSPACE_DIR=/workspace", "python:3.12-slim", "sh", "-c",
+                    "groupadd -g 22000 claude && "
+                    "useradd -u 22000 -g 22000 -M -s /bin/sh claude && "
+                    "mkdir -p /workspace /home/claude/.claude/projects/repo/memory && "
+                    "printf 'volume-session\\n' > /home/claude/.claude/projects/repo/session.jsonl && "
+                    "printf 'volume-memory\\n' > /home/claude/.claude/projects/repo/memory/MEMORY.md && "
+                    "bash /entrypoint.sh --version && bash /entrypoint.sh --version",
+                ],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=30, check=False,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)

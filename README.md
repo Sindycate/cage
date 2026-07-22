@@ -70,6 +70,9 @@ docker compose build codex        # just Codex CLI
 ## Usage
 
 ```bash
+# Open the interactive launcher for the current directory
+cage
+
 # Run Claude Code against a repo (default)
 cage ~/projects/myapp
 cage claude ~/projects/myapp     # explicit
@@ -80,7 +83,7 @@ cage codex ~/projects/myapp
 # Run a named central preset
 cage --preset codex-company ~/projects/myapp
 
-# Pick an ad-hoc one-shot preset from configured auth/identity/MCP blocks
+# Open the interactive launcher for a specific project
 cage --interactive ~/projects/myapp
 cage codex -i ~/projects/myapp
 
@@ -124,9 +127,33 @@ cage config explain ~/projects/myapp
 cage config doctor --preset codex-company ~/projects/myapp
 ```
 
-`~/.config/cage/config.toml` is required for launches. `cage config explain` shows exactly which preset, auth block, MCP packs, skill packs, env vars, mounts, and identity will be used.
+`~/.config/cage/config.toml` is required for launches. Run bare `cage` from a
+project to open the terminal UI. It shows the effective configuration rather
+than requiring you to remember preset names, and supports three launch paths:
+launch once, remember the selection for this project, or save it as a named
+reusable configuration.
 
-Use `cage --interactive ~/projects/myapp` for a one-shot ad-hoc launch. It prompts for the tool, auth block, identity, MCP packs, Codex skill packs, host commands, network mode, and Claude session sync from objects already defined in `config.toml`; it does not save or edit the config.
+The UI also manages defaults, reusable configurations, auth profiles,
+identities, MCP and skill packs, host commands, project mappings, mounts, and
+Claude history sync. Codex OAuth MCP login and logout actions are also available
+from the management screen, so their host browser flow does not require a
+separate memorized command. Saved changes remain in this one canonical TOML file.
+Edits are concurrency-checked and atomic; untouched tables and comments are
+preserved, and the ten newest private backups are kept under
+`~/.config/cage/backups/`. If the source changed after the UI opened, Cage asks
+you to reload instead of attempting an implicit merge.
+
+Before saving or launching a high-authority configuration, the UI presents a
+separate risk review for yolo mode, open networking, read-write mounts, host
+commands, GitHub credentials, and authenticated integrations. It reports only
+environment-variable names and whether they are set; secret values are never
+written to `config.toml`.
+
+`cage PATH` and `cage --preset NAME PATH` remain direct, non-interactive
+launches. `cage --interactive [PATH]` opens the same UI, with the path defaulting
+to the current directory. If curses is unavailable, Cage falls back to its
+launch-only numbered prompt. `cage config edit`, `list`, `show`, `explain`,
+`doctor`, and `set-project` remain available for scripting and recovery.
 
 ```toml
 version = 1
@@ -185,6 +212,8 @@ identity = "work"
 mcp_packs = ["linear", "dash0", "local-tools"]
 skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
+# Optional. Explicit --yolo or --no-yolo wins for a single launch.
+yolo = false
 
 [presets.codex-company-debug]
 tool = "codex"

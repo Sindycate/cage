@@ -3,6 +3,30 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-22 — v0.24.0 transactional curses configuration launcher
+
+Implemented a standard-library curses control plane over the existing central
+configuration backend. The launcher runs before Docker inspection, bridge
+startup, session/OAuth synchronization, and volume operations, and returns a
+private mode-0600 launch artifact that is revalidated by `cage-config.py`.
+
+Configuration writes use typed operations, dependency-aware renames and
+deletes, an opening SHA-256 concurrency check, a private sidecar lock,
+parse/schema/reference validation, semantic render comparison, atomic
+replacement, source-mode and symlink-target preservation, and ten private
+rolling backups. Only edited objects are canonicalized; untouched tables and
+comments remain byte-preserved. High-authority saves and launches receive a
+dedicated risk review.
+
+State boundary evidence includes a pseudo-terminal cancellation test proving
+Docker is not invoked, isolated byte-for-byte Codex and Claude state manifests
+across config saves, the existing fail-closed Codex import fixtures, and opt-in
+real-Docker tests that run both entrypoints twice against the same persistent
+state after a transactional UI save. Release publication evidence remains
+pending. Final local evidence: the complete suite passes (`147 passed, 6
+skipped`), all six opt-in real-Docker smoke tests pass, shell/Python syntax and
+diff checks pass, and the reproducible archive test includes the TUI payload.
+
 ## 2026-07-20 — v0.23.8 fail-closed Codex runtime-state import invariant
 
 Post-recovery review confirmed that `v0.23.7` prevents the reported overwrite,

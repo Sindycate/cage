@@ -7,6 +7,24 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.24.0 — 2026-07-22
+
+- add a standard-library curses launcher and configuration UI: bare `cage`
+  opens it for the current project, while `cage PATH` remains a direct launch;
+- let users launch once, remember a hidden project-owned configuration, or save
+  a named reusable configuration without editing TOML manually;
+- manage all central configuration object types with generated summaries,
+  dependency-aware rename/delete behavior, preflight warnings, and dedicated
+  reviews for high-authority settings;
+- add transactional, concurrency-checked, comment-preserving TOML mutations,
+  atomic replacement, source-mode preservation, and ten private rolling
+  backups;
+- support persisted preset `yolo`, with explicit `--yolo` and `--no-yolo`
+  taking launch-time precedence;
+- keep the TUI before every Docker, bridge, sync, and volume operation, and add
+  cancellation plus Codex/Claude state-preservation regression gates;
+- include the new TUI in source installs and reproducible release archives.
+
 ## 0.23.8 — 2026-07-20
 
 - enforce the Codex host-import allowlist inside the file and directory copy

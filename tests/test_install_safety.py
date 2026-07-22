@@ -37,6 +37,7 @@ class InstallerSafetyTests(unittest.TestCase):
         required = [
             "cage",
             "cage-config.py",
+            "cage-tui.py",
             "cage-netgate.sh",
             "netgate-proxy.py",
             "mcp-bridge.py",
@@ -302,6 +303,8 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((install_dir / ".cage-install").is_file())
             self.assertFalse((install_dir / ".cage-install").is_symlink())
+            self.assertTrue((install_dir / "cage-tui.py").is_file())
+            self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
             self.assertEqual(
                 subprocess.check_output(
                     [str(install_dir / "cage"), "--version"], text=True

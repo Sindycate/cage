@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_FILES = (
     "cage",
     "cage-config.py",
+    "cage-tui.py",
     "cage-netgate.sh",
     "netgate-proxy.py",
     "mcp-bridge.py",

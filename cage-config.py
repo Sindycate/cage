@@ -11,14 +11,18 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import copy
+import fcntl
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -104,6 +108,16 @@ PRESET_KEYS = {
     "skill_packs",
     "host_commands",
     "extra_mounts",
+    "yolo",
+}
+
+EDITABLE_COLLECTIONS = {
+    "auth",
+    "identities",
+    "mcp_packs",
+    "skill_packs",
+    "host_commands",
+    "presets",
 }
 
 
@@ -124,6 +138,7 @@ class ResolvedConfig:
     skill_pack_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: str = ""
+    yolo: str = ""
     claude_auth: str = ""
     aws_profile: str = ""
     aws_region: str = ""
@@ -155,6 +170,7 @@ class InteractiveSelections:
     host_command_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: bool | None = None
+    yolo: bool | None = None
 
 
 def default_config_path() -> Path:
@@ -171,8 +187,15 @@ def load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigError(f"config not found: {path}")
     try:
-        with path.open("rb") as fh:
-            data = tomllib.load(fh)
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"cannot read config {path}: {exc}") from exc
+    return parse_config_text(text, path)
+
+
+def parse_config_text(text: str, path: Path | str = "config") -> dict[str, Any]:
+    try:
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
     if not isinstance(data, dict):
@@ -637,6 +660,8 @@ def build_interactive_preset(selections: InteractiveSelections) -> dict[str, Any
         preset["net"] = selections.net
     if selections.session_sync is not None:
         preset["session_sync"] = selections.session_sync
+    if selections.yolo is not None:
+        preset["yolo"] = selections.yolo
     return preset
 
 
@@ -676,10 +701,12 @@ def interactive_select(
     repo: str,
     explicit_tool: str = "",
     explicit_net: str = "",
-    yolo: bool = False,
+    yolo_override: bool | None = None,
 ) -> InteractiveSelections:
     seed_name, seed_preset = selected_seed_preset(data, repo)
     seed_tool = preset_tool(data, seed_preset)
+    seed_yolo = seed_preset.get("yolo") is True
+    yolo = yolo_override if yolo_override is not None else seed_yolo
     seed_for_tool = seed_preset if not seed_tool or seed_tool == (explicit_tool or seed_tool) else {}
 
     with open_tty() as tty:
@@ -778,6 +805,7 @@ def interactive_select(
         host_command_names=host_command_names,
         net=net,
         session_sync=session_sync,
+        yolo=yolo,
     )
 
 
@@ -849,6 +877,7 @@ def resolve_config(
         preset.get("session_sync", defaults.get("session_sync")),
         f"presets.{preset_name}.session_sync",
     )
+    resolved.yolo = bool_to_flag(preset.get("yolo"), f"presets.{preset_name}.yolo")
 
     identity_name = preset.get("identity", "")
     if identity_name is not None and not isinstance(identity_name, str):
@@ -1126,6 +1155,7 @@ def emit_shell(resolved: ResolvedConfig) -> None:
         "HOST_COMMANDS": host_commands,
         "EXTRA_MOUNTS": extra_mounts,
         "SESSION_SYNC": resolved.session_sync,
+        "CAGE_YOLO": resolved.yolo,
     }
     for name, value in assignments.items():
         print(shell_assign(name, value))
@@ -1148,6 +1178,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print(f"Tool:   {resolved.tool}")
     if resolved.net:
         print(f"Net:    {resolved.net}")
+    if resolved.yolo:
+        print(f"Yolo:   {'enabled' if resolved.yolo == '1' else 'disabled'}")
     if resolved.auth_name:
         print(f"Auth:   {resolved.auth_name}")
     if resolved.identity_name:
@@ -1211,6 +1243,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("  - host state writeback: Claude session sync enabled")
     if resolved.ssh_key:
         print(f"  - SSH private key: mounted read-only ({resolved.ssh_key})")
+    if resolved.yolo == "1":
+        print("  - coding-tool permission prompts: disabled")
 
     if not doctor:
         return 0
@@ -1280,7 +1314,7 @@ def command_interactive_resolve(args: argparse.Namespace) -> int:
         args.repo,
         explicit_tool=args.tool or "",
         explicit_net=args.net or "",
-        yolo=args.yolo,
+        yolo_override=True if args.yolo else False if args.no_yolo else None,
     )
     resolved = resolve_interactive_selection(
         data,
@@ -1539,6 +1573,562 @@ def atomic_write_text(path: Path, text: str) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def config_destination(path: Path) -> Path:
+    if not path.is_symlink():
+        if path.exists() and not path.is_file():
+            raise ConfigError(f"config must be a regular file: {path}")
+        return path
+    try:
+        destination = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ConfigError(f"refusing to use broken config symlink: {path}") from exc
+    if not destination.is_file():
+        raise ConfigError(f"config symlink target must be a regular file: {destination}")
+    return destination
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def toml_key(value: str) -> str:
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else toml_quote(value)
+
+
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return toml_quote(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{toml_key(str(key))} = {toml_value(item)}" for key, item in value.items()
+        ) + " }"
+    raise ConfigError(f"cannot serialize unsupported TOML value: {type(value).__name__}")
+
+
+def render_table(path: tuple[str, ...], value: dict[str, Any]) -> str:
+    header = ".".join(toml_key(part) for part in path)
+    lines = [f"[{header}]"]
+    for key, item in value.items():
+        lines.append(f"{toml_key(str(key))} = {toml_value(item)}")
+    return "\n".join(lines) + "\n"
+
+
+def parse_header_path(line: str) -> tuple[str, ...] | None:
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    header = stripped.split("#", 1)[0].strip()
+    try:
+        parsed = tomllib.loads(header + "\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    path: list[str] = []
+    cursor: Any = parsed
+    while True:
+        if isinstance(cursor, dict) and len(cursor) == 1:
+            key, cursor = next(iter(cursor.items()))
+            path.append(str(key))
+        elif isinstance(cursor, list) and len(cursor) == 1:
+            cursor = cursor[0]
+        else:
+            break
+    return tuple(path)
+
+
+def table_spans(text: str) -> list[tuple[tuple[str, ...], int, int]]:
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    headers: list[tuple[tuple[str, ...], int]] = []
+    for line in lines:
+        offsets.append(offset)
+        path = parse_header_path(line)
+        if path:
+            headers.append((path, offset))
+        offset += len(line)
+    spans: list[tuple[tuple[str, ...], int, int]] = []
+    for index, (path, start) in enumerate(headers):
+        end = headers[index + 1][1] if index + 1 < len(headers) else len(text)
+        spans.append((path, start, end))
+    return spans
+
+
+def replace_table(text: str, path: tuple[str, ...], value: dict[str, Any] | None) -> str:
+    matching = [span for span in table_spans(text) if span[0][: len(path)] == path]
+    rendered = render_table(path, value) if value is not None else ""
+    if not matching:
+        if value is None:
+            return text
+        separator = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        return text + separator + rendered
+    start = min(span[1] for span in matching)
+    end = max(span[2] for span in matching)
+    suffix = text[end:]
+    if rendered and suffix and not rendered.endswith("\n\n"):
+        rendered += "\n"
+    return text[:start] + rendered + suffix
+
+
+def replace_top_level_value(text: str, key: str, value: Any | None) -> str:
+    first_table = min((start for _, start, _ in table_spans(text)), default=len(text))
+    prefix = text[:first_table]
+    suffix = text[first_table:]
+    pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=.*(?:\n|$)")
+    replacement = "" if value is None else f"{key} = {toml_value(value)}\n"
+    if pattern.search(prefix):
+        prefix = pattern.sub(replacement, prefix, count=1)
+    elif value is not None:
+        prefix = replacement + prefix
+    return prefix + suffix
+
+
+def referenced_by(data: dict[str, Any], collection: str, name: str) -> list[str]:
+    refs: list[str] = []
+    presets = as_table(data, "presets")
+    scalar_key = {"auth": "auth", "identities": "identity"}.get(collection)
+    list_key = {
+        "mcp_packs": "mcp_packs",
+        "skill_packs": "skill_packs",
+        "host_commands": "host_commands",
+    }.get(collection)
+    if collection == "presets":
+        if data.get("default_preset") == name or as_table(data, "defaults").get("default_preset") == name:
+            refs.append("default preset")
+        refs.extend(f"project {path}" for path, preset in as_table(data, "projects").items() if preset == name)
+    for preset_name, preset in presets.items():
+        if not isinstance(preset, dict):
+            continue
+        if scalar_key and preset.get(scalar_key) == name:
+            refs.append(f"preset {preset_name}")
+        if list_key:
+            for item in preset.get(list_key, []):
+                if item == name:
+                    refs.append(f"preset {preset_name}")
+    return sorted(set(refs))
+
+
+def update_references(data: dict[str, Any], collection: str, old: str, new: str) -> None:
+    presets = as_table(data, "presets")
+    scalar_key = {"auth": "auth", "identities": "identity"}.get(collection)
+    list_key = {
+        "mcp_packs": "mcp_packs",
+        "skill_packs": "skill_packs",
+        "host_commands": "host_commands",
+    }.get(collection)
+    if collection == "presets":
+        if data.get("default_preset") == old:
+            data["default_preset"] = new
+        defaults = as_table(data, "defaults")
+        if defaults.get("default_preset") == old:
+            defaults["default_preset"] = new
+        projects = as_table(data, "projects")
+        for path, preset in list(projects.items()):
+            if preset == old:
+                projects[path] = new
+    for preset in presets.values():
+        if not isinstance(preset, dict):
+            continue
+        if scalar_key and preset.get(scalar_key) == old:
+            preset[scalar_key] = new
+        if list_key and isinstance(preset.get(list_key), list):
+            preset[list_key] = [new if item == old else item for item in preset[list_key]]
+
+
+def validate_references(data: dict[str, Any]) -> None:
+    validate_schema(data)
+    presets = as_table(data, "presets")
+    collections = {
+        "auth": as_table(data, "auth"),
+        "identity": as_table(data, "identities"),
+        "mcp_packs": as_table(data, "mcp_packs"),
+        "skill_packs": as_table(data, "skill_packs"),
+        "host_commands": as_table(data, "host_commands"),
+    }
+    for preset_name, preset in presets.items():
+        if not isinstance(preset, dict):
+            continue
+        for key in ("auth", "identity"):
+            selected = preset.get(key)
+            if selected and selected not in collections[key]:
+                raise ConfigError(f"presets.{preset_name}.{key} references missing {key}: {selected}")
+        for key in ("mcp_packs", "skill_packs", "host_commands"):
+            for selected in preset.get(key, []):
+                if isinstance(selected, str) and selected not in collections[key]:
+                    raise ConfigError(f"presets.{preset_name}.{key} references missing object: {selected}")
+    for path, preset in as_table(data, "projects").items():
+        if not isinstance(path, str) or not isinstance(preset, str):
+            raise ConfigError("[projects] must map path strings to preset names")
+        if preset not in presets:
+            raise ConfigError(f"project {path!r} references missing preset: {preset}")
+    default_name = data.get("default_preset") or as_table(data, "defaults").get("default_preset")
+    if default_name and default_name not in presets:
+        raise ConfigError(f"default_preset references missing preset: {default_name}")
+
+
+def hidden_project_preset_name(repo: str) -> str:
+    path = normalize_project_path(repo)
+    base = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(path).name).strip("-") or "project"
+    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+    return f"__cage_project_{base}_{digest}"
+
+
+def apply_ui_operations(data: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
+    updated = copy.deepcopy(data)
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ConfigError("each UI operation must be an object")
+        action = operation.get("action")
+        if action == "upsert":
+            collection = operation.get("collection")
+            name = operation.get("name")
+            if collection not in EDITABLE_COLLECTIONS:
+                raise ConfigError(f"unsupported collection: {collection}")
+            require_name(name, f"{collection} name")
+            value = operation.get("value")
+            if not isinstance(value, dict):
+                raise ConfigError("upsert value must be an object")
+            updated.setdefault(collection, {})[name] = copy.deepcopy(value)
+        elif action == "rename":
+            collection = operation.get("collection")
+            old = operation.get("name")
+            new = operation.get("new_name")
+            if collection not in EDITABLE_COLLECTIONS:
+                raise ConfigError(f"unsupported collection: {collection}")
+            require_name(old, f"{collection} name")
+            require_name(new, f"{collection} new name")
+            table = as_table(updated, collection)
+            if old not in table:
+                raise ConfigError(f"{collection} object not found: {old}")
+            if new in table:
+                raise ConfigError(f"{collection} object already exists: {new}")
+            value = table.pop(old)
+            table[new] = value
+            update_references(updated, collection, old, new)
+        elif action == "delete":
+            collection = operation.get("collection")
+            name = operation.get("name")
+            if collection not in EDITABLE_COLLECTIONS:
+                raise ConfigError(f"unsupported collection: {collection}")
+            require_name(name, f"{collection} name")
+            refs = referenced_by(updated, collection, name)
+            if refs:
+                raise ConfigError(f"cannot delete {collection}.{name}; referenced by: {', '.join(refs)}")
+            table = as_table(updated, collection)
+            if name not in table:
+                raise ConfigError(f"{collection} object not found: {name}")
+            del table[name]
+        elif action == "set_default":
+            name = operation.get("name")
+            require_name(name, "default preset")
+            if name not in as_table(updated, "presets"):
+                raise ConfigError(f"preset not found: {name}")
+            updated["default_preset"] = name
+        elif action == "update_defaults":
+            value = operation.get("value")
+            if not isinstance(value, dict):
+                raise ConfigError("update_defaults value must be an object")
+            reject_unknown_keys(value, DEFAULT_KEYS, "defaults")
+            updated["defaults"] = copy.deepcopy(value)
+        elif action == "set_project":
+            path = normalize_project_path(str(operation.get("path", "")))
+            name = operation.get("name")
+            require_name(name, "project preset")
+            if name not in as_table(updated, "presets"):
+                raise ConfigError(f"preset not found: {name}")
+            updated.setdefault("projects", {})[path] = name
+        elif action == "remove_project":
+            path = normalize_project_path(str(operation.get("path", "")))
+            as_table(updated, "projects").pop(path, None)
+        elif action == "remember_project":
+            path = normalize_project_path(str(operation.get("path", "")))
+            value = operation.get("value")
+            if not isinstance(value, dict):
+                raise ConfigError("remember_project value must be an object")
+            name = hidden_project_preset_name(path)
+            projects = updated.setdefault("projects", {})
+            presets = updated.setdefault("presets", {})
+            existing = projects.get(path)
+            if isinstance(existing, str) and existing.startswith("__cage_project_"):
+                name = existing
+            elif name in presets:
+                suffix = 2
+                candidate = f"{name}_{suffix}"
+                while candidate in presets:
+                    suffix += 1
+                    candidate = f"{name}_{suffix}"
+                name = candidate
+            presets[name] = copy.deepcopy(value)
+            projects[path] = name
+        else:
+            raise ConfigError(f"unsupported UI operation: {action}")
+    validate_references(updated)
+    return updated
+
+
+def affected_preset_names(
+    before: dict[str, Any], after: dict[str, Any], operations: list[dict[str, Any]]
+) -> list[str]:
+    affected: set[str] = set()
+    for operation in operations:
+        action = operation.get("action")
+        collection = operation.get("collection")
+        name = operation.get("new_name") if action == "rename" else operation.get("name")
+        if collection == "presets" and isinstance(name, str):
+            affected.add(name)
+        elif collection in EDITABLE_COLLECTIONS and isinstance(name, str):
+            affected.update(
+                preset_name
+                for preset_name, preset in as_table(after, "presets").items()
+                if isinstance(preset, dict) and (
+                    (collection == "auth" and preset.get("auth") == name)
+                    or (collection == "identities" and preset.get("identity") == name)
+                    or (
+                        collection in {"mcp_packs", "skill_packs", "host_commands"}
+                        and name in preset.get(collection, [])
+                    )
+                )
+            )
+        if action == "remember_project":
+            path = normalize_project_path(str(operation.get("path", "")))
+            mapped = as_table(after, "projects").get(path)
+            if isinstance(mapped, str):
+                affected.add(mapped)
+        elif action in {"set_default", "set_project"} and isinstance(operation.get("name"), str):
+            affected.add(str(operation["name"]))
+        elif action == "update_defaults":
+            default_name = after.get("default_preset") or as_table(after, "defaults").get("default_preset")
+            if isinstance(default_name, str):
+                affected.add(default_name)
+    return sorted(name for name in affected if name in as_table(after, "presets"))
+
+
+def validate_affected_presets(
+    before: dict[str, Any], after: dict[str, Any], operations: list[dict[str, Any]],
+    config_path: Path, repo: str,
+) -> None:
+    for name in affected_preset_names(before, after, operations):
+        resolve_config(after, config_path, repo, preset_name=name)
+
+
+def render_config_changes(text: str, before: dict[str, Any], after: dict[str, Any]) -> str:
+    rendered = text
+    for collection in sorted(EDITABLE_COLLECTIONS):
+        before_table = as_table(before, collection)
+        after_table = as_table(after, collection)
+        for name in sorted(set(before_table) | set(after_table)):
+            if before_table.get(name) != after_table.get(name):
+                value = after_table.get(name)
+                rendered = replace_table(
+                    rendered,
+                    (collection, name),
+                    value if isinstance(value, dict) else None,
+                )
+    if before.get("defaults", {}) != after.get("defaults", {}):
+        rendered = replace_table(rendered, ("defaults",), as_table(after, "defaults"))
+    if before.get("projects", {}) != after.get("projects", {}):
+        rendered = replace_projects_section(rendered, as_table(after, "projects"))
+    if before.get("default_preset") != after.get("default_preset"):
+        rendered = replace_top_level_value(rendered, "default_preset", after.get("default_preset"))
+    if not rendered.endswith("\n"):
+        rendered += "\n"
+    try:
+        reparsed = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"refusing to render invalid TOML: {exc}") from exc
+    if reparsed != after:
+        raise ConfigError("rendered TOML does not match the validated configuration")
+    return rendered
+
+
+def create_config_backup(config_path: Path, text: str) -> None:
+    backup_dir = config_path.parent / "backups"
+    if backup_dir.is_symlink():
+        raise ConfigError(f"refusing symlinked config backup directory: {backup_dir}")
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not backup_dir.is_dir() or backup_dir.stat().st_uid != os.getuid():
+        raise ConfigError(f"config backup directory must be owned by the current user: {backup_dir}")
+    os.chmod(backup_dir, 0o700)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = backup_dir / f"config-{timestamp}-{sha256_text(text)[:12]}.toml"
+    atomic_write_text(backup, text)
+    backup.chmod(0o600)
+    backups = sorted(backup_dir.glob("config-*.toml"), key=lambda item: item.name, reverse=True)
+    for old in backups[10:]:
+        old.unlink()
+
+
+@contextmanager
+def config_write_lock(path: Path):
+    destination = config_destination(path)
+    lock_path = destination.parent / f".{destination.name}.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ConfigError(f"cannot open private config lock {lock_path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ConfigError(f"config lock must be a regular file: {lock_path}")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield destination
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def load_ui_request(path: Path) -> dict[str, Any]:
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+            raise OSError("artifact must be a regular file no larger than 1 MiB")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+        identity = lambda value: (value.st_dev, value.st_ino)
+        if identity(before) != identity(opened) or identity(opened) != identity(current):
+            os.close(descriptor)
+            raise OSError("artifact changed while it was being opened")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            request = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"invalid UI request artifact: {exc}") from exc
+    if not isinstance(request, dict):
+        raise ConfigError("UI request artifact must contain an object")
+    return request
+
+
+def ui_summary(data: dict[str, Any], config_path: Path, repo: str) -> dict[str, Any]:
+    effective: dict[str, Any]
+    try:
+        resolved = resolve_config(data, config_path, repo)
+        effective = {
+            "preset": resolved.preset_name,
+            "source": resolved.preset_source,
+            "tool": resolved.tool,
+            "auth": resolved.auth_name,
+            "identity": resolved.identity_name,
+            "net": resolved.net or ("gate" if resolved.yolo == "1" else "open"),
+            "yolo": resolved.yolo == "1",
+            "session_sync": resolved.session_sync != "0",
+            "mcp_packs": resolved.mcp_pack_names,
+            "skill_packs": resolved.skill_pack_names,
+            "host_commands": [item["name"] for item in resolved.host_commands],
+            "extra_mounts": resolved.extra_mounts,
+            "required_env": resolved.extra_env,
+        }
+    except ConfigError as exc:
+        effective = {"error": str(exc)}
+    dependencies = {
+        collection: {
+            name: referenced_by(data, collection, name)
+            for name in as_table(data, collection)
+        }
+        for collection in EDITABLE_COLLECTIONS
+    }
+    return {"effective": effective, "dependencies": dependencies}
+
+
+def command_ui_export(args: argparse.Namespace) -> int:
+    destination = config_destination(args.config)
+    text = destination.read_text(encoding="utf-8")
+    data = parse_config_text(text, destination)
+    output = {
+        "config_path": str(args.config),
+        "destination": str(destination),
+        "repo": normalize_project_path(args.repo),
+        "sha256": sha256_text(text),
+        "config": data,
+        **ui_summary(data, args.config, args.repo),
+    }
+    print(json.dumps(output, separators=(",", ":")))
+    return 0
+
+
+def command_ui_preview(args: argparse.Namespace) -> int:
+    request = load_ui_request(args.request)
+    data = load_config(args.config)
+    operations = request.get("operations", [])
+    if not isinstance(operations, list):
+        raise ConfigError("operations must be a list")
+    updated = apply_ui_operations(data, operations)
+    validate_affected_presets(data, updated, operations, args.config, args.repo)
+    output = {"config": updated, **ui_summary(updated, args.config, args.repo)}
+    print(json.dumps(output, separators=(",", ":")))
+    return 0
+
+
+def command_ui_commit(args: argparse.Namespace) -> int:
+    request = load_ui_request(args.request)
+    expected = request.get("expected_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ConfigError("UI commit requires the opening config SHA-256")
+    operations = request.get("operations", [])
+    if not isinstance(operations, list):
+        raise ConfigError("operations must be a list")
+    with config_write_lock(args.config) as destination:
+        expected_destination = request.get("expected_destination")
+        if expected_destination is not None and expected_destination != str(destination):
+            raise ConfigError("config symlink target changed since the TUI opened; reload before saving")
+        text = destination.read_text(encoding="utf-8")
+        actual = sha256_text(text)
+        if actual != expected:
+            raise ConfigError("config changed since the TUI opened; reload before saving")
+        data = parse_config_text(text, destination)
+        updated = apply_ui_operations(data, operations)
+        validate_affected_presets(data, updated, operations, args.config, args.repo)
+        if updated == data:
+            rendered = text
+        else:
+            rendered = render_config_changes(text, data, updated)
+            create_config_backup(args.config, text)
+            atomic_write_text(destination, rendered)
+    output = {
+        "sha256": sha256_text(rendered),
+        "config_path": str(args.config),
+        "destination": str(destination),
+        "repo": normalize_project_path(args.repo),
+        "config": updated,
+        **ui_summary(updated, args.config, args.repo),
+    }
+    print(json.dumps(output, separators=(",", ":")))
+    return 0
+
+
+def command_ui_resolve(args: argparse.Namespace) -> int:
+    request = load_ui_request(args.result)
+    data = load_config(args.config)
+    action = request.get("action")
+    if action == "preset":
+        name = request.get("preset_name")
+        require_name(name, "TUI preset name")
+        resolved = resolve_config(data, args.config, args.repo, name, args.tool or "")
+    elif action == "launch_once":
+        value = request.get("preset")
+        if not isinstance(value, dict):
+            raise ConfigError("TUI launch result is missing its preset")
+        selections_data = copy.deepcopy(data)
+        selections_data.setdefault("presets", {})["__cage_launch_once"] = value
+        validate_references(selections_data)
+        resolved = resolve_config(
+            selections_data,
+            args.config,
+            args.repo,
+            "__cage_launch_once",
+            args.tool or "",
+        )
+        resolved.preset_source = "tui:launch-once"
+    else:
+        raise ConfigError("TUI did not return a launch action")
+    emit_shell(resolved)
+    return 0
+
+
 def command_set_project(args: argparse.Namespace) -> int:
     data = load_config(args.config)
     presets = as_table(data, "presets")
@@ -1579,7 +2169,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", required=True)
     p.add_argument("--tool", choices=["claude", "codex"])
     p.add_argument("--net", choices=["open", "gate", "off"])
-    p.add_argument("--yolo", action="store_true")
+    yolo_group = p.add_mutually_exclusive_group()
+    yolo_group.add_argument("--yolo", action="store_true")
+    yolo_group.add_argument("--no-yolo", action="store_true")
     p.set_defaults(func=command_interactive_resolve)
 
     p = sub.add_parser("default-tool", help=argparse.SUPPRESS)
@@ -1615,6 +2207,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("preset")
     p.set_defaults(func=command_set_project)
+
+    p = sub.add_parser("ui-export", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.set_defaults(func=command_ui_export)
+
+    p = sub.add_parser("ui-preview", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--request", type=Path, required=True)
+    p.set_defaults(func=command_ui_preview)
+
+    p = sub.add_parser("ui-commit", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--request", type=Path, required=True)
+    p.set_defaults(func=command_ui_commit)
+
+    p = sub.add_parser("ui-resolve", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--result", type=Path, required=True)
+    p.add_argument("--tool", choices=["claude", "codex"])
+    p.set_defaults(func=command_ui_resolve)
 
     p = sub.add_parser("mcp", help="Manage OAuth MCP authentication")
     mcp_sub = p.add_subparsers(dest="mcp_command", required=True)

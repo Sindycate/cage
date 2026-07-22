@@ -91,12 +91,14 @@ class ReleaseSupplyChainTests(unittest.TestCase):
                 members = archive.getmembers()
             names = [member.name for member in members]
             self.assertIn("cage-9.9.9/cage", names)
+            self.assertIn("cage-9.9.9/cage-tui.py", names)
             self.assertIn("cage-9.9.9/install.sh", names)
             self.assertIn("cage-9.9.9/netgate/defaults.json", names)
             self.assertIn("cage-9.9.9/docs/hardening/WORKFLOW.md", names)
             self.assertNotIn("cage-9.9.9/.git", names)
             modes = {member.name: member.mode for member in members}
             self.assertEqual(modes["cage-9.9.9/cage"], 0o755)
+            self.assertEqual(modes["cage-9.9.9/cage-tui.py"], 0o755)
             self.assertEqual(modes["cage-9.9.9/README.md"], 0o644)
             for member in members:
                 self.assertTrue(member.name == "cage-9.9.9" or member.name.startswith("cage-9.9.9/"))

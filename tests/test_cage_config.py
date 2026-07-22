@@ -755,6 +755,262 @@ class CageConfigTests(unittest.TestCase):
 
         call.assert_not_called()
 
+    def test_preset_yolo_resolves_as_explicit_capability(self):
+        data = self.base_config()
+        data["presets"]["codex-main"]["yolo"] = True
+
+        resolved = self.resolve(data)
+
+        self.assertEqual(resolved.yolo, "1")
+
+    def test_ui_summary_shows_yolo_network_default_as_gate(self):
+        data = {
+            "version": 1,
+            "default_preset": "main",
+            "presets": {"main": {"tool": "codex", "yolo": True}},
+        }
+
+        summary = cage_config.ui_summary(data, Path("/tmp/config.toml"), "/tmp/project")
+
+        self.assertEqual(summary["effective"]["net"], "gate")
+
+    def test_ui_rename_updates_all_references_atomically(self):
+        data = self.base_config()
+
+        updated = cage_config.apply_ui_operations(data, [{
+            "action": "rename",
+            "collection": "mcp_packs",
+            "name": "linear",
+            "new_name": "company-linear",
+        }])
+
+        self.assertNotIn("linear", updated["mcp_packs"])
+        self.assertIn("company-linear", updated["mcp_packs"])
+        self.assertEqual(
+            updated["presets"]["codex-main"]["mcp_packs"],
+            ["company-linear", "local"],
+        )
+        self.assertEqual(data["presets"]["codex-main"]["mcp_packs"][0], "linear")
+
+    def test_ui_delete_referenced_object_is_blocked(self):
+        with self.assertRaisesRegex(cage_config.ConfigError, "referenced by"):
+            cage_config.apply_ui_operations(self.base_config(), [{
+                "action": "delete",
+                "collection": "auth",
+                "name": "codex-oauth",
+            }])
+
+    def test_ui_semantically_validates_each_affected_preset(self):
+        data = self.base_config()
+        operations = [{
+            "action": "upsert", "collection": "presets", "name": "codex-main",
+            "value": {
+                "tool": "codex", "auth": "codex-oauth",
+                "mcp_packs": ["linear", "linear"],
+            },
+        }]
+        updated = cage_config.apply_ui_operations(data, operations)
+
+        with self.assertRaisesRegex(cage_config.ConfigError, "duplicate MCP server"):
+            cage_config.validate_affected_presets(
+                data, updated, operations, Path("/tmp/config.toml"), "/tmp/project-a"
+            )
+
+    def test_ui_render_preserves_untouched_comments_and_tables(self):
+        original = """# top comment
+version = 1
+default_preset = "main"
+
+[auth.work]
+# edited comment may be canonicalized
+tool = "codex"
+
+[identities.personal]
+# this exact block must remain untouched
+git_user_name = "Somebody"
+
+[presets.main]
+tool = "codex"
+auth = "work"
+"""
+        before = cage_config.tomllib.loads(original)
+        after = cage_config.apply_ui_operations(before, [{
+            "action": "upsert",
+            "collection": "auth",
+            "name": "work",
+            "value": {"tool": "codex", "copy_auth": False},
+        }])
+
+        rendered = cage_config.render_config_changes(original, before, after)
+
+        untouched = "[identities.personal]\n# this exact block must remain untouched\ngit_user_name = \"Somebody\""
+        self.assertIn("# top comment", rendered)
+        self.assertIn(untouched, rendered)
+        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+
+    def test_ui_render_canonicalizes_edited_array_table_object(self):
+        original = """version = 1
+default_preset = "main"
+
+[mcp_packs.local]
+[[mcp_packs.local.servers]]
+name = "local"
+type = "stdio"
+command = "old-command"
+
+[presets.main]
+tool = "codex"
+mcp_packs = ["local"]
+"""
+        before = cage_config.tomllib.loads(original)
+        after = cage_config.apply_ui_operations(before, [{
+            "action": "upsert", "collection": "mcp_packs", "name": "local",
+            "value": {"servers": [{"name": "local", "type": "stdio", "command": "new-command"}]},
+        }])
+
+        rendered = cage_config.render_config_changes(original, before, after)
+
+        self.assertNotIn("[[mcp_packs.local.servers]]", rendered)
+        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+
+    def test_ui_commit_detects_concurrent_change_and_creates_no_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            config.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            opening = cage_config.sha256_text(config.read_text(encoding="utf-8"))
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "expected_sha256": opening,
+                "operations": [{"action": "set_default", "name": "main"}],
+            }), encoding="utf-8")
+            config.write_text(config.read_text(encoding="utf-8") + "# concurrent\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(cage_config.ConfigError, "changed since"):
+                cage_config.command_ui_commit(SimpleNamespace(
+                    config=config, request=request, repo=str(root)
+                ))
+
+            self.assertFalse((root / "backups").exists())
+
+    def test_ui_commit_preserves_mode_and_writes_private_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            config.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            config.chmod(0o640)
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "expected_sha256": cage_config.sha256_text(config.read_text(encoding="utf-8")),
+                "operations": [{
+                    "action": "upsert", "collection": "presets", "name": "main",
+                    "value": {"tool": "codex", "net": "gate"},
+                }],
+            }), encoding="utf-8")
+
+            with patch("sys.stdout", new=io.StringIO()):
+                cage_config.command_ui_commit(SimpleNamespace(
+                    config=config, request=request, repo=str(root)
+                ))
+
+            self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+            backups = list((root / "backups").glob("config-*.toml"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+            self.assertEqual(cage_config.tomllib.loads(config.read_text())["presets"]["main"]["net"], "gate")
+
+    def test_hidden_project_preset_name_is_stable_and_path_specific(self):
+        first = cage_config.hidden_project_preset_name("/tmp/example")
+        self.assertEqual(first, cage_config.hidden_project_preset_name("/tmp/example"))
+        self.assertNotEqual(first, cage_config.hidden_project_preset_name("/other/example"))
+        self.assertTrue(first.startswith("__cage_project_example_"))
+
+    def test_remember_project_does_not_overwrite_hidden_name_collision(self):
+        data = self.base_config()
+        path = "/tmp/collision-project"
+        reserved = cage_config.hidden_project_preset_name(path)
+        data["presets"][reserved] = {"tool": "claude"}
+
+        updated = cage_config.apply_ui_operations(data, [{
+            "action": "remember_project", "path": path,
+            "value": {"tool": "codex", "auth": "codex-oauth"},
+        }])
+
+        mapped = updated["projects"][str(Path(path).resolve())]
+        self.assertEqual(updated["presets"][reserved], {"tool": "claude"})
+        self.assertEqual(mapped, reserved + "_2")
+
+    def test_ui_commit_preserves_config_symlink_and_target_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "real-config.toml"
+            config = root / "config.toml"
+            target.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            target.chmod(0o640)
+            config.symlink_to(target)
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "expected_sha256": cage_config.sha256_text(target.read_text()),
+                "operations": [{
+                    "action": "upsert", "collection": "presets", "name": "main",
+                    "value": {"tool": "codex", "yolo": True},
+                }],
+            }), encoding="utf-8")
+
+            with patch("sys.stdout", new=io.StringIO()):
+                cage_config.command_ui_commit(SimpleNamespace(
+                    config=config, request=request, repo=str(root)
+                ))
+
+            self.assertTrue(config.is_symlink())
+            self.assertEqual(config.resolve(), target.resolve())
+            self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+            self.assertTrue(cage_config.tomllib.loads(target.read_text())["presets"]["main"]["yolo"])
+
+    def test_ui_request_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "request-target.json"
+            request = root / "request.json"
+            target.write_text("{}", encoding="utf-8")
+            request.symlink_to(target)
+
+            with self.assertRaisesRegex(cage_config.ConfigError, "regular file"):
+                cage_config.load_ui_request(request)
+
+    def test_ui_backups_are_pruned_to_ten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            request = root / "request.json"
+            config.write_text(
+                'version = 1\ndefault_preset = "main"\n\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            for index in range(12):
+                request.write_text(json.dumps({
+                    "expected_sha256": cage_config.sha256_text(config.read_text()),
+                    "operations": [{
+                        "action": "upsert", "collection": "presets", "name": "main",
+                        "value": {"tool": "codex", "net": "gate" if index % 2 else "off"},
+                    }],
+                }), encoding="utf-8")
+                with patch("sys.stdout", new=io.StringIO()):
+                    cage_config.command_ui_commit(SimpleNamespace(
+                        config=config, request=request, repo=str(root)
+                    ))
+
+            self.assertEqual(len(list((root / "backups").glob("config-*.toml"))), 10)
+
 
 if __name__ == "__main__":
     unittest.main()

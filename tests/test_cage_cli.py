@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,11 +38,24 @@ class CageCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing mode after --net", result.stderr)
 
-    def test_no_arguments_is_usage_error(self):
-        result = self.run_cage()
+    def test_no_arguments_requests_tui_and_requires_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "cage"
+            config_dir.mkdir()
+            (config_dir / "config.toml").write_text(
+                'version = 1\ndefault_preset = "main"\n[presets.main]\ntool = "codex"\n',
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = tmp
+            result = subprocess.run(
+                [str(CAGE)], cwd=ROOT, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Usage: cage", result.stdout)
+        self.assertIn("interactive mode requires a TTY", result.stderr)
+        self.assertNotIn("Usage: cage", result.stdout)
 
 
 if __name__ == "__main__":
