@@ -8,6 +8,29 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.24.1 — 2026-07-23
+
+### Corrected terminal configuration controls
+
+No configuration migration is required. Text fields now preload their current
+value, support cursor editing, clear when their contents are erased, and cancel
+immediately on Escape. `-` remains accepted as a clear shortcut. Confirmation
+input is displayed separately from scrollable risk details, and checkbox/menu
+focus no longer jumps to the first row after an edit.
+
+The customization persistence choices are unchanged, but their presentation is
+explicit: remember-this-project is initially highlighted, launch-once does not
+write TOML, and a named save does not alter the project mapping. All saves still
+require an explicit selection and confirmation. Existing named configurations
+cannot be overwritten silently.
+
+Saved preset `yolo` behavior and CLI precedence are unchanged. Remembering a
+configuration with yolo enabled stores `yolo = true` in the internal exact-
+project preset; `--no-yolo` still disables it for one invocation.
+
+Rollback: install `0.24.0`. The canonical TOML is unchanged and remains
+compatible, but the original TUI input and navigation defects return.
+
 ## 0.24.0 — 2026-07-22
 
 ### Interactive configuration launcher

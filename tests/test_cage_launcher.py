@@ -38,6 +38,72 @@ exit 0
 
 
 class CageLauncherTests(unittest.TestCase):
+    def run_yolo_launch(self, tool: str, no_yolo: bool = False):
+        temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        self.addCleanup(temporary.cleanup)
+        tmp_path = Path(temporary.name)
+        xdg = tmp_path / "xdg"
+        home = tmp_path / "home"
+        bin_dir = tmp_path / "bin"
+        cage_dir = xdg / "cage"
+        repo = tmp_path / "repo"
+        bin_dir.mkdir(parents=True)
+        cage_dir.mkdir(parents=True)
+        home.mkdir(parents=True)
+        repo.mkdir()
+        write_fake_docker(bin_dir / "docker")
+        (cage_dir / "config.toml").write_text(
+            "\n".join([
+                "version = 1",
+                'default_preset = "main"',
+                "[presets.main]",
+                f'tool = "{tool}"',
+                'net = "open"',
+                "yolo = true",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["XDG_CONFIG_HOME"] = str(xdg)
+        env["HOME"] = str(home)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        arguments = [str(CAGE)]
+        if no_yolo:
+            arguments.append("--no-yolo")
+        arguments.append(str(repo))
+        return subprocess.run(
+            arguments,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def test_saved_yolo_reaches_both_tools(self):
+        for tool, expected in (
+            ("codex", "<--yolo>"),
+            ("claude", "<--dangerously-skip-permissions>"),
+        ):
+            with self.subTest(tool=tool):
+                result = self.run_yolo_launch(tool)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(expected, result.stdout)
+
+    def test_no_yolo_overrides_saved_true_for_both_tools(self):
+        for tool, forbidden in (
+            ("codex", "<--yolo>"),
+            ("claude", "<--dangerously-skip-permissions>"),
+        ):
+            with self.subTest(tool=tool):
+                result = self.run_yolo_launch(tool, no_yolo=True)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(forbidden, result.stdout)
+
     def test_launch_requires_central_config(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             tmp_path = Path(tmp)

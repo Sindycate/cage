@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 from typing import Any
 
 
@@ -276,84 +277,270 @@ class Controller:
 
 class CursesView:
     def __init__(self, screen, controller: Controller):
+        import curses
         self.screen = screen
         self.controller = controller
         self.message = ""
+        try:
+            curses.set_escdelay(25)
+        except (AttributeError, curses.error):
+            pass
         self.screen.keypad(True)
+
+    @staticmethod
+    def _wrapped(lines: list[str], width: int) -> list[str]:
+        wrapped: list[str] = []
+        width = max(1, width)
+        for line in lines:
+            logical_lines = str(line).splitlines() or [""]
+            for logical in logical_lines:
+                wrapped.extend(textwrap.wrap(
+                    logical,
+                    width=width,
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                ) or [""])
+        return wrapped
+
+    @staticmethod
+    def _initial_index(options: list[tuple[str, str]], initial_key: str | None) -> int:
+        if initial_key:
+            for index, (key, _) in enumerate(options):
+                if key == initial_key:
+                    return index
+        return 0
 
     def _draw(self, title: str, lines: list[str], footer: str = "") -> None:
         import curses
         self.screen.erase()
         height, width = self.screen.getmaxyx()
+        if height < 3 or width < 4:
+            self.screen.refresh()
+            return
         self.screen.addnstr(0, 0, f" Cage — {title} ", max(1, width - 1), curses.A_REVERSE)
-        for row, line in enumerate(lines[: max(0, height - 3)], start=1):
+        for row, line in enumerate(lines[: max(0, height - 2)], start=1):
             self.screen.addnstr(row, 1, line, max(1, width - 2))
         status = self.message or footer
         if status:
             self.screen.addnstr(height - 1, 0, status, max(1, width - 1), curses.A_REVERSE)
         self.screen.refresh()
 
-    def menu(self, title: str, options: list[tuple[str, str]], details: list[str] | None = None) -> str:
+    def menu(
+        self,
+        title: str,
+        options: list[tuple[str, str]],
+        details: list[str] | None = None,
+        initial_key: str | None = None,
+        space_select: bool = False,
+        footer: str = "",
+    ) -> str:
         import curses
         if not options:
             self.message = f"No entries are available for {title}."
             return ""
-        index = 0
+        index = self._initial_index(options, initial_key)
+        scroll = 0
         while True:
-            lines = list(details or [])
-            if lines:
-                lines.append("")
-            start = len(lines)
-            lines.extend(f"  {label}" for _, label in options)
-            self._draw(title, lines, "↑/↓ move • Enter select • q back")
-            for offset in range(len(options)):
-                attr = curses.A_REVERSE if offset == index else curses.A_NORMAL
-                row = start + offset + 1
-                if row < self.screen.getmaxyx()[0] - 1:
-                    self.screen.addnstr(row, 1, f"  {options[offset][1]}", self.screen.getmaxyx()[1] - 2, attr)
+            height, width = self.screen.getmaxyx()
+            if height < 5 or width < 20:
+                self._draw(title, ["Terminal too small; resize to continue."], "Esc/q back")
+                key = self.screen.getch()
+                if key in (27, ord("q")):
+                    return ""
+                continue
+            available = max(1, height - 2)
+            detail_lines = self._wrapped(list(details or []), max(1, width - 2))
+            if detail_lines:
+                detail_lines.append("")
+            option_start = len(detail_lines)
+            lines = detail_lines + [f"  {label}" for _, label in options]
+            selected_line = option_start + index
+            if selected_line < scroll:
+                scroll = selected_line
+            elif selected_line >= scroll + available:
+                scroll = selected_line - available + 1
+            scroll = max(0, min(scroll, max(0, len(lines) - available)))
+            visible = lines[scroll:scroll + available]
+            controls = footer or (
+                "↑/↓ move • Space/Enter toggle • Esc/q back"
+                if space_select else
+                "↑/↓ move • Enter select • Esc/q back"
+            )
+            if len(lines) > available:
+                controls += f" • rows {scroll + 1}-{min(len(lines), scroll + available)}/{len(lines)}"
+            self._draw(title, visible, controls)
+            option_row = selected_line - scroll + 1
+            if 1 <= option_row < max(1, height - 1):
+                self.screen.addnstr(
+                    option_row,
+                    1,
+                    f"  {options[index][1]}",
+                    max(1, width - 2),
+                    curses.A_REVERSE,
+                )
+                self.screen.refresh()
             key = self.screen.getch()
             self.message = ""
             if key in (curses.KEY_UP, ord("k")):
                 index = (index - 1) % len(options)
             elif key in (curses.KEY_DOWN, ord("j")):
                 index = (index + 1) % len(options)
+            elif key == curses.KEY_PPAGE:
+                index = max(0, index - max(1, available - 1))
+            elif key == curses.KEY_NPAGE:
+                index = min(len(options) - 1, index + max(1, available - 1))
+            elif key == curses.KEY_HOME:
+                index = 0
+            elif key == curses.KEY_END:
+                index = len(options) - 1
             elif key in (10, 13, curses.KEY_ENTER):
+                return options[index][0]
+            elif space_select and key == ord(" "):
                 return options[index][0]
             elif key in (27, ord("q")):
                 return ""
 
-    def prompt(self, title: str, label: str, default: str = "") -> str | None:
+    def _line_input(
+        self,
+        title: str,
+        label: str,
+        initial: str = "",
+        details: list[str] | None = None,
+        footer: str = "Enter saves • Esc cancels • erase all text to clear",
+    ) -> str | None:
         import curses
-        self._draw(title, [label, "", f"Current: {default}"], "Enter saves • Esc cancels")
-        height, width = self.screen.getmaxyx()
-        curses.echo()
-        curses.curs_set(1)
+        characters = list(initial)
+        cursor = len(characters)
+        horizontal = 0
+        detail_scroll = 0
         try:
-            self.screen.move(min(4, height - 2), 1)
-            self.screen.clrtoeol()
-            raw = self.screen.getstr(min(4, height - 2), 1, max(1, width - 2))
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            while True:
+                height, width = self.screen.getmaxyx()
+                if height < 5 or width < 20:
+                    self._draw(title, ["Terminal too small; resize to continue."], "Esc cancels")
+                    key = self.screen.get_wch()
+                    if key == "\x1b":
+                        return None
+                    continue
+                input_row = max(1, height - 2)
+                detail_capacity = max(0, input_row - 1)
+                detail_lines = self._wrapped(list(details or []) + [label], max(1, width - 2))
+                detail_scroll = max(
+                    0,
+                    min(detail_scroll, max(0, len(detail_lines) - detail_capacity)),
+                )
+                self._draw(
+                    title,
+                    detail_lines[detail_scroll:detail_scroll + detail_capacity],
+                    footer,
+                )
+
+                prefix = "> "
+                input_width = max(1, width - len(prefix) - 2)
+                if cursor < horizontal:
+                    horizontal = cursor
+                elif cursor > horizontal + input_width:
+                    horizontal = cursor - input_width
+                horizontal = max(0, min(horizontal, max(0, len(characters) - input_width)))
+                visible = "".join(characters[horizontal:horizontal + input_width])
+                if height >= 3 and width >= 4:
+                    self.screen.move(input_row, 1)
+                    self.screen.clrtoeol()
+                    self.screen.addnstr(
+                        input_row,
+                        1,
+                        prefix + visible,
+                        max(1, width - 2),
+                        curses.A_UNDERLINE,
+                    )
+                    self.screen.move(input_row, min(width - 2, len(prefix) + 1 + cursor - horizontal))
+                    self.screen.refresh()
+
+                key = self.screen.get_wch()
+                if key in ("\n", "\r") or key == curses.KEY_ENTER:
+                    return "".join(characters).strip()
+                if key == "\x1b":
+                    return None
+                if key in (curses.KEY_LEFT,):
+                    cursor = max(0, cursor - 1)
+                elif key in (curses.KEY_RIGHT,):
+                    cursor = min(len(characters), cursor + 1)
+                elif key in (curses.KEY_HOME, "\x01"):
+                    cursor = 0
+                elif key in (curses.KEY_END, "\x05"):
+                    cursor = len(characters)
+                elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+                    if cursor:
+                        del characters[cursor - 1]
+                        cursor -= 1
+                elif key == curses.KEY_DC:
+                    if cursor < len(characters):
+                        del characters[cursor]
+                elif key == "\x15":
+                    characters.clear()
+                    cursor = 0
+                    horizontal = 0
+                elif key == curses.KEY_UP:
+                    detail_scroll = max(0, detail_scroll - 1)
+                elif key == curses.KEY_DOWN:
+                    detail_scroll = min(max(0, len(detail_lines) - detail_capacity), detail_scroll + 1)
+                elif key == curses.KEY_PPAGE:
+                    detail_scroll = max(0, detail_scroll - max(1, detail_capacity))
+                elif key == curses.KEY_NPAGE:
+                    detail_scroll = min(
+                        max(0, len(detail_lines) - detail_capacity),
+                        detail_scroll + max(1, detail_capacity),
+                    )
+                elif key == curses.KEY_RESIZE:
+                    continue
+                elif isinstance(key, str) and key.isprintable():
+                    characters.insert(cursor, key)
+                    cursor += 1
         except (KeyboardInterrupt, curses.error):
             return None
         finally:
-            curses.noecho()
-            curses.curs_set(0)
-        entered = raw.decode("utf-8").strip()
-        return entered if entered else default
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
+    def prompt(self, title: str, label: str, default: str = "") -> str | None:
+        return self._line_input(title, label, default)
 
     def confirm(self, title: str, lines: list[str], phrase: str = "yes") -> bool:
-        answer = self.prompt(title, "Type 'yes' to continue:", "\n".join(lines))
-        return answer == phrase
+        answer = self._line_input(
+            title,
+            f"Type '{phrase}' and press Enter to continue:",
+            "",
+            details=lines,
+            footer="↑/↓ review • Enter submits • Esc cancels",
+        )
+        return answer is not None and answer.casefold() == phrase.casefold()
 
     def choose_names(self, title: str, names: list[str], selected: list[str]) -> list[str] | None:
         chosen = set(selected)
         options = [(name, ("[x] " if name in chosen else "[ ] ") + name) for name in names]
         options.append(("__done", "Done"))
+        cursor = next((name for name in names if name in chosen), names[0] if names else "__done")
         while True:
-            choice = self.menu(title, options)
+            choice = self.menu(
+                title,
+                options,
+                initial_key=cursor,
+                space_select=True,
+                footer="↑/↓ move • Space/Enter toggle • choose Done to accept • Esc/q back",
+            )
             if not choice:
                 return None
             if choice == "__done":
                 return [name for name in names if name in chosen]
+            cursor = choice
             chosen.symmetric_difference_update({choice})
             options = [(name, ("[x] " if name in chosen else "[ ] ") + name) for name in names]
             options.append(("__done", "Done"))
@@ -363,7 +550,11 @@ class CursesView:
         if allow_none:
             options.append(("__none", "none" + (" (current)" if not current else "")))
         options.extend((value, value + (" (current)" if value == current else "")) for value in values)
-        choice = self.menu(title, options)
+        choice = self.menu(
+            title,
+            options,
+            initial_key=current if current in values else "__none" if allow_none else None,
+        )
         if not choice:
             return None
         return "" if choice == "__none" else choice
@@ -373,7 +564,19 @@ class CursesView:
         value["tool"] = self.controller.tool_override or value.get("tool", "codex")
         if value["tool"] == "claude":
             value.pop("skill_packs", None)
+        cursor = "tool"
         while True:
+            yolo_value = "on" if value.get("yolo") is True else "off"
+            if self.controller.yolo_override:
+                yolo_value = f"{self.controller.yolo_override} (command override)"
+            net_value = str(value.get("net", "default"))
+            if self.controller.net_override:
+                net_value = f"{self.controller.net_override} (command override)"
+            sync_value = (
+                "default" if "session_sync" not in value
+                else "on" if value.get("session_sync") is True
+                else "off"
+            )
             rows = [
                 ("tool", f"Tool: {value.get('tool', 'codex')}"),
                 ("auth", f"Auth: {value.get('auth', 'none')}"),
@@ -382,15 +585,16 @@ class CursesView:
                 ("skills", f"Skill packs: {', '.join(value.get('skill_packs', [])) or 'none'}"),
                 ("commands", f"Host commands: {', '.join(value.get('host_commands', [])) or 'none'}"),
                 ("env", f"Extra environment names: {', '.join(value.get('env', [])) or 'none'}"),
-                ("net", f"Network: {value.get('net', 'default')}"),
-                ("yolo", f"Yolo: {'on' if value.get('yolo') else 'off'}"),
-                ("sync", f"Claude history sync: {value.get('session_sync', 'default')}"),
+                ("net", f"Network: {net_value}"),
+                ("yolo", f"Yolo: {yolo_value}"),
+                ("sync", f"Claude history sync: {sync_value}"),
                 ("mounts", f"Extra mounts: {len(value.get('extra_mounts', []))}"),
                 ("done", "Done"),
             ]
-            choice = self.menu("Customize launch", rows)
+            choice = self.menu("Customize launch", rows, initial_key=cursor)
             if not choice:
                 return None
+            cursor = choice
             if choice == "done":
                 try:
                     self.controller.preview([{"action": "upsert", "collection": "presets", "name": "__cage_preview", "value": value}])
@@ -430,15 +634,28 @@ class CursesView:
                     else:
                         value.pop(key, None)
             elif choice == "net":
+                if self.controller.net_override:
+                    self.message = f"Network is fixed to {self.controller.net_override} by the command."
+                    continue
                 selected = self.select_value("Network", ["gate", "open", "off"], str(value.get("net", "")))
                 if selected is not None:
                     if selected: value["net"] = selected
                     else: value.pop("net", None)
-            elif choice in ("yolo", "sync"):
-                key = "yolo" if choice == "yolo" else "session_sync"
-                value[key] = not bool(value.get(key, False))
+            elif choice == "yolo":
+                if self.controller.yolo_override:
+                    self.message = f"Yolo is fixed to {self.controller.yolo_override} by the command."
+                    continue
+                selected = self.select_value("Yolo", ["on", "off"], yolo_value, False)
+                if selected:
+                    value["yolo"] = selected == "on"
+            elif choice == "sync":
+                selected = self.select_value("Claude history sync", ["default", "on", "off"], sync_value, False)
+                if selected == "default":
+                    value.pop("session_sync", None)
+                elif selected:
+                    value["session_sync"] = selected == "on"
             elif choice == "mounts":
-                raw = self.prompt("Extra mounts", "Comma-separated paths. Prefix a read-write path with rw=", ", ".join(
+                raw = self.prompt("Extra mounts", "Comma-separated paths; prefix read-write paths with rw=. Erase all text to clear.", ", ".join(
                     ("rw=" + str(item.get("path"))) if isinstance(item, dict) and item.get("mode") == "rw" else str(item.get("path")) if isinstance(item, dict) else str(item)
                     for item in value.get("extra_mounts", [])
                 ))
@@ -451,18 +668,31 @@ class CursesView:
                     if mounts: value["extra_mounts"] = mounts
                     else: value.pop("extra_mounts", None)
             elif choice == "env":
-                raw = self.prompt("Extra environment", "Comma-separated environment variable names", ", ".join(value.get("env", [])))
+                raw = self.prompt(
+                    "Extra environment",
+                    "Comma-separated environment variable names. Erase all text to clear.",
+                    ", ".join(value.get("env", [])),
+                )
                 if raw is not None:
-                    names = [part.strip() for part in raw.split(",") if part.strip()]
+                    names = [] if raw == "-" else [part.strip() for part in raw.split(",") if part.strip()]
                     if names: value["env"] = names
                     else: value.pop("env", None)
 
-    def risk_review(self, preset: dict[str, Any]) -> bool:
+    def risk_review(
+        self,
+        preset: dict[str, Any],
+        action: str = "",
+        force_confirmation: bool = False,
+        notices: list[str] | None = None,
+    ) -> bool:
         risks = self.controller.risks(preset)
         warnings = self.controller.preflight(preset)
-        if not risks and not warnings:
+        if not risks and not warnings and not force_confirmation and not notices:
             return True
-        lines = ["Risk review"] + [f"• {item}" for item in risks]
+        lines = [f"Action: {action}"] if action else []
+        lines += list(notices or [])
+        if risks:
+            lines += ["", "Risk review"] + [f"• {item}" for item in risks]
         if warnings:
             lines += ["", "Preflight warnings"] + [f"• {item}" for item in warnings]
         return self.confirm("Review before launch/save", lines)
@@ -470,6 +700,7 @@ class CursesView:
     def edit_mcp_server(self, current: dict[str, Any]) -> dict[str, Any] | None:
         value = copy.deepcopy(current)
         value.setdefault("type", "stdio")
+        cursor = "name"
         while True:
             server_type = value.get("type", "stdio")
             fields = [
@@ -493,9 +724,10 @@ class CursesView:
                 ("env", f"Forwarded env names: {', '.join(value.get('env', [])) or 'none'}"),
                 ("done", "Done"),
             ])
-            choice = self.menu("MCP server", fields)
+            choice = self.menu("MCP server", fields, initial_key=cursor)
             if not choice:
                 return None
+            cursor = choice
             if choice == "done":
                 return value
             if choice == "type":
@@ -518,17 +750,25 @@ class CursesView:
                         value.pop("auth", None)
                 continue
             if choice in ("oauth_scopes", "env"):
-                raw = self.prompt(choice.replace("_", " ").title(), "Comma-separated values; '-' clears", ", ".join(value.get(choice, [])))
+                raw = self.prompt(
+                    choice.replace("_", " ").title(),
+                    "Comma-separated values. Erase all text or enter '-' to clear.",
+                    ", ".join(value.get(choice, [])),
+                )
                 if raw is not None:
                     items = [] if raw == "-" else [part.strip() for part in raw.split(",") if part.strip()]
                     if items: value[choice] = items
                     else: value.pop(choice, None)
                 continue
             if choice == "headers":
-                raw = self.prompt("HTTP headers", "JSON object using ${ENV_VAR} for secrets; '-' clears", json.dumps(value.get("headers", {})))
+                raw = self.prompt(
+                    "HTTP headers",
+                    "JSON object using ${ENV_VAR} for secrets. Erase all text or enter '-' to clear.",
+                    json.dumps(value.get("headers", {})),
+                )
                 if raw is None:
                     continue
-                if raw == "-":
+                if raw in ("", "-"):
                     value.pop("headers", None)
                 else:
                     try:
@@ -539,27 +779,37 @@ class CursesView:
                     except (json.JSONDecodeError, ValueError):
                         self.message = "Headers must be a JSON object."
                 continue
-            raw = self.prompt(choice.replace("_", " ").title(), "Enter a value; '-' clears", str(value.get(choice, "")))
+            raw = self.prompt(
+                choice.replace("_", " ").title(),
+                "Enter a value. Erase all text or enter '-' to clear.",
+                str(value.get(choice, "")),
+            )
             if raw is not None:
-                if raw == "-": value.pop(choice, None)
+                if raw in ("", "-"): value.pop(choice, None)
                 else: value[choice] = raw
 
     def edit_mcp_pack(self, current: dict[str, Any]) -> dict[str, Any] | None:
         value = copy.deepcopy(current)
         servers = [server for server in value.get("servers", []) if isinstance(server, dict)]
+        cursor = "env"
         while True:
             options = [("env", f"Environment names: {', '.join(value.get('env', [])) or 'none'}")]
             options.extend((f"server:{index}", f"Server: {server.get('name', 'unnamed')} ({server.get('type', 'stdio')})") for index, server in enumerate(servers))
             options.extend([("new", "＋ Add server"), ("done", "Done")])
-            choice = self.menu("Edit MCP pack", options)
+            choice = self.menu("Edit MCP pack", options, initial_key=cursor)
             if not choice:
                 return None
+            cursor = choice
             if choice == "done":
                 if servers: value["servers"] = servers
                 else: value.pop("servers", None)
                 return value
             if choice == "env":
-                raw = self.prompt("MCP pack environment", "Comma-separated variable names; '-' clears", ", ".join(value.get("env", [])))
+                raw = self.prompt(
+                    "MCP pack environment",
+                    "Comma-separated variable names. Erase all text or enter '-' to clear.",
+                    ", ".join(value.get("env", [])),
+                )
                 if raw is not None:
                     names = [] if raw == "-" else [part.strip() for part in raw.split(",") if part.strip()]
                     if names: value["env"] = names
@@ -569,6 +819,7 @@ class CursesView:
                 edited = self.edit_mcp_server({"type": "stdio"})
                 if edited is not None:
                     servers.append(edited)
+                    cursor = f"server:{len(servers) - 1}"
                 continue
             index = int(choice.split(":", 1)[1])
             action = self.menu(str(servers[index].get("name", "unnamed")), [("edit", "Edit"), ("delete", "Delete")])
@@ -578,30 +829,68 @@ class CursesView:
                     servers[index] = edited
             elif action == "delete" and self.confirm("Delete MCP server", [str(servers[index].get("name", "unnamed"))]):
                 del servers[index]
+                if servers:
+                    cursor = f"server:{min(index, len(servers) - 1)}"
+                else:
+                    cursor = "new"
+
+    @staticmethod
+    def _preset_summary(preset: dict[str, Any]) -> list[str]:
+        sync = (
+            "default" if "session_sync" not in preset
+            else "on" if preset.get("session_sync") is True
+            else "off"
+        )
+        return [
+            f"Tool: {preset.get('tool', 'codex')}  Network: {preset.get('net', 'default')}",
+            f"Yolo: {'on' if preset.get('yolo') is True else 'off'}  Claude history sync: {sync}",
+            f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
+            f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
+        ]
 
     def launch_actions(self, preset: dict[str, Any]) -> bool:
         choice = self.menu("Use configuration", [
-            ("once", "Launch once (do not save)"),
-            ("remember", "Remember for this project"),
-            ("save", "Save as reusable configuration"),
-        ])
+            ("once", "Launch once — discard these customizations after exit"),
+            ("remember", "Remember for this exact project — save and launch"),
+            ("save", "Save named reusable configuration — project mapping unchanged"),
+        ], details=self._preset_summary(preset), initial_key="remember")
         if not choice:
             return False
-        if not self.risk_review(preset):
-            self.message = "Risk review was not confirmed."
-            return False
+        name = ""
+        notices: list[str] = []
+        operation: list[dict[str, Any]]
+        if choice == "once":
+            action = "Launch once. These customizations will not be saved."
+            operation = [{"action": "upsert", "collection": "presets", "name": "__cage_preview", "value": preset}]
+        elif choice == "remember":
+            action = f"Save this configuration for the exact project {self.controller.repo} and launch it."
+            operation = [{"action": "remember_project", "path": str(self.controller.repo), "value": preset}]
+        else:
+            name = self.prompt("Save configuration", "Reusable configuration name:")
+            if not name:
+                return False
+            action = f"Save reusable configuration {name!r} and launch it. The project mapping will not change."
+            if name in self.controller.data.get("presets", {}):
+                notices.append(f"Existing reusable configuration {name!r} will be overwritten.")
+            operation = [{"action": "upsert", "collection": "presets", "name": name, "value": preset}]
         try:
+            self.controller.preview(operation)
+            if not self.risk_review(
+                preset,
+                action=action,
+                force_confirmation=True,
+                notices=notices,
+            ):
+                self.message = "Review was not confirmed."
+                return False
             if choice == "once":
                 self.controller.write_result({"action": "launch_once", "preset": preset})
             elif choice == "remember":
-                self.controller.commit([{"action": "remember_project", "path": str(self.controller.repo), "value": preset}])
+                self.controller.commit(operation)
                 name, _ = self.controller.effective_preset()
                 self.controller.write_result({"action": "preset", "preset_name": name})
             else:
-                name = self.prompt("Save configuration", "Reusable configuration name:")
-                if not name:
-                    return False
-                self.controller.commit([{"action": "upsert", "collection": "presets", "name": name, "value": preset}])
+                self.controller.commit(operation)
                 self.controller.write_result({"action": "preset", "preset_name": name})
             return True
         except UiError as exc:
@@ -611,12 +900,14 @@ class CursesView:
     def edit_generic(self, collection: str, current: dict[str, Any]) -> dict[str, Any] | None:
         value = dict(current)
         specs = FIELD_SPECS[collection]
+        cursor = specs[0][0] if specs else "done"
         while True:
             options = [(key, f"{label}: {value.get(key, 'unset')}") for key, label, _ in specs]
             options.append(("done", "Done"))
-            choice = self.menu(f"Edit {COLLECTION_LABELS[collection]}", options)
+            choice = self.menu(f"Edit {COLLECTION_LABELS[collection]}", options, initial_key=cursor)
             if not choice:
                 return None
+            cursor = choice
             if choice == "done":
                 return value
             key, label, kind = next(spec for spec in specs if spec[0] == choice)
@@ -634,7 +925,7 @@ class CursesView:
             raw = self.prompt(label, label, default)
             if raw is None:
                 continue
-            if raw == "-":
+            if raw in ("", "-"):
                 value.pop(key, None)
             elif kind == "list":
                 value[key] = [part.strip() for part in raw.split(",") if part.strip()]
@@ -642,16 +933,22 @@ class CursesView:
                 value[key] = raw
 
     def manage_collection(self, collection: str) -> None:
+        cursor: str | None = None
         while True:
             table = self.controller.data.get(collection, {})
             names = sorted(name for name in table if not (collection == "presets" and name.startswith("__cage_project_")))
             options = [(name, name) for name in names] + [("__new", "＋ Create new")]
-            choice = self.menu(COLLECTION_LABELS[collection], options)
+            choice = self.menu(COLLECTION_LABELS[collection], options, initial_key=cursor)
             if not choice:
                 return
+            cursor = choice
             existing = choice != "__new"
             name = choice if existing else self.prompt("Create", "Name:")
             if not name:
+                continue
+            if not existing and name in table:
+                self.message = f"{collection}.{name} already exists; select it to edit."
+                cursor = name
                 continue
             action = "edit"
             if existing:
@@ -663,12 +960,14 @@ class CursesView:
                     new_name = self.prompt("Rename", "New name:", name)
                     if new_name and new_name != name:
                         self.controller.commit([{"action": "rename", "collection": collection, "name": name, "new_name": new_name}])
+                        cursor = new_name
                 elif action == "delete":
                     refs = self.controller.snapshot.get("dependencies", {}).get(collection, {}).get(name, [])
                     if refs:
                         self.message = "Referenced by: " + ", ".join(refs)
                     elif self.confirm("Delete", [f"Delete {collection}.{name}?"]):
                         self.controller.commit([{"action": "delete", "collection": collection, "name": name}])
+                        cursor = None
                 else:
                     current = table.get(name, {}) if existing else {}
                     if collection == "presets":
@@ -688,6 +987,7 @@ class CursesView:
                 self.message = str(exc)
 
     def manage(self) -> None:
+        cursor: str | None = None
         while True:
             options = [(name, label) for name, label in COLLECTION_LABELS.items()]
             options += [
@@ -695,9 +995,10 @@ class CursesView:
                 ("project", "Project mappings"),
                 ("oauth", "Codex MCP OAuth login/logout"),
             ]
-            choice = self.menu("Manage configuration", options)
+            choice = self.menu("Manage configuration", options, initial_key=cursor)
             if not choice:
                 return
+            cursor = choice
             if choice in COLLECTION_LABELS:
                 self.manage_collection(choice)
             elif choice == "defaults":
@@ -727,7 +1028,12 @@ class CursesView:
             elif choice == "project":
                 projects = self.controller.data.get("projects", {})
                 details = [f"{path} → {preset}" for path, preset in sorted(projects.items())] or ["No project mappings."]
-                action = self.menu("Project mappings", [("set", "Set mapping"), ("remove", "Remove mapping")], details)
+                action = self.menu(
+                    "Project mappings",
+                    [("set", "Set mapping"), ("remove", "Remove mapping")],
+                    details,
+                    initial_key="set",
+                )
                 try:
                     if action == "set":
                         path = self.prompt("Project mapping", "Absolute project path:", str(self.controller.repo))
@@ -768,6 +1074,7 @@ class CursesView:
                 self.message = "OAuth action completed." if status == 0 else "OAuth action failed; see terminal output."
 
     def run(self) -> int:
+        cursor: str | None = None
         while True:
             effective = self.controller.snapshot.get("effective", {})
             if "error" in effective:
@@ -787,10 +1094,13 @@ class CursesView:
                 details = [
                     f"Project: {self.controller.repo}",
                     f"Tool: {effective.get('tool')}  Auth: {effective.get('auth') or 'default'}",
-                    f"Identity: {effective.get('identity') or 'none'}  Network: {shown_net}",
+                    f"Identity: {effective.get('identity') or 'none'}  Network: {shown_net}"
+                    + (" (command override)" if self.controller.net_override else ""),
                     f"MCP: {', '.join(effective.get('mcp_packs', [])) or 'none'}",
                     f"Skills: {', '.join(effective.get('skill_packs', [])) or 'none'}",
-                    f"History sync: {'on' if effective.get('session_sync') else 'off'}  Yolo: {'on' if shown_yolo else 'off'}",
+                    f"History sync: {'on' if effective.get('session_sync') else 'off'}  "
+                    f"Yolo: {'on' if shown_yolo else 'off'}"
+                    + (" (command override)" if self.controller.yolo_override else ""),
                 ]
                 if self.controller.tool_override and effective.get("tool") != self.controller.tool_override:
                     details.append(
@@ -802,9 +1112,10 @@ class CursesView:
             ):
                 options.append(("launch", "Launch with this configuration"))
             options += [("custom", "Customize launch"), ("manage", "Manage saved configuration"), ("quit", "Quit without launching")]
-            choice = self.menu("Launch", options, details)
+            choice = self.menu("Launch", options, details, initial_key=cursor)
             if choice in ("", "quit"):
                 return 1
+            cursor = choice
             if choice == "manage":
                 self.manage()
             elif choice == "custom":
@@ -814,7 +1125,7 @@ class CursesView:
                     return 0
             else:
                 name, preset = self.controller.effective_preset()
-                if self.risk_review(preset):
+                if self.risk_review(preset, action=f"Launch saved configuration {name!r}."):
                     self.controller.write_result({"action": "preset", "preset_name": name})
                     return 0
 

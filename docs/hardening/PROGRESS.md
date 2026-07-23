@@ -3,6 +3,31 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-23 — v0.24.1 TUI correctness and navigation correction
+
+Corrected the published v0.24.0 terminal UI without changing the central TOML
+schema, private launch decision, Docker orchestration, or runtime-state
+boundaries. Text input is now a visible prefilled editor with immediate Escape
+cancellation and unambiguous clearing; typed confirmations use a dedicated
+field below scrollable review details; menus keep their selected row visible;
+and checkbox/editor focus remains stable.
+
+Persistence choices now describe their exact effects and initially highlight
+the explicit remember-this-project action. Named overwrites require review,
+inherited Claude history sync can be restored, and command-line network/yolo
+overrides are displayed as fixed overrides. Regression coverage exercises the
+input/navigation primitives, launch-once non-mutation, exact-project yolo
+persistence, both tools' yolo arguments, explicit `--no-yolo`, cancellation,
+and existing byte-for-byte Codex/Claude state preservation.
+
+The v0.24.0 release workflow completed successfully with Python 3.11/3.12,
+macOS Bash 3.2 installer, real-Docker state, reproducible package,
+multi-architecture image, provenance, and public-installer verification. Local
+v0.24.1 evidence before publication: the complete suite passes on Python 3.11
+and 3.12 (`166 passed, 6 skipped`), all six opt-in real-Docker smoke tests pass,
+and shell/Python syntax plus diff checks pass. Release evidence will be recorded
+in the release handoff.
+
 ## 2026-07-22 — v0.24.0 transactional curses configuration launcher
 
 Implemented a standard-library curses control plane over the existing central
@@ -23,7 +48,7 @@ Docker is not invoked, isolated byte-for-byte Codex and Claude state manifests
 across config saves, the existing fail-closed Codex import fixtures, and opt-in
 real-Docker tests that run both entrypoints twice against the same persistent
 state after a transactional UI save. Release publication evidence remains
-pending. Final local evidence: the complete suite passes (`147 passed, 6
+complete. Final local evidence: the complete suite passes (`147 passed, 6
 skipped`), all six opt-in real-Docker smoke tests pass, shell/Python syntax and
 diff checks pass, and the reproducible archive test includes the TUI payload.
 

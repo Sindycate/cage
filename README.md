@@ -143,11 +143,25 @@ preserved, and the ten newest private backups are kept under
 `~/.config/cage/backups/`. If the source changed after the UI opened, Cage asks
 you to reload instead of attempting an implicit merge.
 
+Menus support arrow keys, `j`/`k`, Home/End, Page Up/Down, Enter, and
+Escape/`q`. Checkbox lists toggle with Space or Enter and keep the cursor on the
+selected row. Text fields are prefilled and support Left/Right, Home/End,
+Backspace/Delete, Unicode, and long values; erase all text (or enter `-`) to
+clear an optional field, and press Escape to cancel immediately.
+Confirmation screens keep scrollable risk details separate from the input
+field and require typing `yes`.
+
 Before saving or launching a high-authority configuration, the UI presents a
 separate risk review for yolo mode, open networking, read-write mounts, host
 commands, GitHub credentials, and authenticated integrations. It reports only
 environment-variable names and whether they are set; secret values are never
 written to `config.toml`.
+
+After customization, **Remember for this exact project** is highlighted by
+default but is never applied without selection and confirmation. **Launch
+once** discards the customization after the session. **Save named reusable
+configuration** creates or explicitly overwrites a named preset but leaves the
+current project mapping unchanged.
 
 `cage PATH` and `cage --preset NAME PATH` remain direct, non-interactive
 launches. `cage --interactive [PATH]` opens the same UI, with the path defaulting

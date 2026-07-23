@@ -7,6 +7,22 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.24.1 — 2026-07-23
+
+- replace blocking TUI text prompts with visible, editable fields that support
+  immediate Escape cancellation, cursor editing, long values, and clearing;
+- separate typed confirmations from scrollable risk and preflight details;
+- preserve menu and checkbox focus, keep selected rows visible, and add
+  conventional navigation keys for long screens;
+- make optional fields and inherited Claude history sync consistently
+  clearable, while showing command-line network and yolo overrides accurately;
+- clarify launch persistence, default customization to the explicit
+  remember-this-project choice, and require confirmation before overwriting a
+  named reusable configuration;
+- add regression coverage for UI input behavior, project-specific yolo
+  persistence, one-shot launches, both tools' yolo arguments, and
+  `--no-yolo` precedence.
+
 ## 0.24.0 — 2026-07-22
 
 - add a standard-library curses launcher and configuration UI: bare `cage`
