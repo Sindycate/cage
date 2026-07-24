@@ -97,6 +97,7 @@ PRESET_KEYS = {
     "tool",
     "auth",
     "identity",
+    "target",
     "net",
     "session_sync",
     "env",
@@ -110,6 +111,8 @@ PRESET_KEYS = {
     "extra_mounts",
     "yolo",
 }
+
+VALID_EXEC_TARGETS = {"container", "host"}
 
 EDITABLE_COLLECTIONS = {
     "auth",
@@ -139,6 +142,7 @@ class ResolvedConfig:
     net: str = ""
     session_sync: str = ""
     yolo: str = ""
+    target: str = "container"
     claude_auth: str = ""
     aws_profile: str = ""
     aws_region: str = ""
@@ -388,6 +392,12 @@ def validate_schema(data: dict[str, Any]) -> None:
                     raise ConfigError(f"{label}.mode must be ro or rw")
             else:
                 raise ConfigError(f"{label} must be a string or table")
+
+        target = preset.get("target", "container")
+        if not isinstance(target, str) or target not in VALID_EXEC_TARGETS:
+            raise ConfigError(
+                f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
+            )
 
 
 def bool_to_flag(value: Any, label: str) -> str:
@@ -879,6 +889,17 @@ def resolve_config(
     )
     resolved.yolo = bool_to_flag(preset.get("yolo"), f"presets.{preset_name}.yolo")
 
+    target = preset.get("target", "container")
+    if not isinstance(target, str) or target not in VALID_EXEC_TARGETS:
+        raise ConfigError(
+            f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
+        )
+    resolved.target = target
+    if target == "host" and tool != "codex":
+        raise ConfigError(
+            f"preset {preset_name!r}: host execution is only supported for Codex, not {tool!r}"
+        )
+
     identity_name = preset.get("identity", "")
     if identity_name is not None and not isinstance(identity_name, str):
         raise ConfigError(f"presets.{preset_name}.identity must be a string")
@@ -1156,9 +1177,58 @@ def emit_shell(resolved: ResolvedConfig) -> None:
         "EXTRA_MOUNTS": extra_mounts,
         "SESSION_SYNC": resolved.session_sync,
         "CAGE_YOLO": resolved.yolo,
+        "CAGE_EXEC_TARGET": resolved.target,
     }
     for name, value in assignments.items():
         print(shell_assign(name, value))
+
+
+def effective_exec_state(resolved: ResolvedConfig) -> dict[str, str]:
+    """Single source of truth for effective target, yolo, and network mode.
+
+    Used by explain, doctor, ui_summary, and the TUI to avoid divergent
+    reconstruction of the same three-way state.
+    """
+    target = resolved.target
+    yolo = resolved.yolo == "1"
+    # Network: CLI/preset/defaults > yolo gate > open (same rule as launcher)
+    net = resolved.net or ("gate" if yolo else "open")
+    return {"target": target, "yolo": "1" if yolo else "0", "net": net}
+
+
+def host_github_token_available(resolved: ResolvedConfig) -> bool:
+    """Return whether the selected host GitHub authentication can resolve.
+
+    Token contents are discarded and never included in doctor output.
+    """
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+        return True
+    gh = shutil.which("gh")
+    if gh is None:
+        return False
+    try:
+        gh_path = Path(gh).resolve(strict=True)
+        repo_path = Path(resolved.repo_path).resolve(strict=False)
+    except OSError:
+        return False
+    if gh_path == repo_path or gh_path.is_relative_to(repo_path):
+        return False
+    command = [str(gh_path), "auth", "token"]
+    if resolved.gh_account:
+        command.extend(["-u", resolved.gh_account])
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
 def format_server(server: dict[str, Any]) -> str:
@@ -1176,6 +1246,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print(f"Repo:   {resolved.repo_path}")
     print(f"Preset: {resolved.preset_name} ({resolved.preset_source})")
     print(f"Tool:   {resolved.tool}")
+    if resolved.target != "container":
+        print(f"Target: {resolved.target} (no Docker isolation)")
     if resolved.net:
         print(f"Net:    {resolved.net}")
     if resolved.yolo:
@@ -1220,6 +1292,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             print(f"  - {mount}")
 
     print("Capabilities:")
+    if resolved.target == "host":
+        print("  - execution: host-native (NO Docker isolation boundary)")
     print("  - repository: read/write, including .git")
     if resolved.tool == "claude":
         print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
@@ -1233,9 +1307,15 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("  - host execution: no selected bridge integrations")
     if resolved.remote_mcp:
         print("  - external connectors: enabled")
-    if resolved.net == "gate":
+    eff = effective_exec_state(resolved)
+    if resolved.target == "host":
+        if eff["net"] == "open":
+            print("  - network: unrestricted host networking (Cage enforces nothing)")
+        else:
+            print(f"  - network: {eff['net']} (INCOMPATIBLE — Cage cannot enforce this without a container)")
+    elif eff["net"] == "gate":
         print("  - network: proxy approval helper (deliberate bypass remains possible)")
-    elif resolved.net == "off":
+    elif eff["net"] == "off":
         print("  - network: Docker network disabled for the main tool container")
     else:
         print("  - network: open")
@@ -1251,7 +1331,47 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
 
     errors: list[str] = []
     warnings: list[str] = []
-    if shutil.which("docker") is None:
+    if resolved.target == "host":
+        if resolved.tool != "codex":
+            errors.append(f"host execution is only supported for Codex, not {resolved.tool!r}")
+        if resolved.stdio_mcp:
+            errors.append("stdio MCP packs require container execution (target = 'container')")
+        if resolved.remote_mcp:
+            errors.append("remote MCP server configuration requires container execution (target = 'container')")
+        if resolved.skill_mounts:
+            errors.append("skill packs require container execution (target = 'container')")
+        if resolved.host_commands:
+            errors.append("host command bridges require container execution (target = 'container')")
+        if resolved.extra_mounts:
+            errors.append("extra mounts require container execution (target = 'container')")
+        eff = effective_exec_state(resolved)
+        if eff["net"] in ("gate", "off"):
+            errors.append(
+                f"Cage cannot enforce network mode {eff['net']!r} without a container; "
+                "host execution has no Cage network restriction. "
+                "Set net = \"open\" explicitly or remove yolo to avoid the implicit gate default"
+            )
+        if resolved.host_agents_dir:
+            default_agents = str(Path.home() / ".agents")
+            if resolved.host_agents_dir != default_agents:
+                errors.append(
+                    f"custom host_agents_dir {resolved.host_agents_dir!r} is not supported in host mode; "
+                    "the default ~/.agents is naturally available on the host"
+                )
+        if resolved.ssh_host:
+            errors.append(
+                f"ssh_host alias {resolved.ssh_host!r} is not supported in host mode; "
+                "configure the alias in host ~/.ssh/config or use container execution"
+            )
+        if resolved.gh_auth == "1" and not host_github_token_available(resolved):
+            errors.append(
+                "GitHub authentication was requested but no token can be resolved "
+                "from GH_TOKEN, GITHUB_TOKEN, or host gh authentication"
+            )
+        codex_bin = shutil.which("codex")
+        if codex_bin is None:
+            errors.append("codex command not found in PATH (required for host execution)")
+    if resolved.target == "container" and shutil.which("docker") is None:
         errors.append("docker command not found")
     if resolved.tool == "claude" and resolved.claude_auth == "api-key" and not os.environ.get("ANTHROPIC_API_KEY"):
         errors.append("ANTHROPIC_API_KEY is required for Claude api-key auth")
@@ -2007,14 +2127,16 @@ def ui_summary(data: dict[str, Any], config_path: Path, repo: str) -> dict[str, 
     effective: dict[str, Any]
     try:
         resolved = resolve_config(data, config_path, repo)
+        eff = effective_exec_state(resolved)
         effective = {
             "preset": resolved.preset_name,
             "source": resolved.preset_source,
             "tool": resolved.tool,
+            "target": eff["target"],
             "auth": resolved.auth_name,
             "identity": resolved.identity_name,
-            "net": resolved.net or ("gate" if resolved.yolo == "1" else "open"),
-            "yolo": resolved.yolo == "1",
+            "net": eff["net"],
+            "yolo": eff["yolo"] == "1",
             "session_sync": resolved.session_sync != "0",
             "mcp_packs": resolved.mcp_pack_names,
             "skill_packs": resolved.skill_pack_names,

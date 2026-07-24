@@ -346,6 +346,41 @@ copy_auth = false
 env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 ```
 
+## Host-native execution (no Docker)
+
+For maintenance tasks that need access outside the repository, Cage can run
+Codex directly on the host without a Docker container:
+
+```bash
+# One-run override (does not alter saved presets)
+cage --host ~/path/to/repo
+cage codex --host -y --net open ~/path/to/repo
+
+# Saved in a preset
+# [presets.host-maintenance]
+# tool = "codex"
+# target = "host"
+# net = "open"
+
+# Force container for a saved host preset
+cage --container ~/path/to/repo
+```
+
+Host execution is **Codex-only** and provides:
+
+- **No Docker isolation** — Codex runs with full host-user file access.
+- **No Cage network restriction** — `--net gate`/`off` are rejected. Yolo's
+  implicit gate default is also rejected; use `--net open` explicitly.
+- Process-scoped Git identity (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`), SSH key
+  (`GIT_SSH_COMMAND`), and GitHub token (`GH_TOKEN`) — no host config mutation.
+- Pinned Codex executable — rejected if inside the repository.
+
+Unsupported in host mode (fail closed): MCP packs, skill packs, host command
+bridges, extra mounts, custom `host_agents_dir`, `ssh_host` aliases.
+
+This implements host-native Codex CLI only. ChatGPT desktop integration and
+SSH-connected container backends are future milestones.
+
 ## How it works
 
 `cage` is a host launcher around `docker run`. It constructs mounts, generated

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.24.1"
+CAGE_VERSION="0.25.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -107,6 +107,8 @@ NET_MODE=""  # empty = not explicitly set
 CAGE_PRESET_FLAG=""
 INTERACTIVE=0
 LEGACY_INTERACTIVE=0
+HOST_FLAG=0
+CONTAINER_FLAG=0
 TUI_RESULT=""
 EXTRA_MOUNT_SPECS=()   # entries are "ro<TAB><path>" / "rw<TAB><path>" from CLI flags
 
@@ -159,6 +161,14 @@ while [[ "${1:-}" == -* ]]; do
             REBUILD=1
             shift
             ;;
+        --host)
+            HOST_FLAG=1
+            shift
+            ;;
+        --container)
+            CONTAINER_FLAG=1
+            shift
+            ;;
         --mount-ro)
             [ -n "${2:-}" ] || { echo "Missing path after --mount-ro" >&2; exit 1; }
             EXTRA_MOUNT_SPECS+=("ro"$'\t'"$2"); shift 2
@@ -185,6 +195,11 @@ if [ "$INTERACTIVE" -eq 1 ] && [ -n "$CAGE_PRESET_FLAG" ]; then
     exit 1
 fi
 
+if [ "$HOST_FLAG" -eq 1 ] && [ "$CONTAINER_FLAG" -eq 1 ]; then
+    echo "ERROR: --host and --container cannot be combined" >&2
+    exit 1
+fi
+
 case "${NET_MODE:-open}" in
     open|gate|off) ;;
     *) echo "Invalid --net mode: $NET_MODE (use open, gate, or off)" >&2; exit 1 ;;
@@ -199,7 +214,7 @@ if [ $# -eq 0 ] && [ "$SHOW_HELP" -eq 0 ]; then
 fi
 
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--host|--container] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]"
     echo ""
     echo "Tools:"
     echo "  claude    Run Claude Code (default)"
@@ -232,6 +247,8 @@ if [ $# -lt 1 ]; then
     echo "  --net off          No network access at all"
     echo "  --mount-ro PATH    Mount a host dir read-only at the same path (repeatable)"
     echo "  --mount-rw PATH    Mount a host dir read-write at the same path (repeatable)"
+    echo "  --host             Run Codex natively on the host (no Docker isolation)"
+    echo "  --container        Force container execution (override a saved host target)"
     echo "  --rebuild          Force local rebuild (get latest tool version)"
     echo "  --version, -V      Show version and exit"
     echo "  --help, -h         Show this help and exit"
@@ -291,6 +308,8 @@ if [ "$INTERACTIVE" -eq 1 ]; then
     [ -n "$CAGE_TOOL" ] && _tui_args+=(--tool-override "$CAGE_TOOL")
     [ "$YOLO_EXPLICIT" -eq 1 ] && _tui_args+=(--yolo-override on)
     [ "$YOLO_EXPLICIT" -eq 0 ] && _tui_args+=(--yolo-override off)
+    [ "$HOST_FLAG" -eq 1 ] && _tui_args+=(--target-override host)
+    [ "$CONTAINER_FLAG" -eq 1 ] && _tui_args+=(--target-override container)
     python3 -I "$SCRIPT_DIR/cage-tui.py" "${_tui_args[@]}"
     _tui_status=$?
     set -e
@@ -385,7 +404,17 @@ case "$CAGE_TOOL" in
     *) echo "Unknown tool: $CAGE_TOOL (use 'claude' or 'codex')" >&2; exit 1 ;;
 esac
 
+# Resolve execution target: CLI override > preset > default (container)
+EXEC_TARGET="${CAGE_EXEC_TARGET:-container}"
+if [ "$HOST_FLAG" -eq 1 ]; then
+    EXEC_TARGET="host"
+elif [ "$CONTAINER_FLAG" -eq 1 ]; then
+    EXEC_TARGET="container"
+fi
+
 # Default NET_MODE: CLI flag > preset/defaults > yolo gate > open
+# Yolo's gate default is NOT silently changed for host mode. Instead, host mode
+# rejects gate/off below with a precise message.
 if [ -z "$NET_MODE" ]; then
     if [ -n "${CAGE_NET_MODE:-}" ]; then
         NET_MODE="$CAGE_NET_MODE"
@@ -400,6 +429,191 @@ case "$NET_MODE" in
     open|gate|off) ;;
     *) echo "Invalid --net mode: $NET_MODE (use open, gate, or off)" >&2; exit 1 ;;
 esac
+
+# --- Execution target: host-native branch ------------------------------------
+if [ "$EXEC_TARGET" = "host" ]; then
+    # Host-native execution: no Docker boundary, no Cage network enforcement.
+    if [ "$CAGE_TOOL" != "codex" ]; then
+        echo "ERROR: host execution (--host / target = \"host\") is only supported for Codex, not $CAGE_TOOL" >&2
+        exit 1
+    fi
+
+    # Fail closed on container-only capabilities.
+    _host_errors=0
+    if [ -n "${MCP_SERVERS:-}" ]; then
+        echo "ERROR: stdio MCP packs require container execution (target = \"container\")" >&2
+        _host_errors=1
+    fi
+    if [ -n "${CAGE_REMOTE_MCP_SERVERS:-}" ]; then
+        echo "ERROR: remote MCP server configuration requires container execution (target = \"container\")" >&2
+        _host_errors=1
+    fi
+    if [ -n "${SKILL_MOUNTS:-}" ]; then
+        echo "ERROR: skill packs require container execution (target = \"container\")" >&2
+        _host_errors=1
+    fi
+    if [ -n "${HOST_COMMANDS:-}" ]; then
+        echo "ERROR: host command bridges require container execution (target = \"container\")" >&2
+        _host_errors=1
+    fi
+    if [ -n "${EXTRA_MOUNTS:-}" ] || [ ${#EXTRA_MOUNT_SPECS[@]} -gt 0 ]; then
+        echo "ERROR: extra mounts require container execution (target = \"container\")" >&2
+        _host_errors=1
+    fi
+    if [ "$NET_MODE" = "gate" ] || [ "$NET_MODE" = "off" ]; then
+        echo "ERROR: Cage cannot enforce network mode '$NET_MODE' without a container." >&2
+        echo "  Host execution has no Cage network restriction." >&2
+        echo "  Use --net open explicitly to acknowledge unrestricted host networking," >&2
+        echo "  or use container execution (target = \"container\") for Cage network policy." >&2
+        _host_errors=1
+    fi
+    # Custom host_agents_dir is a container mount concept; fail closed.
+    if [ -n "${HOST_AGENTS_DIR:-}" ]; then
+        _resolved_agents="${HOST_AGENTS_DIR/#\~/$HOME}"
+        _default_agents="$HOME/.agents"
+        if [ "$_resolved_agents" != "$_default_agents" ]; then
+            echo "ERROR: custom host_agents_dir '$_resolved_agents' is not supported in host mode." >&2
+            echo "  The default ~/.agents registry is naturally available on the host." >&2
+            echo "  Remove host_agents_dir from the auth block, or use container execution." >&2
+            _host_errors=1
+        fi
+    fi
+    if [ "$_host_errors" -ne 0 ]; then
+        echo "Remove the unsupported capabilities from the preset, or use container execution." >&2
+        exit 1
+    fi
+
+    # Resolve CODEX_HOME from the preset auth block.
+    CODEX_HOST_PATH="${HOST_CODEX_DIR:-$HOME/.codex}"
+    CODEX_HOST_PATH="${CODEX_HOST_PATH/#\~/$HOME}"
+    export CODEX_HOME="$CODEX_HOST_PATH"
+
+    # Forward selected environment variables.
+    for varname in $EXTRA_ENV; do
+        if [ -n "${!varname:-}" ]; then
+            export "$varname"
+        fi
+    done
+
+    # Process-scoped Git identity via GIT_CONFIG_COUNT/KEY/VALUE.
+    # This affects both 'git config user.name' queries and commit metadata,
+    # without mutating any host file.
+    _git_cfg_idx="${GIT_CONFIG_COUNT:-0}"
+    case "$_git_cfg_idx" in
+        ''|*[!0-9]*)
+            echo "ERROR: inherited GIT_CONFIG_COUNT must be a non-negative integer" >&2
+            exit 1
+            ;;
+    esac
+    _git_cfg_idx=$((10#$_git_cfg_idx))
+    if [ -n "${GIT_USER_NAME:-}" ]; then
+        export "GIT_CONFIG_KEY_${_git_cfg_idx}=user.name"
+        export "GIT_CONFIG_VALUE_${_git_cfg_idx}=$GIT_USER_NAME"
+        _git_cfg_idx=$((_git_cfg_idx + 1))
+    fi
+    if [ -n "${GIT_USER_EMAIL:-}" ]; then
+        export "GIT_CONFIG_KEY_${_git_cfg_idx}=user.email"
+        export "GIT_CONFIG_VALUE_${_git_cfg_idx}=$GIT_USER_EMAIL"
+        _git_cfg_idx=$((_git_cfg_idx + 1))
+    fi
+    if [ -n "${GIT_USER_NAME:-}" ] || [ -n "${GIT_USER_EMAIL:-}" ]; then
+        export GIT_CONFIG_COUNT="$_git_cfg_idx"
+    fi
+
+    # Process-scoped SSH key (no permanent host mutation).
+    if [ -n "${SSH_KEY:-}" ]; then
+        _ssh_key_path="${SSH_KEY/#\~/$HOME}"
+        if [ ! -f "$_ssh_key_path" ]; then
+            echo "ERROR: selected SSH key does not exist: $_ssh_key_path" >&2
+            exit 1
+        fi
+        # Keep the path out of the command string. Git evaluates
+        # GIT_SSH_COMMAND through a shell, which expands this separately exported
+        # value without re-parsing path contents as command syntax.
+        export CAGE_SELECTED_SSH_KEY="$_ssh_key_path"
+        export GIT_SSH_COMMAND='ssh -i "$CAGE_SELECTED_SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+    fi
+    # ssh_host alias requires writing ~/.ssh/config; reject in host mode.
+    if [ -n "${SSH_HOST:-}" ]; then
+        echo "ERROR: ssh_host alias '$SSH_HOST' is not supported in host mode." >&2
+        echo "  Host aliases require writing ~/.ssh/config, which Cage must not mutate." >&2
+        echo "  Configure the alias in your host ~/.ssh/config manually, or use container execution." >&2
+        exit 1
+    fi
+
+    # Process-scoped GitHub CLI auth (no permanent host mutation).
+    if [ "${GH_AUTH:-0}" = "1" ]; then
+        if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+            if command -v gh &>/dev/null; then
+                if [ -n "${GH_ACCOUNT:-}" ]; then
+                    GH_TOKEN="$(gh auth token -u "$GH_ACCOUNT" 2>/dev/null)" || true
+                else
+                    GH_TOKEN="$(gh auth token 2>/dev/null)" || true
+                fi
+            fi
+        fi
+        if [ -n "${GH_TOKEN:-}" ]; then
+            export GH_TOKEN
+        elif [ -n "${GITHUB_TOKEN:-}" ]; then
+            export GH_TOKEN="$GITHUB_TOKEN"
+        else
+            echo "ERROR: GitHub authentication was requested (gh_auth = true) but no token" >&2
+            echo "  could be resolved. Ensure 'gh auth login' is complete on the host," >&2
+            echo "  or set GH_TOKEN/GITHUB_TOKEN in the environment." >&2
+            exit 1
+        fi
+    fi
+
+    # Pin the Codex executable: resolve to absolute path, reject if inside
+    # the repository or any Cage-writable path (same invariant as bridges).
+    _CODEX_BIN="$(python3 -I -c '
+import os, shutil, sys
+from pathlib import Path
+
+repo = sys.argv[1]
+denied = [Path(repo).resolve(strict=False)]
+# Add any rw extra mounts (none survived the fail-closed check above, but be safe)
+program = "codex"
+located = shutil.which(program)
+if located is None:
+    print("ERROR:codex command not found in PATH", file=sys.stderr)
+    sys.exit(1)
+resolved = Path(located).resolve(strict=True)
+for root in denied:
+    if resolved == root or resolved.is_relative_to(root):
+        print(f"ERROR:refusing codex executable from a Cage-writable path: {resolved}", file=sys.stderr)
+        sys.exit(1)
+if not resolved.is_file() or not os.access(resolved, os.X_OK):
+    print(f"ERROR:codex is not a runnable regular file: {resolved}", file=sys.stderr)
+    sys.exit(1)
+print(str(resolved))
+' "$REPO_PATH" 2>&1)" || {
+        echo "${_CODEX_BIN#ERROR:}" >&2
+        exit 1
+    }
+    if [[ "$_CODEX_BIN" == ERROR:* ]]; then
+        echo "${_CODEX_BIN#ERROR:}" >&2
+        exit 1
+    fi
+
+    # Build tool arguments.
+    TOOL_ARGS=()
+    if [ "$YOLO" -eq 1 ]; then
+        TOOL_ARGS+=(--yolo)
+    fi
+
+    echo "cage: host-native Codex (no Docker isolation)" >&2
+    echo "  Executable: $_CODEX_BIN" >&2
+    echo "  CODEX_HOME: $CODEX_HOME" >&2
+    echo "  Repository: $REPO_PATH" >&2
+    echo "  Network:    $NET_MODE (Cage provides no network restriction)" >&2
+    [ "$YOLO" -eq 1 ] && echo "  Yolo:       enabled" >&2
+    [ -n "${GIT_USER_NAME:-}" ] && echo "  Git identity: $GIT_USER_NAME <$GIT_USER_EMAIL>" >&2
+    echo "" >&2
+
+    cd "$REPO_PATH"
+    exec "$_CODEX_BIN" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"
+fi
 
 # Tool-specific variables
 case "$CAGE_TOOL" in

@@ -8,6 +8,37 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.25.0 — 2026-07-24
+
+### Host-native Codex CLI execution target
+
+Who is affected: users who want to run Codex directly on the host for
+maintenance tasks that need access outside the repository.
+
+New behavior: presets accept `target = "container"` (default) or
+`target = "host"`. The CLI flags `--host` and `--container` override the
+saved target for one launch only. Host execution:
+
+- runs Codex with `CODEX_HOME` set to the resolved `host_codex_dir`;
+- provides no Docker isolation and no Cage network restriction;
+- rejects `--net gate`/`--net off` (yolo's implicit gate default is also
+  rejected — use `--net open` explicitly to acknowledge unrestricted
+  networking);
+- applies Git identity, SSH keys, and GitHub tokens process-scoped (no
+  host config mutation);
+- rejects MCP packs, skill packs, host commands, extra mounts, custom
+  `host_agents_dir`, and `ssh_host` aliases;
+- pins the Codex executable and rejects it if inside the repository.
+
+No configuration migration is required. Existing configs without `target`
+default to container execution. `--host` and `--container` are launch-only
+overrides and do not alter saved presets or project mappings.
+
+This implements host-native Codex CLI only. ChatGPT desktop integration
+and SSH-connected container backends are future milestones.
+
+Rollback: remove `target` keys from presets; the default remains container.
+
 ## 0.24.1 — 2026-07-23
 
 ### Corrected terminal configuration controls

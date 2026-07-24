@@ -62,6 +62,7 @@ class Controller:
     def __init__(
         self, backend: Path, config: Path, repo: Path, result: Path,
         net_override: str = "", yolo_override: str = "", tool_override: str = "",
+        target_override: str = "",
     ):
         self.backend = backend
         self.config = config
@@ -70,6 +71,7 @@ class Controller:
         self.net_override = net_override
         self.yolo_override = yolo_override
         self.tool_override = tool_override
+        self.target_override = target_override
         self.snapshot = self._call("ui-export", "--repo", str(self.repo))
 
     def _call(self, command: str, *arguments: str, request: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -179,15 +181,28 @@ class Controller:
         preset = self.data.get("presets", {}).get(name, {})
         return (name, dict(preset)) if isinstance(preset, dict) else ("", {})
 
-    def risks(self, preset: dict[str, Any]) -> list[str]:
-        risks: list[str] = []
+    def effective_exec_state(self, preset: dict[str, Any]) -> tuple[str, bool, str]:
+        target = self.target_override or str(preset.get("target", "container"))
         yolo = self.yolo_override == "on" or (
             not self.yolo_override and preset.get("yolo") is True
         )
+        net = (
+            self.net_override
+            or str(preset.get("net") or "")
+            or str(self.data.get("defaults", {}).get("net") or "")
+            or ("gate" if yolo else "open")
+        )
+        return target, yolo, net
+
+    def risks(self, preset: dict[str, Any]) -> list[str]:
+        risks: list[str] = []
+        target, yolo, net = self.effective_exec_state(preset)
+        if target == "host":
+            risks.append("Execution runs directly on the host — NO Docker isolation boundary.")
+            risks.append("Host execution has unrestricted networking; Cage enforces no network policy.")
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
-        net = self.net_override or preset.get("net") or self.data.get("defaults", {}).get("net") or ("gate" if yolo else "open")
-        if net == "open":
+        if net == "open" and target != "host":
             risks.append("The container has unrestricted network access.")
         for mount in preset.get("extra_mounts", []):
             if isinstance(mount, dict) and mount.get("mode") == "rw":
@@ -199,7 +214,10 @@ class Controller:
             ))
         identity = self.data.get("identities", {}).get(preset.get("identity", ""), {})
         if isinstance(identity, dict) and identity.get("gh_auth") is True:
-            risks.append("GitHub credentials are forwarded into the container.")
+            if target == "host":
+                risks.append("GitHub credentials are made available to the host Codex process.")
+            else:
+                risks.append("GitHub credentials are forwarded into the container.")
         for pack_name in preset.get("mcp_packs", []):
             pack = self.data.get("mcp_packs", {}).get(pack_name, {})
             for server in pack.get("servers", []) if isinstance(pack, dict) else []:
@@ -231,7 +249,51 @@ class Controller:
 
     def preflight(self, preset: dict[str, Any]) -> list[str]:
         warnings: list[str] = []
-        if shutil.which("docker") is None:
+        target, _yolo, effective_net = self.effective_exec_state(preset)
+        if target == "host":
+            if (self.tool_override or preset.get("tool", "codex")) != "codex":
+                warnings.append("Host execution is only supported for Codex.")
+            if shutil.which("codex") is None:
+                warnings.append("codex command not found in PATH (required for host execution).")
+            if preset.get("mcp_packs"):
+                warnings.append("MCP packs require container execution and will be rejected at launch.")
+            if preset.get("skill_packs"):
+                warnings.append("Skill packs require container execution and will be rejected at launch.")
+            if preset.get("host_commands"):
+                warnings.append("Host commands require container execution and will be rejected at launch.")
+            if preset.get("extra_mounts"):
+                warnings.append("Extra mounts require container execution and will be rejected at launch.")
+            if effective_net in ("gate", "off"):
+                warnings.append(
+                    f"Network mode '{effective_net}' cannot be enforced without a container. "
+                    "Use --net open explicitly or switch to container execution."
+                )
+            auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
+            if isinstance(auth, dict) and auth.get("host_agents_dir"):
+                agents_dir = str(auth["host_agents_dir"])
+                default_agents = str(Path.home() / ".agents")
+                resolved = str(Path(agents_dir).expanduser())
+                if resolved != default_agents:
+                    warnings.append(
+                        f"Custom host_agents_dir '{agents_dir}' is not supported in host mode. "
+                        "The default ~/.agents is naturally available."
+                    )
+            identity = self.data.get("identities", {}).get(preset.get("identity", ""), {})
+            if isinstance(identity, dict):
+                if identity.get("ssh_host"):
+                    warnings.append(
+                        "ssh_host aliases are not supported in host mode and will be rejected at launch."
+                    )
+                if (
+                    identity.get("gh_auth") is True
+                    and not os.environ.get("GH_TOKEN")
+                    and not os.environ.get("GITHUB_TOKEN")
+                    and shutil.which("gh") is None
+                ):
+                    warnings.append(
+                        "GitHub authentication is enabled but neither a token nor the gh command is available."
+                    )
+        elif shutil.which("docker") is None:
             warnings.append("Docker is not available in PATH.")
         required: set[str] = set(preset.get("env", []))
         auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
@@ -577,8 +639,13 @@ class CursesView:
                 else "on" if value.get("session_sync") is True
                 else "off"
             )
+            target_value = self.controller.target_override or value.get("target", "container")
+            target_label = "Host CLI — no Docker boundary" if target_value == "host" else "Container"
+            if self.controller.target_override:
+                target_label += " (command override)"
             rows = [
                 ("tool", f"Tool: {value.get('tool', 'codex')}"),
+                ("target", f"Execution: {target_label}"),
                 ("auth", f"Auth: {value.get('auth', 'none')}"),
                 ("identity", f"Identity: {value.get('identity', 'none')}"),
                 ("mcp", f"MCP packs: {', '.join(value.get('mcp_packs', [])) or 'none'}"),
@@ -596,6 +663,8 @@ class CursesView:
                 return None
             cursor = choice
             if choice == "done":
+                # target_override is launch-only; do NOT inject it into the
+                # saved preset. The preview validates the preset as-is.
                 try:
                     self.controller.preview([{"action": "upsert", "collection": "presets", "name": "__cage_preview", "value": value}])
                 except UiError as exc:
@@ -611,6 +680,25 @@ class CursesView:
                     value["tool"] = selected
                     if selected == "claude":
                         value.pop("skill_packs", None)
+                        value.pop("target", None)  # host target is Codex-only
+            elif choice == "target":
+                if self.controller.target_override:
+                    self.message = f"Execution target is fixed to {self.controller.target_override} by the command."
+                    continue
+                if value.get("tool", "codex") != "codex":
+                    self.message = "Host execution is only supported for Codex."
+                    continue
+                selected = self.select_value(
+                    "Execution target",
+                    ["container", "host"],
+                    str(value.get("target", "container")),
+                    False,
+                )
+                if selected:
+                    if selected == "container":
+                        value.pop("target", None)
+                    else:
+                        value["target"] = selected
             elif choice in ("auth", "identity"):
                 collection = "auth" if choice == "auth" else "identities"
                 names = sorted(self.controller.data.get(collection, {}))
@@ -841,12 +929,16 @@ class CursesView:
             else "on" if preset.get("session_sync") is True
             else "off"
         )
-        return [
-            f"Tool: {preset.get('tool', 'codex')}  Network: {preset.get('net', 'default')}",
+        target = preset.get("target", "container")
+        target_label = "Host CLI — no Docker boundary" if target == "host" else "Container"
+        lines = [
+            f"Tool: {preset.get('tool', 'codex')}  Execution: {target_label}",
+            f"Network: {preset.get('net', 'default')}",
             f"Yolo: {'on' if preset.get('yolo') is True else 'off'}  Claude history sync: {sync}",
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
+        return lines
 
     def launch_actions(self, preset: dict[str, Any]) -> bool:
         choice = self.menu("Use configuration", [
@@ -1080,21 +1172,21 @@ class CursesView:
             if "error" in effective:
                 details = ["Configuration needs attention:", str(effective["error"])]
             else:
-                shown_yolo = (
-                    self.controller.yolo_override == "on"
-                    or (not self.controller.yolo_override and effective.get("yolo"))
-                )
                 _, effective_value = self.controller.effective_preset()
-                shown_net = (
-                    self.controller.net_override
-                    or effective_value.get("net")
-                    or self.controller.data.get("defaults", {}).get("net")
-                    or ("gate" if shown_yolo else "open")
+                # The backend supplies saved effective state. Apply command
+                # overrides through the same local helper used by risk review
+                # and preflight so the reviewed launch matches the shell.
+                shown_target, shown_yolo, shown_net = self.controller.effective_exec_state(
+                    effective_value
                 )
+                target_label = "Host CLI — no Docker boundary" if shown_target == "host" else "Container"
+                if self.controller.target_override:
+                    target_label += " (command override)"
                 details = [
                     f"Project: {self.controller.repo}",
-                    f"Tool: {effective.get('tool')}  Auth: {effective.get('auth') or 'default'}",
-                    f"Identity: {effective.get('identity') or 'none'}  Network: {shown_net}"
+                    f"Tool: {effective.get('tool')}  Execution: {target_label}",
+                    f"Auth: {effective.get('auth') or 'default'}  Identity: {effective.get('identity') or 'none'}",
+                    f"Network: {shown_net}"
                     + (" (command override)" if self.controller.net_override else ""),
                     f"MCP: {', '.join(effective.get('mcp_packs', [])) or 'none'}",
                     f"Skills: {', '.join(effective.get('skill_packs', [])) or 'none'}",
@@ -1125,8 +1217,18 @@ class CursesView:
                     return 0
             else:
                 name, preset = self.controller.effective_preset()
+                if self.controller.target_override:
+                    preset = dict(preset)
+                    if self.controller.target_override == "container":
+                        preset.pop("target", None)
+                    else:
+                        preset["target"] = self.controller.target_override
                 if self.risk_review(preset, action=f"Launch saved configuration {name!r}."):
-                    self.controller.write_result({"action": "preset", "preset_name": name})
+                    if self.controller.target_override:
+                        # Write a launch-once result with the overridden target
+                        self.controller.write_result({"action": "launch_once", "preset": preset})
+                    else:
+                        self.controller.write_result({"action": "preset", "preset_name": name})
                     return 0
 
 
@@ -1139,6 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--net-override", choices=["open", "gate", "off"], default="")
     parser.add_argument("--yolo-override", choices=["on", "off"], default="")
     parser.add_argument("--tool-override", choices=["codex", "claude"], default="")
+    parser.add_argument("--target-override", choices=["container", "host"], default="")
     args = parser.parse_args(argv)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("curses UI requires a terminal", file=sys.stderr)
@@ -1151,7 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
         controller = Controller(
             args.backend, args.config, args.repo, args.result,
             net_override=args.net_override, yolo_override=args.yolo_override,
-            tool_override=args.tool_override,
+            tool_override=args.tool_override, target_override=args.target_override,
         )
         return curses.wrapper(lambda screen: CursesView(screen, controller).run())
     except UiError as exc:

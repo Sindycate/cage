@@ -3,6 +3,30 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-24 — v0.25.0 host-native Codex CLI execution target
+
+Added an explicit preset execution target with `container` as the
+backward-compatible default and Codex-only `host` execution as an acknowledged
+no-isolation option. `--host` and `--container` are launch-only overrides and
+the TUI reviews the effective target, yolo, and network state without persisting
+command overrides.
+
+The host branch runs before Docker, volume, bridge, synchronization, or image
+side effects. It uses the resolved host `CODEX_HOME`, pins the Codex executable
+outside the repository, applies Git/SSH/GitHub identity process-locally, and
+fails closed on unsupported network policies, MCP/skill packs, host-command
+bridges, extra mounts, custom agent registries, SSH aliases, missing SSH keys,
+and unresolved requested GitHub authentication. Documentation states that this
+is host-native Codex CLI, not ChatGPT desktop or an SSH-connected container.
+
+Local evidence after independent correction and review: the focused
+host-execution suite passes (`57 passed`); the complete suite passes (`223
+passed, 6 skipped`); all six opt-in real-Docker smoke tests pass; shell syntax
+passes under the active Bash and macOS `/bin/bash`; Python compilation,
+Compose validation, file modes, and `git diff --check` pass. Remote publication
+and artifact verification remain required before the release is considered
+complete.
+
 ## 2026-07-23 — v0.24.1 TUI correctness and navigation correction
 
 Corrected the published v0.24.0 terminal UI without changing the central TOML

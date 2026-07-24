@@ -73,6 +73,35 @@ External systems also have a separate side-effect boundary: containing local
 filesystem writes does not undo a pushed Git commit, changed ticket, sent
 message, or modified cloud resource.
 
+## Host-native execution (target = "host")
+
+Cage supports running Codex directly on the host without a Docker container.
+This is deliberately for maintenance tasks that need access outside the
+repository. Host execution:
+
+- provides **no Docker isolation boundary** — Codex runs with full host-user
+  file access;
+- provides **no Cage network restriction** — `--net gate` and `--net off`
+  are rejected because Cage cannot enforce them without a container;
+- uses the resolved `host_codex_dir` as `CODEX_HOME`;
+- applies Git identity via process-scoped `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
+  environment variables (no host config mutation);
+- applies SSH keys via a process-scoped `GIT_SSH_COMMAND` (no `~/.ssh/config`
+  mutation); `ssh_host` aliases are rejected because they require writing
+  `~/.ssh/config`;
+- resolves GitHub tokens process-scoped via `gh auth token`;
+- pins the Codex executable to an absolute path and rejects it if located
+  inside the repository (the only Cage-designated writable path accepted by
+  host mode);
+- rejects MCP packs, skill packs, host command bridges, extra mounts, and
+  custom `host_agents_dir` (all require container execution).
+
+Host execution is supported only for Codex. Claude host execution is rejected.
+
+This implements host-native Codex CLI only. ChatGPT desktop integration and
+SSH-connected container backends are future milestones, not part of the
+current release.
+
 ## Writable repository state
 
 The repository mount includes `.git`, ignored files, and untracked files. A tool

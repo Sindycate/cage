@@ -79,6 +79,7 @@ class StubController:
         self.tool_override = ""
         self.net_override = ""
         self.yolo_override = ""
+        self.target_override = ""
         self.data = {
             "auth": {},
             "identities": {},
