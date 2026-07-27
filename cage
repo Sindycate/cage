@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.25.0"
+CAGE_VERSION="0.25.1"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -342,6 +342,7 @@ _init_config_vars() {
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" HOST_AGENTS_DIR="" GH_AUTH="" GH_ACCOUNT=""
     MCP_SERVERS="" SKILL_MOUNTS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
     CAGE_PRESET="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS="" CAGE_YOLO=""
+    CAGE_HOST_CODEX_PAYLOAD="" CAGE_CODEX_PROFILE=""
 }
 
 _load_config() {
@@ -404,6 +405,19 @@ case "$CAGE_TOOL" in
     *) echo "Unknown tool: $CAGE_TOOL (use 'claude' or 'codex')" >&2; exit 1 ;;
 esac
 
+if [ "$CAGE_TOOL" = "codex" ] && [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
+    for _user_arg in "$@"; do
+        case "$_user_arg" in
+            -p|--profile|--profile=*)
+                echo "ERROR: Codex profile '$CAGE_CODEX_PROFILE' is selected by preset '$CAGE_PRESET'," >&2
+                echo "  but the launch arguments also select a profile. Remove the explicit profile" >&2
+                echo "  argument or remove codex_profile from the preset." >&2
+                exit 1
+                ;;
+        esac
+    done
+fi
+
 # Resolve execution target: CLI override > preset > default (container)
 EXEC_TARGET="${CAGE_EXEC_TARGET:-container}"
 if [ "$HOST_FLAG" -eq 1 ]; then
@@ -438,20 +452,8 @@ if [ "$EXEC_TARGET" = "host" ]; then
         exit 1
     fi
 
-    # Fail closed on container-only capabilities.
+    # Fail closed on capabilities that still require a container.
     _host_errors=0
-    if [ -n "${MCP_SERVERS:-}" ]; then
-        echo "ERROR: stdio MCP packs require container execution (target = \"container\")" >&2
-        _host_errors=1
-    fi
-    if [ -n "${CAGE_REMOTE_MCP_SERVERS:-}" ]; then
-        echo "ERROR: remote MCP server configuration requires container execution (target = \"container\")" >&2
-        _host_errors=1
-    fi
-    if [ -n "${SKILL_MOUNTS:-}" ]; then
-        echo "ERROR: skill packs require container execution (target = \"container\")" >&2
-        _host_errors=1
-    fi
     if [ -n "${HOST_COMMANDS:-}" ]; then
         echo "ERROR: host command bridges require container execution (target = \"container\")" >&2
         _host_errors=1
@@ -494,6 +496,25 @@ if [ "$EXEC_TARGET" = "host" ]; then
             export "$varname"
         fi
     done
+
+    # Generate process-local profile, MCP, and skill overrides. The helper
+    # validates profile existence, duplicate MCP definitions, pinned stdio
+    # executables, and the documented default host skill registry. It does not
+    # edit CODEX_HOME or ~/.agents.
+    if ! _HOST_CODEX_ARG_LINES="$(
+        python3 -I "$SCRIPT_DIR/cage-config.py" \
+            --config "$CAGE_CONFIG_DIR/config.toml" \
+            host-codex-args \
+            --repo "$REPO_PATH" \
+            --codex-home "$CODEX_HOME" \
+            --payload "$CAGE_HOST_CODEX_PAYLOAD"
+    )"; then
+        exit 1
+    fi
+    TOOL_ARGS=()
+    while IFS= read -r _host_codex_arg; do
+        [ -z "$_host_codex_arg" ] || TOOL_ARGS+=("$_host_codex_arg")
+    done <<< "$_HOST_CODEX_ARG_LINES"
 
     # Process-scoped Git identity via GIT_CONFIG_COUNT/KEY/VALUE.
     # This affects both 'git config user.name' queries and commit metadata,
@@ -597,7 +618,6 @@ print(str(resolved))
     fi
 
     # Build tool arguments.
-    TOOL_ARGS=()
     if [ "$YOLO" -eq 1 ]; then
         TOOL_ARGS+=(--yolo)
     fi
@@ -607,6 +627,9 @@ print(str(resolved))
     echo "  CODEX_HOME: $CODEX_HOME" >&2
     echo "  Repository: $REPO_PATH" >&2
     echo "  Network:    $NET_MODE (Cage provides no network restriction)" >&2
+    [ -n "${CAGE_CODEX_PROFILE:-}" ] && echo "  Profile:    $CAGE_CODEX_PROFILE" >&2
+    [ -n "${MCP_SERVERS:-}${CAGE_REMOTE_MCP_SERVERS:-}" ] && echo "  MCP:        selected packs applied for this process" >&2
+    [ -n "${SKILL_MOUNTS:-}" ] && echo "  Skills:     selected pack filter applied for this process" >&2
     [ "$YOLO" -eq 1 ] && echo "  Yolo:       enabled" >&2
     [ -n "${GIT_USER_NAME:-}" ] && echo "  Git identity: $GIT_USER_NAME <$GIT_USER_EMAIL>" >&2
     echo "" >&2
@@ -641,6 +664,14 @@ CODEX_HOST_PATH=""
 if [ "$CAGE_TOOL" = "codex" ]; then
     CODEX_HOST_PATH="${HOST_CODEX_DIR:-$HOME/.codex}"
     CODEX_HOST_PATH="${CODEX_HOST_PATH/#\~/$HOME}"
+    if ! python3 -I "$SCRIPT_DIR/cage-config.py" \
+        --config "$CAGE_CONFIG_DIR/config.toml" \
+        validate-codex-layers \
+        --repo "$REPO_PATH" \
+        --codex-home "$CODEX_HOST_PATH" \
+        --payload "$CAGE_HOST_CODEX_PAYLOAD"; then
+        exit 1
+    fi
 fi
 
 # --- Extra named mounts -----------------------------------------------------
@@ -2379,6 +2410,9 @@ fi
 [[ ${#EXTRA_MOUNT_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${EXTRA_MOUNT_ARGS[@]}")
 
 TOOL_ARGS=()
+if [ "$CAGE_TOOL" = "codex" ] && [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
+    TOOL_ARGS+=(--profile "$CAGE_CODEX_PROFILE")
+fi
 if [ "$YOLO" -eq 1 ]; then
     case "$CAGE_TOOL" in
         claude) TOOL_ARGS+=(--dangerously-skip-permissions) ;;

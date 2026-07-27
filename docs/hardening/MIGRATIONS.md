@@ -8,6 +8,42 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.25.1 — 2026-07-27
+
+### Codex profiles and host-native MCP/skill reuse
+
+Who is affected: Codex users who keep provider/model variants in native Codex
+profile files or who want a Cage preset's MCP and skill selections while
+running with `target = "host"`.
+
+New behavior:
+
+- Codex presets may set `codex_profile = "name"`. Cage validates
+  `$CODEX_HOME/name.config.toml` and supplies `--profile name` for both
+  container and host launches.
+- Host mode applies selected remote and stdio MCP servers through process-local
+  Codex CLI overrides. It does not rewrite `config.toml`. Stdio executables are
+  pinned before changing into the repository and are rejected if they resolve
+  under that writable repository.
+- Host mode applies selected skill packs as a process-local Codex skill filter
+  when they use the default `~/.agents` registry. Custom agent registries and
+  skill-pack sources still fail closed.
+- Selected MCP names that already exist in base, selected-profile, or project
+  Codex configuration fail clearly instead of being ambiguously merged.
+- Host command bridges, extra mounts, `ssh_host`, non-open Cage network modes,
+  and custom agent registries remain unsupported in host mode.
+
+No migration is required. Existing presets without `codex_profile` retain their
+current base configuration. Presets without MCP/skill packs are unchanged.
+
+The ChatGPT desktop app can be opened for a workspace by native Codex tooling,
+but named configuration profile selection is currently documented for the CLI,
+not as a desktop launch selector. Cage does not emulate desktop identities by
+changing `CODEX_HOME`.
+
+Rollback: remove `codex_profile` and selected MCP/skill packs from host presets,
+or switch the preset back to `target = "container"`.
+
 ## 0.25.0 — 2026-07-24
 
 ### Host-native Codex CLI execution target

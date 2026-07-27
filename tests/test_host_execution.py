@@ -4,7 +4,9 @@ Covers:
 - Host mode invokes pinned fake Codex without Docker
 - CODEX_HOME, cwd, and forwarded arguments are correct
 - Claude host mode is rejected
-- Container-only capabilities fail closed in host mode
+- Selected Codex profiles, MCP packs, and default-registry skill packs are
+  translated into process-local host arguments
+- Remaining container-only capabilities fail closed in host mode
 - host+yolo never implicitly opens networking (gate rejection)
 - --container overrides a saved host target
 - --host and --container conflict is rejected
@@ -31,6 +33,7 @@ import termios
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,10 +86,18 @@ def write_fake_docker_failing(path: Path) -> None:
 def write_fake_docker_success(path: Path) -> None:
     """Docker that succeeds (for container-mode tests)."""
     path.write_text(
-        '#!/bin/sh\ncase "$1" in\n'
+        '#!/bin/sh\n'
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        '    type=bind,src=*,dst=/out) out=${arg#type=bind,src=}; out=${out%,dst=/out}; '
+        'printf \'%s\\n\' \'{"credentials":{"exists":false,"raw_sha256":null,"mode":null},'
+        '"state":{"exists":false,"raw_sha256":null,"mode":null}}\' > "$out/manifest.json"; exit 0 ;;\n'
+        '  esac\n'
+        'done\n'
+        'case "$1" in\n'
         '  ps) exit 0 ;;\n'
         '  image) exit 0 ;;\n'
-        '  run) echo "DOCKER_RUN"; exit 0 ;;\n'
+        '  run) echo "DOCKER_RUN $*"; exit 0 ;;\n'
         '  build|pull|tag|volume) exit 0 ;;\n'
         'esac\nexit 0\n',
         encoding="utf-8",
@@ -101,6 +112,8 @@ def write_fake_codex(path: Path) -> None:
         'echo "CODEX_HOME=$CODEX_HOME"\n'
         'echo "CWD=$(pwd)"\n'
         'echo "ARGS=$*"\n'
+        'i=0\n'
+        'for arg in "$@"; do echo "ARG_${i}=$arg"; i=$((i + 1)); done\n'
         'echo "GIT_CONFIG_COUNT=${GIT_CONFIG_COUNT:-unset}"\n'
         'echo "GIT_CONFIG_KEY_0=${GIT_CONFIG_KEY_0:-unset}"\n'
         'echo "GIT_CONFIG_VALUE_0=${GIT_CONFIG_VALUE_0:-unset}"\n'
@@ -134,8 +147,11 @@ def setup_host_test(
     config_text: str,
     extra_args: list[str] | None = None,
     *,
+    tool_args: list[str] | None = None,
     fake_gh: str = "",
     env_overrides: dict[str, str] | None = None,
+    host_skills: dict[str, str] | None = None,
+    codex_files: dict[str, str] | None = None,
 ):
     """Set up a complete isolated environment for a cage launch test."""
     temporary = tempfile.TemporaryDirectory(dir=ROOT)
@@ -151,6 +167,14 @@ def setup_host_test(
     repo.mkdir()
     write_fake_docker_failing(bin_dir / "docker")
     write_fake_codex(bin_dir / "codex")
+    for name, body in (host_skills or {}).items():
+        skill_dir = home / ".agents" / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
+    for name, body in (codex_files or {}).items():
+        codex_file = home / ".codex" / name
+        codex_file.parent.mkdir(parents=True, exist_ok=True)
+        codex_file.write_text(body, encoding="utf-8")
     if fake_gh:
         gh_body = (
             '#!/bin/sh\nprintf "fake-token:%s\\n" "$*"\n'
@@ -162,7 +186,7 @@ def setup_host_test(
     (cage_dir / "config.toml").write_text(config_text, encoding="utf-8")
     env = make_env(tmp_path, bin_dir, home, xdg)
     env.update(env_overrides or {})
-    args = [str(CAGE)] + (extra_args or []) + [str(repo)]
+    args = [str(CAGE)] + (extra_args or []) + [str(repo)] + (tool_args or [])
     result = subprocess.run(
         args, cwd=ROOT, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
@@ -272,6 +296,48 @@ class TestHostModeLaunches(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ARGS=-p do something --model o3", r.stdout)
 
+    def test_named_codex_profile_is_forwarded_in_host_mode(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'codex_profile = "qwen-preview"', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            codex_files={"qwen-preview.config.toml": 'model = "qwen"\n'},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ARG_0=--profile", result.stdout)
+        self.assertIn("ARG_1=qwen-preview", result.stdout)
+        self.assertIn("Profile:    qwen-preview", result.stderr)
+
+    def test_missing_named_codex_profile_fails_closed(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'codex_profile = "missing"', "",
+        ])
+        result, _, _, temporary = setup_host_test(config)
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("selected Codex profile is missing", result.stderr)
+
+    def test_preset_and_explicit_codex_profiles_conflict(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'codex_profile = "saved"', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            tool_args=["--profile", "other"],
+            codex_files={"saved.config.toml": ""},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("also select a profile", result.stderr)
+
     def test_yolo_forwarded_with_explicit_net_open(self):
         """Yolo is forwarded when net is explicitly open."""
         config = '\n'.join([
@@ -306,6 +372,62 @@ class TestHostModeLaunches(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DOCKER_RUN", result.stdout)
+
+    def test_named_codex_profile_is_forwarded_in_container_mode(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'net = "open"',
+            'codex_profile = "company"', "",
+        ])
+        temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        self.addCleanup(temporary.cleanup)
+        tmp_path = Path(temporary.name)
+        xdg, home, bin_dir = tmp_path / "xdg", tmp_path / "home", tmp_path / "bin"
+        cage_dir, repo = xdg / "cage", tmp_path / "repo"
+        for directory in (bin_dir, cage_dir, home, repo, home / ".codex"):
+            directory.mkdir(parents=True, exist_ok=True)
+        write_fake_docker_success(bin_dir / "docker")
+        (home / ".codex" / "company.config.toml").write_text('model = "gpt-5"\n')
+        (cage_dir / "config.toml").write_text(config, encoding="utf-8")
+        env = make_env(tmp_path, bin_dir, home, xdg)
+        result = subprocess.run(
+            [str(CAGE), str(repo)], cwd=ROOT, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--profile company", result.stdout)
+
+    def test_missing_named_codex_profile_fails_before_container_side_effects(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'net = "open"',
+            'codex_profile = "missing"', "",
+        ])
+        result, _, _, temporary = setup_host_test(config)
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("selected Codex profile is missing", result.stderr)
+        self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
+
+    def test_container_profile_mcp_duplicate_fails_before_docker(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[mcp_packs.linear]",
+            'servers = [{ name = "linear", type = "http", url = "https://mcp.linear.app/mcp" }]',
+            "[presets.main]", 'tool = "codex"', 'net = "open"',
+            'codex_profile = "company"', 'mcp_packs = ["linear"]', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            codex_files={
+                "company.config.toml":
+                    '[mcp_servers.linear]\nurl = "https://other.example/mcp"\n'
+            },
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exist in Codex config layer", result.stderr)
+        self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
 
     def _launch(self, config, extra_args=None):
         return setup_host_test(config, extra_args)
@@ -351,8 +473,8 @@ class TestHostYoloNetworkDivergence(unittest.TestCase):
         self.assertIn("no Docker isolation", result.stderr)
 
 
-class TestHostCapabilityFailClosed(unittest.TestCase):
-    """Container-only capabilities fail closed with precise messages."""
+class TestHostCapabilities(unittest.TestCase):
+    """Supported host capabilities are scoped; unsupported ones fail closed."""
 
     def _assert_rejected(self, config, expected_fragment):
         result, _, _, tmp = setup_host_test(config)
@@ -378,17 +500,30 @@ class TestHostCapabilityFailClosed(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("only supported for Codex", result.stderr)
 
-    def test_stdio_mcp_rejected(self):
+    def test_stdio_mcp_is_applied_with_pinned_executable_and_argument_boundaries(self):
         config = '\n'.join([
             "version = 1", 'default_preset = "main"',
             "[mcp_packs.local]",
-            'servers = [{ name = "jira", type = "stdio", command = "npx jira" }]',
+            'env = ["JIRA_TOKEN"]',
+            'servers = [{ name = "jira", type = "stdio", command = "codex --serve \\"two words\\"" }]',
             "[presets.main]", 'tool = "codex"', 'target = "host"',
             'net = "open"', 'mcp_packs = ["local"]', "",
         ])
-        self._assert_rejected(config, "container execution")
+        result, _, tmp_path, temporary = setup_host_test(
+            config,
+            env_overrides={"JIRA_TOKEN": "secret"},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f'ARG_1=mcp_servers.jira.command="{tmp_path / "bin" / "codex"}"',
+            result.stdout,
+        )
+        self.assertIn('ARG_3=mcp_servers.jira.args=["--serve","two words"]', result.stdout)
+        self.assertIn('ARG_5=mcp_servers.jira.env_vars=["JIRA_TOKEN"]', result.stdout)
+        self.assertIn("selected packs applied for this process", result.stderr)
 
-    def test_remote_mcp_rejected(self):
+    def test_remote_mcp_is_applied_process_locally(self):
         config = '\n'.join([
             "version = 1", 'default_preset = "main"',
             "[mcp_packs.linear]", 'env = ["LINEAR_API_KEY"]',
@@ -396,7 +531,62 @@ class TestHostCapabilityFailClosed(unittest.TestCase):
             "[presets.main]", 'tool = "codex"', 'target = "host"',
             'net = "open"', 'mcp_packs = ["linear"]', "",
         ])
-        self._assert_rejected(config, "container execution")
+        result, _, _, temporary = setup_host_test(
+            config,
+            env_overrides={"LINEAR_API_KEY": "secret"},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            'mcp_servers.linear.url="https://mcp.linear.app/mcp"',
+            result.stdout,
+        )
+        self.assertIn(
+            'mcp_servers.linear.bearer_token_env_var="LINEAR_API_KEY"',
+            result.stdout,
+        )
+
+    def test_duplicate_base_config_mcp_server_is_rejected(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[mcp_packs.linear]",
+            'servers = [{ name = "linear", type = "http", url = "https://mcp.linear.app/mcp" }]',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'mcp_packs = ["linear"]', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            codex_files={
+                "config.toml": '[mcp_servers.linear]\nurl = "https://other.example/mcp"\n'
+            },
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exist in Codex config layer", result.stderr)
+
+    def test_oauth_mcp_resolves_public_client_id_without_persisting_it(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[mcp_packs.dash0]",
+            "servers = [",
+            '  { name = "dash0", type = "http", url = "https://example.test/mcp", '
+            'auth = "oauth", oauth_resource = "https://example.test", '
+            'oauth_client_id_env_var = "DASH0_CLIENT_ID", oauth_scopes = ["read"] },',
+            "]",
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'mcp_packs = ["dash0"]', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            env_overrides={"DASH0_CLIENT_ID": "public-client-id"},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('mcp_servers.dash0.oauth_resource="https://example.test"', result.stdout)
+        self.assertIn('mcp_servers.dash0.scopes=["read"]', result.stdout)
+        self.assertIn('mcp_servers.dash0.oauth.client_id="public-client-id"', result.stdout)
+        self.assertIn('mcp_oauth_credentials_store="file"', result.stdout)
+        self.assertNotIn("mcp_servers.dash0.auth", result.stdout)
 
     def test_host_commands_rejected(self):
         config = '\n'.join([
@@ -415,8 +605,25 @@ class TestHostCapabilityFailClosed(unittest.TestCase):
         ])
         self._assert_rejected(config, "container execution")
 
-    def test_skill_packs_rejected(self):
-        # Create a skill dir so resolution passes, but host mode rejects
+    def test_skill_packs_filter_default_host_registry_process_locally(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[skill_packs.sp]", 'source = "~/.agents"', 'skills = ["myskill"]',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'skill_packs = ["sp"]', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            host_skills={"myskill": "# Selected", "other": "# Other"},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skills.config=[", result.stdout)
+        self.assertIn("myskill/SKILL.md\",enabled=true", result.stdout)
+        self.assertIn("other/SKILL.md\",enabled=false", result.stdout)
+        self.assertIn("selected pack filter applied", result.stderr)
+
+    def test_skill_pack_outside_default_registry_rejected(self):
         temporary = tempfile.TemporaryDirectory(dir=ROOT)
         self.addCleanup(temporary.cleanup)
         tmp_path = Path(temporary.name)
@@ -432,7 +639,7 @@ class TestHostCapabilityFailClosed(unittest.TestCase):
         ])
         result, _, _, _ = setup_host_test(config)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("container execution", result.stdout + result.stderr)
+        self.assertIn("default host registry", result.stdout + result.stderr)
 
     def test_net_gate_rejected(self):
         config = '\n'.join([
@@ -676,6 +883,34 @@ class TestConfigSchema(unittest.TestCase):
         with self.assertRaises(cage_config.ConfigError):
             cage_config.validate_schema(data)
 
+    def test_named_codex_profile_resolves(self):
+        data = {"version": 1, "default_preset": "m",
+                "presets": {"m": {"tool": "codex", "codex_profile": "qwen-preview_1"}}}
+        resolved = cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
+        self.assertEqual(resolved.codex_profile, "qwen-preview_1")
+
+    def test_invalid_named_codex_profile_is_rejected(self):
+        data = {"version": 1, "default_preset": "m",
+                "presets": {"m": {"tool": "codex", "codex_profile": "../escape"}}}
+        with self.assertRaisesRegex(cage_config.ConfigError, "codex_profile"):
+            cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
+
+    def test_named_codex_profile_is_rejected_for_claude(self):
+        data = {"version": 1, "default_preset": "m",
+                "presets": {"m": {"tool": "claude", "codex_profile": "company"}}}
+        with self.assertRaisesRegex(cage_config.ConfigError, "only supported for Codex"):
+            cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
+
+    def test_codex_layer_duplicate_check_is_size_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            layer = Path(temporary) / "config.toml"
+            layer.write_text("[mcp_servers.x]\nurl='x'\n")
+            with (
+                patch.object(cage_config, "MAX_CODEX_CONFIG_BYTES", 8),
+                self.assertRaisesRegex(cage_config.ConfigError, "exceeds 8 bytes"),
+            ):
+                cage_config.selected_mcp_names_in_file(layer, {"x"})
+
     def test_emit_shell_includes_target(self):
         import io
         from unittest.mock import patch
@@ -714,7 +949,7 @@ class TestConfigSchema(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("cannot enforce network mode", buf.getvalue())
 
-    def test_doctor_rejects_host_with_mcp(self):
+    def test_doctor_validates_host_mcp_executable(self):
         import io
         from unittest.mock import patch
         data = {"version": 1, "default_preset": "m",
@@ -725,7 +960,7 @@ class TestConfigSchema(unittest.TestCase):
         with patch("sys.stdout", buf):
             rc = cage_config.explain(resolved, doctor=True)
         self.assertEqual(rc, 1)
-        self.assertIn("container execution", buf.getvalue())
+        self.assertIn("executable is not available", buf.getvalue())
 
     def test_doctor_rejects_custom_agents_dir(self):
         import io
@@ -792,6 +1027,29 @@ class TestTuiEffectiveState(unittest.TestCase):
         self.assertTrue(any("unrestricted networking" in r for r in risks))
         self.assertFalse(any("container has unrestricted" in r for r in risks))
 
+    def test_named_codex_profiles_are_discovered_from_selected_auth_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary) / "codex-home"
+            codex_home.mkdir()
+            (codex_home / "qwen-preview.config.toml").write_text('model = "qwen"\n')
+            (codex_home / "bad.name.config.toml").write_text('model = "ignored"\n')
+            controller = object.__new__(cage_tui.Controller)
+            controller.snapshot = {
+                "config": {
+                    "auth": {
+                        "work": {
+                            "tool": "codex",
+                            "host_codex_dir": str(codex_home),
+                        }
+                    }
+                }
+            }
+
+            discovered_home, names = controller.codex_profiles({"auth": "work"})
+
+        self.assertEqual(discovered_home, codex_home)
+        self.assertEqual(names, ["qwen-preview"])
+
     def test_target_override_appears_in_risks(self):
         """--host override shows host risks even for a container preset."""
         controller = self._make_controller('\n'.join([
@@ -816,7 +1074,7 @@ class TestTuiEffectiveState(unittest.TestCase):
         controller.yolo_override = "off"
         self.assertEqual(controller.effective_exec_state(preset), ("container", False, "open"))
 
-    def test_preflight_surfaces_mcp_incompatibility(self):
+    def test_preflight_surfaces_missing_host_mcp_executable(self):
         controller = self._make_controller('\n'.join([
             "version = 1", 'default_preset = "main"',
             "[mcp_packs.l]", 'servers = [{ name = "j", type = "stdio", command = "x" }]',
@@ -825,7 +1083,18 @@ class TestTuiEffectiveState(unittest.TestCase):
         ]))
         _, preset = controller.effective_preset()
         warnings = controller.preflight(preset)
-        self.assertTrue(any("MCP packs require container" in w for w in warnings))
+        self.assertTrue(any("Stdio MCP executable is not available" in w for w in warnings))
+
+    def test_host_mcp_and_skill_risks_are_explicit(self):
+        controller = self._make_controller('\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[mcp_packs.l]", 'servers = [{ name = "local", type = "stdio", command = "codex" }]',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'mcp_packs = ["l"]', 'skill_packs = []', "",
+        ]))
+        _, preset = controller.effective_preset()
+        risks = controller.risks(preset)
+        self.assertTrue(any("host-user authority" in risk for risk in risks))
 
     def test_preflight_surfaces_net_gate_incompatibility(self):
         controller = self._make_controller('\n'.join([

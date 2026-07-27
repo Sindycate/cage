@@ -3,6 +3,37 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-27 — v0.25.1 Codex profiles and host integration reuse
+
+Added native Codex profile selection to Cage presets. Both execution targets
+validate `$CODEX_HOME/<name>.config.toml`; container mode forwards
+`--profile`, while host mode composes it with process-local MCP and skill
+overrides.
+
+Host-native Codex can now reuse selected HTTP/stdio MCP packs and default
+`~/.agents` skill packs without modifying host Codex or skill-registry files.
+Stdio MCP executables are parsed without a shell, pinned to absolute paths, and
+rejected under the writable repository. Selected MCP names fail closed when a
+base, profile, or project Codex layer already defines them. Custom agent
+registries, host command bridges, extra mounts, SSH aliases, and Cage network
+restrictions remain rejected in host mode.
+
+The TUI exposes the named profile and reviews the direct host authority of
+stdio MCP servers and skills. Documentation distinguishes the supported
+host-native CLI path from ChatGPT desktop: the app can open a workspace and
+shares base Codex configuration, but Codex does not document a desktop
+named-profile launch selector. A container-backed desktop UI remains a separate
+remote app-server/SSH design.
+
+Local release evidence: the profile/host/config/TUI suite passes (`148
+passed`); strict-config validation succeeds against installed Codex CLI
+`0.144.6` for HTTP, stdio, OAuth, and skill overrides; the complete suite,
+including live loopback bridge coverage, passes (`238 passed, 6 skipped`); and
+all six opt-in real-Docker smoke tests pass against the existing Colima
+instance. Python/shell syntax, Compose validation, file modes, packaging, and
+`git diff --check` pass. The GitHub branch and tagged-release gates must still
+pass before publication is claimed.
+
 ## 2026-07-24 — v0.25.0 host-native Codex CLI execution target
 
 Added an explicit preset execution target with `container` as the
@@ -19,13 +50,13 @@ bridges, extra mounts, custom agent registries, SSH aliases, missing SSH keys,
 and unresolved requested GitHub authentication. Documentation states that this
 is host-native Codex CLI, not ChatGPT desktop or an SSH-connected container.
 
-Local evidence after independent correction and review: the focused
+Evidence after independent correction and review: the focused
 host-execution suite passes (`57 passed`); the complete suite passes (`223
 passed, 6 skipped`); all six opt-in real-Docker smoke tests pass; shell syntax
 passes under the active Bash and macOS `/bin/bash`; Python compilation,
-Compose validation, file modes, and `git diff --check` pass. Remote publication
-and artifact verification remain required before the release is considered
-complete.
+Compose validation, file modes, and `git diff --check` pass. Commit `cb1b23e`
+was published as tag and GitHub release `v0.25.0`; release assets and checksum
+were verified.
 
 ## 2026-07-23 — v0.24.1 TUI correctness and navigation correction
 

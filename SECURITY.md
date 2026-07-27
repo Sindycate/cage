@@ -90,17 +90,33 @@ repository. Host execution:
   mutation); `ssh_host` aliases are rejected because they require writing
   `~/.ssh/config`;
 - resolves GitHub tokens process-scoped via `gh auth token`;
+- applies a selected native Codex profile with `--profile` after validating the
+  corresponding file under the resolved `CODEX_HOME`;
+- passes selected remote MCP definitions as process-local Codex configuration
+  overrides without rewriting host Codex configuration;
+- resolves each selected stdio MCP command to a pinned absolute executable and
+  rejects executables under the writable repository. The MCP process still runs
+  with full host-user authority and receives the selected environment names;
+- filters selected skill packs through process-local Codex configuration only
+  when their source is the default `~/.agents/skills` registry. Cage does not
+  rewrite or copy the host registry in host mode;
 - pins the Codex executable to an absolute path and rejects it if located
   inside the repository (the only Cage-designated writable path accepted by
   host mode);
-- rejects MCP packs, skill packs, host command bridges, extra mounts, and
-  custom `host_agents_dir` (all require container execution).
+- rejects duplicate selected MCP names already present in base, selected
+  profile, or project Codex configuration rather than silently overriding
+  them;
+- rejects host command bridges, extra mounts, custom `host_agents_dir` and
+  non-default skill-pack sources (all still require container execution).
 
 Host execution is supported only for Codex. Claude host execution is rejected.
 
-This implements host-native Codex CLI only. ChatGPT desktop integration and
-SSH-connected container backends are future milestones, not part of the
-current release.
+This implements host-native Codex CLI only. ChatGPT desktop can open a
+workspace through the official `codex app PATH` command, but Codex does not
+document a desktop named-profile launch selector. Cage does not rely on
+process-local `CODEX_HOME` tricks to claim separate desktop identities. A
+desktop UI backed by container execution would require a supported remote
+app-server/SSH design and remains a future milestone.
 
 ## Writable repository state
 

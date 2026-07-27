@@ -12,6 +12,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -52,6 +53,8 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
     "skill_packs": [("source", "Agents registry", "text"), ("skills", "Skill names", "list")],
     "host_commands": [("command", "Host command", "text")],
 }
+
+CODEX_PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class UiError(Exception):
@@ -181,6 +184,22 @@ class Controller:
         preset = self.data.get("presets", {}).get(name, {})
         return (name, dict(preset)) if isinstance(preset, dict) else ("", {})
 
+    def codex_profiles(self, preset: dict[str, Any]) -> tuple[Path, list[str]]:
+        auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
+        raw_home = (
+            str(auth.get("host_codex_dir", "~/.codex"))
+            if isinstance(auth, dict)
+            else "~/.codex"
+        )
+        codex_home = Path(raw_home).expanduser()
+        names: list[str] = []
+        if codex_home.is_dir():
+            for path in codex_home.glob("*.config.toml"):
+                name = path.name.removesuffix(".config.toml")
+                if path.is_file() and CODEX_PROFILE_RE.fullmatch(name):
+                    names.append(name)
+        return codex_home, sorted(set(names))
+
     def effective_exec_state(self, preset: dict[str, Any]) -> tuple[str, bool, str]:
         target = self.target_override or str(preset.get("target", "container"))
         yolo = self.yolo_override == "on" or (
@@ -200,6 +219,19 @@ class Controller:
         if target == "host":
             risks.append("Execution runs directly on the host — NO Docker isolation boundary.")
             risks.append("Host execution has unrestricted networking; Cage enforces no network policy.")
+            if preset.get("skill_packs"):
+                risks.append("Selected skills can direct actions performed by host-native Codex.")
+            stdio_names: list[str] = []
+            for pack_name in preset.get("mcp_packs", []):
+                pack = self.data.get("mcp_packs", {}).get(pack_name, {})
+                for server in pack.get("servers", []) if isinstance(pack, dict) else []:
+                    if isinstance(server, dict) and server.get("type", "stdio") == "stdio":
+                        stdio_names.append(str(server.get("name", pack_name)))
+            if stdio_names:
+                risks.append(
+                    "Stdio MCP servers execute directly with host-user authority: "
+                    + ", ".join(stdio_names)
+                )
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
         if net == "open" and target != "host":
@@ -255,10 +287,6 @@ class Controller:
                 warnings.append("Host execution is only supported for Codex.")
             if shutil.which("codex") is None:
                 warnings.append("codex command not found in PATH (required for host execution).")
-            if preset.get("mcp_packs"):
-                warnings.append("MCP packs require container execution and will be rejected at launch.")
-            if preset.get("skill_packs"):
-                warnings.append("Skill packs require container execution and will be rejected at launch.")
             if preset.get("host_commands"):
                 warnings.append("Host commands require container execution and will be rejected at launch.")
             if preset.get("extra_mounts"):
@@ -278,6 +306,56 @@ class Controller:
                         f"Custom host_agents_dir '{agents_dir}' is not supported in host mode. "
                         "The default ~/.agents is naturally available."
                     )
+            for pack_name in preset.get("skill_packs", []):
+                pack = self.data.get("skill_packs", {}).get(pack_name, {})
+                if not isinstance(pack, dict):
+                    continue
+                source = str(
+                    pack.get("source")
+                    or (auth.get("host_agents_dir") if isinstance(auth, dict) else "")
+                    or "~/.agents"
+                )
+                if Path(source).expanduser() != Path.home() / ".agents":
+                    warnings.append(
+                        f"Skill pack '{pack_name}' uses '{source}'. Host-native skill packs "
+                        "currently require the default ~/.agents registry."
+                    )
+            for pack_name in preset.get("mcp_packs", []):
+                pack = self.data.get("mcp_packs", {}).get(pack_name, {})
+                for server in pack.get("servers", []) if isinstance(pack, dict) else []:
+                    if not isinstance(server, dict) or server.get("type", "stdio") != "stdio":
+                        continue
+                    command = str(server.get("command", ""))
+                    try:
+                        argv = shlex.split(command)
+                    except ValueError:
+                        warnings.append(
+                            f"Stdio MCP server '{server.get('name', pack_name)}' has invalid quoting."
+                        )
+                        continue
+                    executable = shutil.which(argv[0]) if argv else None
+                    if executable is None:
+                        warnings.append(
+                            f"Stdio MCP executable is not available for "
+                            f"'{server.get('name', pack_name)}': {argv[0] if argv else '(empty)'}"
+                        )
+                        continue
+                    try:
+                        resolved_executable = Path(executable).resolve(strict=True)
+                    except OSError as exc:
+                        warnings.append(
+                            f"Cannot resolve stdio MCP executable for "
+                            f"'{server.get('name', pack_name)}': {exc}"
+                        )
+                        continue
+                    if (
+                        resolved_executable == self.repo
+                        or resolved_executable.is_relative_to(self.repo)
+                    ):
+                        warnings.append(
+                            f"Stdio MCP executable for '{server.get('name', pack_name)}' "
+                            "is inside the writable repository and will be rejected."
+                        )
             identity = self.data.get("identities", {}).get(preset.get("identity", ""), {})
             if isinstance(identity, dict):
                 if identity.get("ssh_host"):
@@ -303,6 +381,15 @@ class Controller:
                 raw_path = auth.get(key)
                 if raw_path and not Path(str(raw_path)).expanduser().is_dir():
                     warnings.append(f"{key} does not exist: {raw_path}")
+        if preset.get("codex_profile"):
+            codex_home = Path(
+                str(auth.get("host_codex_dir", "~/.codex"))
+                if isinstance(auth, dict)
+                else "~/.codex"
+            ).expanduser()
+            profile_path = codex_home / f"{preset['codex_profile']}.config.toml"
+            if not profile_path.is_file():
+                warnings.append(f"Selected Codex profile does not exist: {profile_path}")
         for pack_name in preset.get("mcp_packs", []):
             pack = self.data.get("mcp_packs", {}).get(pack_name, {})
             if not isinstance(pack, dict):
@@ -626,6 +713,7 @@ class CursesView:
         value["tool"] = self.controller.tool_override or value.get("tool", "codex")
         if value["tool"] == "claude":
             value.pop("skill_packs", None)
+            value.pop("codex_profile", None)
         cursor = "tool"
         while True:
             yolo_value = "on" if value.get("yolo") is True else "off"
@@ -646,6 +734,7 @@ class CursesView:
             rows = [
                 ("tool", f"Tool: {value.get('tool', 'codex')}"),
                 ("target", f"Execution: {target_label}"),
+                ("profile", f"Codex profile: {value.get('codex_profile', 'base config')}"),
                 ("auth", f"Auth: {value.get('auth', 'none')}"),
                 ("identity", f"Identity: {value.get('identity', 'none')}"),
                 ("mcp", f"MCP packs: {', '.join(value.get('mcp_packs', [])) or 'none'}"),
@@ -680,7 +769,27 @@ class CursesView:
                     value["tool"] = selected
                     if selected == "claude":
                         value.pop("skill_packs", None)
+                        value.pop("codex_profile", None)
                         value.pop("target", None)  # host target is Codex-only
+            elif choice == "profile":
+                if value.get("tool", "codex") != "codex":
+                    self.message = "Named Codex profiles are only supported for Codex."
+                    continue
+                codex_home, names = self.controller.codex_profiles(value)
+                selected = self.select_value(
+                    f"Codex profile ({codex_home})",
+                    names,
+                    str(value.get("codex_profile", "")),
+                )
+                if selected is not None:
+                    if selected:
+                        value["codex_profile"] = selected
+                    else:
+                        value.pop("codex_profile", None)
+                    if not names:
+                        self.message = (
+                            f"No named profiles found under {codex_home}; using base config."
+                        )
             elif choice == "target":
                 if self.controller.target_override:
                     self.message = f"Execution target is fixed to {self.controller.target_override} by the command."
@@ -933,6 +1042,7 @@ class CursesView:
         target_label = "Host CLI — no Docker boundary" if target == "host" else "Container"
         lines = [
             f"Tool: {preset.get('tool', 'codex')}  Execution: {target_label}",
+            f"Codex profile: {preset.get('codex_profile', 'base config')}",
             f"Network: {preset.get('net', 'default')}",
             f"Yolo: {'on' if preset.get('yolo') is True else 'off'}  Claude history sync: {sync}",
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
@@ -1185,6 +1295,7 @@ class CursesView:
                 details = [
                     f"Project: {self.controller.repo}",
                     f"Tool: {effective.get('tool')}  Execution: {target_label}",
+                    f"Codex profile: {effective.get('codex_profile') or 'base config'}",
                     f"Auth: {effective.get('auth') or 'default'}  Identity: {effective.get('identity') or 'none'}",
                     f"Network: {shown_net}"
                     + (" (command override)" if self.controller.net_override else ""),

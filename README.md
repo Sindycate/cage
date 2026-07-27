@@ -233,6 +233,8 @@ yolo = false
 tool = "codex"
 auth = "codex-company-proxy"
 identity = "work"
+# Optional: layer ~/.codex-company/qwen-preview.config.toml.
+codex_profile = "qwen-preview"
 mcp_packs = ["linear"]
 skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
@@ -346,6 +348,41 @@ copy_auth = false
 env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 ```
 
+### Named Codex profiles and providers
+
+A Codex preset can select one of Codex's native named configuration profiles:
+
+```toml
+[presets.codex-qwen]
+tool = "codex"
+auth = "codex-work"
+codex_profile = "qwen-preview"
+net = "gate"
+```
+
+The corresponding file is
+`$CODEX_HOME/qwen-preview.config.toml` (for the example auth block above,
+`~/.codex-work/qwen-preview.config.toml`). Cage validates that the file exists
+and launches Codex with `--profile qwen-preview` in either container or host
+mode. The base `$CODEX_HOME/config.toml` is loaded first and the named profile
+is layered over it. Profile names may contain letters, digits, hyphens, and
+underscores. The TUI lists valid `*.config.toml` profile files from the Codex
+home selected by the preset's auth block.
+
+The profile file is native Codex configuration, so it can select a
+`model_provider`, model, reasoning level, approval policy, or
+`approvals_reviewer = "auto_review"`. Cage does not implement or reinterpret a
+provider protocol: provider compatibility, authentication, and auto-review
+behavior remain Codex/provider capabilities. Keep secrets out of Cage TOML;
+select environment variable names in the auth/MCP blocks and export the values
+in the launching shell. In host mode, a provider's native Codex
+`model_providers.<name>.auth.command` already runs on the host and can use
+host-installed credential helpers directly; Cage `host_commands` are
+container-side bridges and remain unsupported there. See Codex's official
+[profile documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles),
+[provider configuration](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers),
+and [auto-review documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
+
 ## Host-native execution (no Docker)
 
 For maintenance tasks that need access outside the repository, Cage can run
@@ -373,13 +410,30 @@ Host execution is **Codex-only** and provides:
   implicit gate default is also rejected; use `--net open` explicitly.
 - Process-scoped Git identity (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`), SSH key
   (`GIT_SSH_COMMAND`), and GitHub token (`GH_TOKEN`) — no host config mutation.
+- Native Codex profile selection with `codex_profile`.
+- Selected remote MCP servers as process-local Codex `-c` overrides.
+- Selected stdio MCP servers as pinned host executables. They run directly with
+  host-user authority and are rejected when the executable resolves inside the
+  writable repository.
+- Selected skill packs as a process-local Codex skill filter when they come
+  from the documented default `~/.agents/skills` registry. Other discovered
+  user skills are disabled for that launch; no registry or Codex config file is
+  rewritten.
 - Pinned Codex executable — rejected if inside the repository.
 
-Unsupported in host mode (fail closed): MCP packs, skill packs, host command
-bridges, extra mounts, custom `host_agents_dir`, `ssh_host` aliases.
+Unsupported in host mode (fail closed): host command bridges, extra mounts,
+custom `host_agents_dir`/skill-pack sources, and `ssh_host` aliases.
 
-This implements host-native Codex CLI only. ChatGPT desktop integration and
-SSH-connected container backends are future milestones.
+This implements host-native Codex CLI only. The stable `codex app PATH` command
+can open a workspace in ChatGPT desktop, and the desktop app shares the base
+Codex configuration, MCP, skills, and provider support. However, Codex
+currently documents named `--profile` selection for the CLI, not a desktop
+profile launch selector. Cage therefore does not pretend that changing
+`CODEX_HOME` launches an isolated second desktop identity. A true
+desktop-UI/container-execution mode would require a supported remote
+app-server/SSH connection and remains a future milestone. The current
+capability boundary and that future route are recorded in
+[docs/CODEX_DESKTOP.md](docs/CODEX_DESKTOP.md).
 
 ## How it works
 

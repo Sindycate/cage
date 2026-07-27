@@ -39,10 +39,12 @@ ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SKILL_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 TRANSPORT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+CODEX_PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 HEADER_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 TABLE_RE = re.compile(r"^\s*\[\[?[^\]\r\n]+\]\]?\s*(?:#.*)?$")
 PROJECTS_TABLE_RE = re.compile(r"^\s*\[projects\]\s*(?:#.*)?$")
+MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024
 
 TOP_LEVEL_KEYS = {
     "version",
@@ -97,6 +99,7 @@ PRESET_KEYS = {
     "tool",
     "auth",
     "identity",
+    "codex_profile",
     "target",
     "net",
     "session_sync",
@@ -135,6 +138,7 @@ class ResolvedConfig:
     preset_name: str
     preset_source: str
     tool: str
+    codex_profile: str = ""
     auth_name: str = ""
     identity_name: str = ""
     mcp_pack_names: list[str] = field(default_factory=list)
@@ -397,6 +401,17 @@ def validate_schema(data: dict[str, Any]) -> None:
         if not isinstance(target, str) or target not in VALID_EXEC_TARGETS:
             raise ConfigError(
                 f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
+            )
+        codex_profile = preset.get("codex_profile", "")
+        if not isinstance(codex_profile, str):
+            raise ConfigError(f"presets.{preset_name}.codex_profile must be a string")
+        if codex_profile and not CODEX_PROFILE_RE.fullmatch(codex_profile):
+            raise ConfigError(
+                f"presets.{preset_name}.codex_profile must contain only letters, digits, hyphens, or underscores"
+            )
+        if codex_profile and preset.get("tool") == "claude":
+            raise ConfigError(
+                f"presets.{preset_name}.codex_profile is only supported for Codex presets"
             )
 
 
@@ -899,6 +914,16 @@ def resolve_config(
         raise ConfigError(
             f"preset {preset_name!r}: host execution is only supported for Codex, not {tool!r}"
         )
+    codex_profile = preset.get("codex_profile", "")
+    if not isinstance(codex_profile, str):
+        raise ConfigError(f"presets.{preset_name}.codex_profile must be a string")
+    if codex_profile and not CODEX_PROFILE_RE.fullmatch(codex_profile):
+        raise ConfigError(
+            f"presets.{preset_name}.codex_profile must contain only letters, digits, hyphens, or underscores"
+        )
+    if codex_profile and tool != "codex":
+        raise ConfigError("codex_profile is only supported for Codex presets")
+    resolved.codex_profile = codex_profile
 
     identity_name = preset.get("identity", "")
     if identity_name is not None and not isinstance(identity_name, str):
@@ -1153,11 +1178,14 @@ def emit_shell(resolved: ResolvedConfig) -> None:
     host_commands = "\n".join(f"{c['name']}={c['command']}" for c in resolved.host_commands)
     extra_mounts = "\n".join(resolved.extra_mounts)
     remote_json = json.dumps(resolved.remote_mcp, separators=(",", ":"))
+    host_codex_payload = json.dumps(host_codex_payload_for(resolved), separators=(",", ":"))
     assignments = {
         "CAGE_PRESET": resolved.preset_name,
         "CAGE_TOOL_RESOLVED": resolved.tool,
         "CAGE_NET_MODE": resolved.net,
         "CAGE_REMOTE_MCP_SERVERS": remote_json if resolved.remote_mcp else "",
+        "CAGE_HOST_CODEX_PAYLOAD": host_codex_payload,
+        "CAGE_CODEX_PROFILE": resolved.codex_profile,
         "CLAUDE_AUTH": resolved.claude_auth,
         "AWS_PROFILE": resolved.aws_profile,
         "AWS_REGION": resolved.aws_region,
@@ -1181,6 +1209,281 @@ def emit_shell(resolved: ResolvedConfig) -> None:
     }
     for name, value in assignments.items():
         print(shell_assign(name, value))
+
+
+def host_codex_payload_for(resolved: ResolvedConfig) -> dict[str, Any]:
+    return {
+        "profile": resolved.codex_profile,
+        "stdio": resolved.stdio_mcp,
+        "remote": resolved.remote_mcp,
+        "skills": resolved.skill_mounts,
+        "env_names": resolved.extra_env,
+    }
+
+
+def toml_string(value: Any) -> str:
+    """Encode a scalar string for a Codex `-c key=value` override."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def toml_string_array(values: list[str]) -> str:
+    return "[" + ",".join(toml_string(value) for value in values) + "]"
+
+
+def selected_mcp_names_in_file(path: Path, selected_names: set[str]) -> set[str]:
+    if not path.exists():
+        return set()
+    if not path.is_file():
+        raise ConfigError(f"Codex config layer is not a regular file: {path}")
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_CODEX_CONFIG_BYTES + 1)
+        if len(raw) > MAX_CODEX_CONFIG_BYTES:
+            raise ConfigError(
+                f"Codex config layer exceeds {MAX_CODEX_CONFIG_BYTES} bytes: {path}"
+            )
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"cannot read Codex config layer {path}: {exc}") from exc
+    servers = parsed.get("mcp_servers", {})
+    if servers is None:
+        return set()
+    if not isinstance(servers, dict):
+        raise ConfigError(f"Codex config layer {path} has a non-table mcp_servers value")
+    return selected_names.intersection(str(name) for name in servers)
+
+
+def validate_codex_layers(payload: dict[str, Any], repo: Path, codex_home: Path) -> None:
+    if not isinstance(payload, dict):
+        raise ConfigError("invalid Codex configuration payload")
+    profile = payload.get("profile", "")
+    if not isinstance(profile, str) or (profile and not CODEX_PROFILE_RE.fullmatch(profile)):
+        raise ConfigError("invalid Codex profile in launch payload")
+    if profile:
+        profile_path = codex_home / f"{profile}.config.toml"
+        if not profile_path.is_file():
+            raise ConfigError(f"selected Codex profile is missing: {profile_path}")
+
+    stdio = payload.get("stdio", [])
+    remote = payload.get("remote", [])
+    if not isinstance(stdio, list) or not isinstance(remote, list):
+        raise ConfigError("invalid Codex launch payload: MCP servers must be lists")
+    selected_mcp_names: set[str] = set()
+    for server in [*stdio, *remote]:
+        if not isinstance(server, dict):
+            raise ConfigError("invalid MCP server in Codex launch payload")
+        name = server.get("name")
+        if not isinstance(name, str) or not TRANSPORT_NAME_RE.fullmatch(name):
+            raise ConfigError("invalid MCP server name in Codex launch payload")
+        if name in selected_mcp_names:
+            raise ConfigError(f"duplicate MCP server in Codex launch payload: {name}")
+        selected_mcp_names.add(name)
+
+    if not selected_mcp_names:
+        return
+    layers: list[Path] = [codex_home / "config.toml"]
+    if profile:
+        layers.append(codex_home / f"{profile}.config.toml")
+    project_config = repo / ".codex" / "config.toml"
+    if project_config.exists():
+        layers.append(project_config)
+    for layer in layers:
+        duplicates = selected_mcp_names_in_file(layer, selected_mcp_names)
+        if duplicates:
+            names = ", ".join(sorted(duplicates))
+            raise ConfigError(
+                f"selected MCP server(s) already exist in Codex config layer {layer}: {names}; "
+                "remove the duplicate definitions or deselect the Cage MCP pack"
+            )
+
+
+def pin_host_executable(command: str, repo_path: Path, label: str) -> tuple[str, list[str]]:
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ConfigError(f"{label} has invalid quoting: {exc}") from exc
+    if not argv:
+        raise ConfigError(f"{label} has an empty command")
+    located = shutil.which(argv[0])
+    if located is None:
+        raise ConfigError(f"{label} executable is not available in PATH: {argv[0]}")
+    try:
+        executable = Path(located).resolve(strict=True)
+    except OSError as exc:
+        raise ConfigError(f"cannot resolve {label} executable {located!r}: {exc}") from exc
+    repo = repo_path.resolve(strict=False)
+    if executable == repo or executable.is_relative_to(repo):
+        raise ConfigError(
+            f"refusing {label} executable from the writable repository: {executable}"
+        )
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ConfigError(f"{label} executable is not a runnable regular file: {executable}")
+    return str(executable), argv[1:]
+
+
+def host_codex_arg_lines(payload: dict[str, Any], repo: Path, codex_home: Path) -> list[str]:
+    """Build process-local Codex CLI overrides for a host-native launch.
+
+    The returned list alternates normal CLI flags and values. It never edits
+    CODEX_HOME, repository config, or the global agents registry.
+    """
+    if not isinstance(payload, dict):
+        raise ConfigError("invalid host Codex configuration payload")
+    profile = payload.get("profile", "")
+    if not isinstance(profile, str) or (profile and not CODEX_PROFILE_RE.fullmatch(profile)):
+        raise ConfigError("invalid Codex profile in host launch payload")
+    stdio = payload.get("stdio", [])
+    remote = payload.get("remote", [])
+    skills = payload.get("skills", [])
+    env_names = payload.get("env_names", [])
+    for label, value in (
+        ("stdio MCP servers", stdio),
+        ("remote MCP servers", remote),
+        ("skills", skills),
+        ("environment names", env_names),
+    ):
+        if not isinstance(value, list):
+            raise ConfigError(f"invalid host Codex payload: {label} must be a list")
+    if any(not isinstance(name, str) or not ENV_RE.fullmatch(name) for name in env_names):
+        raise ConfigError("invalid environment name in host Codex payload")
+
+    validate_codex_layers(payload, repo, codex_home)
+
+    args: list[str] = []
+    if profile:
+        args.extend(["--profile", profile])
+    for server in stdio:
+        name = str(server["name"])
+        command = server.get("command")
+        if not isinstance(command, str):
+            raise ConfigError(f"stdio MCP server {name!r} is missing its command")
+        executable, command_args = pin_host_executable(
+            command,
+            repo,
+            f"stdio MCP server {name!r}",
+        )
+        prefix = f"mcp_servers.{name}"
+        args.extend(["-c", f"{prefix}.command={toml_string(executable)}"])
+        args.extend(["-c", f"{prefix}.args={toml_string_array(command_args)}"])
+        if env_names:
+            args.extend(["-c", f"{prefix}.env_vars={toml_string_array(env_names)}"])
+
+    any_oauth = False
+    for server in remote:
+        name = str(server["name"])
+        url = server.get("url")
+        if not isinstance(url, str) or not url:
+            raise ConfigError(f"HTTP MCP server {name!r} is missing its URL")
+        prefix = f"mcp_servers.{name}"
+        args.extend(["-c", f"{prefix}.url={toml_string(url)}"])
+        auth = server.get("auth")
+        if auth == "oauth":
+            any_oauth = True
+            if server.get("oauth_resource"):
+                args.extend([
+                    "-c",
+                    f"{prefix}.oauth_resource={toml_string(server['oauth_resource'])}",
+                ])
+            scopes = server.get("oauth_scopes") or []
+            if scopes:
+                if not isinstance(scopes, list) or any(not isinstance(scope, str) for scope in scopes):
+                    raise ConfigError(f"OAuth MCP server {name!r} has invalid scopes")
+                args.extend(["-c", f"{prefix}.scopes={toml_string_array(scopes)}"])
+            client_id = server.get("oauth_client_id")
+            client_env = server.get("oauth_client_id_env_var")
+            if client_env:
+                client_id = os.environ.get(str(client_env))
+                if not client_id:
+                    raise ConfigError(
+                        f"OAuth MCP server {name!r} requires env var to be set: {client_env}"
+                    )
+            if client_id:
+                args.extend([
+                    "-c",
+                    f"{prefix}.oauth.client_id={toml_string(client_id)}",
+                ])
+        elif server.get("bearer_token_env_var"):
+            args.extend([
+                "-c",
+                f"{prefix}.bearer_token_env_var="
+                f"{toml_string(server['bearer_token_env_var'])}",
+            ])
+    if any_oauth:
+        args.extend(["-c", f"mcp_oauth_credentials_store={toml_string('file')}"])
+
+    if skills:
+        skill_root = Path.home() / ".agents" / "skills"
+        selected: dict[str, Path] = {}
+        for skill in skills:
+            if not isinstance(skill, dict):
+                raise ConfigError("invalid skill in host Codex payload")
+            name = skill.get("name")
+            raw_path = skill.get("path")
+            if not isinstance(name, str) or not SKILL_NAME_RE.fullmatch(name):
+                raise ConfigError("invalid skill name in host Codex payload")
+            if not isinstance(raw_path, str):
+                raise ConfigError(f"selected skill {name!r} is missing its path")
+            path = Path(raw_path).expanduser()
+            if path.parent != skill_root or path.name != name:
+                raise ConfigError(
+                    f"selected skill {name!r} is outside the default host registry {skill_root}; "
+                    "host-native skill packs currently require source = \"~/.agents\""
+                )
+            if not (path / "SKILL.md").is_file():
+                raise ConfigError(f"selected skill {name!r} is missing SKILL.md at {path}")
+            selected[name] = path
+
+        inventory: dict[str, Path] = {}
+        if skill_root.is_dir():
+            for candidate in sorted(skill_root.iterdir(), key=lambda item: item.name):
+                if SKILL_NAME_RE.fullmatch(candidate.name) and (candidate / "SKILL.md").is_file():
+                    inventory[candidate.name] = candidate
+        missing = set(selected).difference(inventory)
+        if missing:
+            raise ConfigError(
+                "selected host skill(s) are not discoverable in the default registry: "
+                + ", ".join(sorted(missing))
+            )
+        entries = []
+        for name, path in inventory.items():
+            entries.append(
+                "{path=%s,enabled=%s}"
+                % (toml_string(path / "SKILL.md"), "true" if name in selected else "false")
+            )
+        args.extend(["-c", "skills.config=[" + ",".join(entries) + "]"])
+
+    if any("\n" in arg or "\r" in arg for arg in args):
+        raise ConfigError("host Codex arguments contain an unsafe line break")
+    return args
+
+
+def command_host_codex_args(args: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(args.payload)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid host Codex configuration payload: {exc}") from exc
+    for line in host_codex_arg_lines(
+        payload,
+        Path(normalize_project_path(args.repo)),
+        Path(args.codex_home).expanduser(),
+    ):
+        print(line)
+    return 0
+
+
+def command_validate_codex_layers(args: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(args.payload)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid Codex configuration payload: {exc}") from exc
+    validate_codex_layers(
+        payload,
+        Path(normalize_project_path(args.repo)),
+        Path(args.codex_home).expanduser(),
+    )
+    return 0
 
 
 def effective_exec_state(resolved: ResolvedConfig) -> dict[str, str]:
@@ -1246,6 +1549,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print(f"Repo:   {resolved.repo_path}")
     print(f"Preset: {resolved.preset_name} ({resolved.preset_source})")
     print(f"Tool:   {resolved.tool}")
+    if resolved.codex_profile:
+        print(f"Codex profile: {resolved.codex_profile}")
     if resolved.target != "container":
         print(f"Target: {resolved.target} (no Docker isolation)")
     if resolved.net:
@@ -1297,11 +1602,15 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print("  - repository: read/write, including .git")
     if resolved.tool == "claude":
         print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
+    elif resolved.target == "host":
+        print("  - credentials: resolved host CODEX_HOME used directly (copy_auth is container-only)")
     elif resolved.codex_copy_auth == "0":
         print("  - credentials: host Codex auth.json copy disabled")
     else:
         print("  - credentials: automated host Codex state/auth reuse")
-    if resolved.stdio_mcp or resolved.host_commands:
+    if resolved.target == "host" and resolved.stdio_mcp:
+        print("  - host execution: selected stdio MCP servers run directly on the host")
+    elif resolved.stdio_mcp or resolved.host_commands:
         print("  - host execution: enabled by selected bridge integrations")
     else:
         print("  - host execution: no selected bridge integrations")
@@ -1334,12 +1643,6 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     if resolved.target == "host":
         if resolved.tool != "codex":
             errors.append(f"host execution is only supported for Codex, not {resolved.tool!r}")
-        if resolved.stdio_mcp:
-            errors.append("stdio MCP packs require container execution (target = 'container')")
-        if resolved.remote_mcp:
-            errors.append("remote MCP server configuration requires container execution (target = 'container')")
-        if resolved.skill_mounts:
-            errors.append("skill packs require container execution (target = 'container')")
         if resolved.host_commands:
             errors.append("host command bridges require container execution (target = 'container')")
         if resolved.extra_mounts:
@@ -1371,8 +1674,25 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         codex_bin = shutil.which("codex")
         if codex_bin is None:
             errors.append("codex command not found in PATH (required for host execution)")
+        try:
+            host_codex_arg_lines(
+                host_codex_payload_for(resolved),
+                Path(resolved.repo_path),
+                Path(resolved.host_codex_dir or (Path.home() / ".codex")),
+            )
+        except ConfigError as exc:
+            errors.append(str(exc))
     if resolved.target == "container" and shutil.which("docker") is None:
         errors.append("docker command not found")
+    if resolved.tool == "codex" and resolved.target == "container":
+        try:
+            validate_codex_layers(
+                host_codex_payload_for(resolved),
+                Path(resolved.repo_path),
+                Path(resolved.host_codex_dir or (Path.home() / ".codex")),
+            )
+        except ConfigError as exc:
+            errors.append(str(exc))
     if resolved.tool == "claude" and resolved.claude_auth == "api-key" and not os.environ.get("ANTHROPIC_API_KEY"):
         errors.append("ANTHROPIC_API_KEY is required for Claude api-key auth")
     if resolved.tool == "claude" and resolved.claude_auth == "bedrock":
@@ -2133,6 +2453,7 @@ def ui_summary(data: dict[str, Any], config_path: Path, repo: str) -> dict[str, 
             "source": resolved.preset_source,
             "tool": resolved.tool,
             "target": eff["target"],
+            "codex_profile": resolved.codex_profile,
             "auth": resolved.auth_name,
             "identity": resolved.identity_name,
             "net": eff["net"],
@@ -2298,6 +2619,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("default-tool", help=argparse.SUPPRESS)
     p.set_defaults(func=command_default_tool)
+
+    p = sub.add_parser("host-codex-args", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--codex-home", required=True)
+    p.add_argument("--payload", required=True)
+    p.set_defaults(func=command_host_codex_args)
+
+    p = sub.add_parser("validate-codex-layers", help=argparse.SUPPRESS)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--codex-home", required=True)
+    p.add_argument("--payload", required=True)
+    p.set_defaults(func=command_validate_codex_layers)
 
     p = sub.add_parser("init", help="Create a starter central config")
     p.add_argument("--force", action="store_true")

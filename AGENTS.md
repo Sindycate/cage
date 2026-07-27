@@ -141,6 +141,9 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   `cage-config.py`; cancellation is a state no-op. If curses is unavailable,
   Cage falls back to the legacy launch-only numbered prompt
 - Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
+- Codex presets may select a native `$CODEX_HOME/<name>.config.toml` layer with
+  `codex_profile = "<name>"`; Cage validates the file and forwards
+  `--profile <name>` to either execution target
 - TUI config mutations are typed, dependency-aware, concurrency-checked, and
   atomic. They preserve untouched TOML blocks, source permissions, and symlink
   targets; keep ten private backups under the config directory; and never load
@@ -148,6 +151,15 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
+- Presets default to `target = "container"` and may opt into Codex-only
+  `target = "host"` (also available as the launch-only `--host` override).
+  The host branch runs before Docker/image/volume/bridge/state-sync work,
+  provides no Docker or Cage network boundary, and rejects `gate`/`off`.
+  Git/SSH/GitHub identity remains process-scoped. Selected HTTP/stdio MCP packs
+  become process-local Codex overrides, with stdio executables pinned outside
+  the writable repository. Selected skill packs become a process-local filter
+  only for the default `~/.agents/skills` registry. Host commands, extra
+  mounts, custom agent registries, and SSH aliases still fail closed
 - Runs `docker run` with `cap_drop ALL` followed by the capabilities currently needed for UID/GID remapping; AppArmor and seccomp are unconfined for bubblewrap compatibility, and `no-new-privileges` is not currently set. Treat the container as accidental-damage isolation rather than a hostile-code boundary.
   - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the main direct writable host mount. Explicit read-write extra mounts and selected host-side state synchronization can also write outside it. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
@@ -339,12 +351,18 @@ uses the URL and optional client ID; shared Codex fields such as
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
 - Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
+- `codex_profile` is Codex-only, uses letters/digits/hyphens/underscores, and
+  names a separate native file under the resolved `CODEX_HOME`. Cage never
+  copies a profile into a different host identity or rewrites it
 - Interactive mode is mutually exclusive with `--preset`, requires a TTY, and
   uses the config-authoring TUI. Direct `cage PATH` launches remain unchanged
-- Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. Stdio MCP servers still run on the host through the MCP bridge; HTTP MCP servers are generated as tool-native container config
-- Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. When `skill_packs` are selected, cage mounts and copies only those skills; when no `skill_packs` are selected, it falls back to copying the whole `host_agents_dir`
+- Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. For container targets, stdio MCP servers run on the host through the authenticated MCP bridge and HTTP MCP servers become tool-native container config. For host targets, both become process-local Codex config overrides; stdio commands execute directly as pinned host processes. A selected name already defined in a base/profile/project Codex layer fails closed
+- Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
 - OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. cage also syncs Codex MCP OAuth `.credentials.json` between host and volume before launch and after exit to preserve rotated refresh tokens. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
-- `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`, profiles, folder mappings, or repo `.cage.conf`
+- `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`,
+  legacy Cage profile files, folder mappings, or repo `.cage.conf`; native
+  Codex profile files selected by `codex_profile` are a separate supported
+  Codex mechanism
 - Host `~/.claude` is mounted **read-only** — entrypoint must copy/symlink, never write back
 - `~/.claude.json` lives at `$HOME/.claude.json` (outside `$HOME/.claude/`), so the entrypoint symlinks it into the volume. The host file is also mounted read-only at `/host-claude-json`; the entrypoint copies **only** its `mcpServers` key into the volume copy (with `${VAR}` expansion), so user-scope MCP servers (e.g. Linear) work in-container while onboarding/account/history stay isolated. This is also where stdio-bridge servers (`MCP_SERVERS`) land — Claude reads `mcpServers` from here, not `settings.json`
 - **Session history sync** (Claude, default on): cage mirrors the entire `~/.claude/projects/-<repo-slug>/` subtree between host and per-repo Docker volume on entry/exit — session JSONLs, `memory/` (persistent memory), per-session `subagents/` and `tool-results/`. All host-side writes happen from the host cage script running as the host user; the container's read-only `/host-claude` mount is unchanged. Merge rules: `*.jsonl` uses size-based "larger wins" (append-only invariant); all other files use mtime-based "newer wins". First-run migration copies the pre-existing `-workspace-<name>/` subtree into the new slug with `cwd` rewritten in every JSONL (including `*/subagents/*.jsonl`), leaving that old session-history dir intact as a fallback. Disable with `session_sync = false` in central config defaults or preset
