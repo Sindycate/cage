@@ -115,7 +115,7 @@ PRESET_KEYS = {
     "yolo",
 }
 
-VALID_EXEC_TARGETS = {"container", "host"}
+VALID_EXEC_TARGETS = {"container", "desktop", "host"}
 
 EDITABLE_COLLECTIONS = {
     "auth",
@@ -910,9 +910,9 @@ def resolve_config(
             f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
         )
     resolved.target = target
-    if target == "host" and tool != "codex":
+    if target in {"host", "desktop"} and tool != "codex":
         raise ConfigError(
-            f"preset {preset_name!r}: host execution is only supported for Codex, not {tool!r}"
+            f"preset {preset_name!r}: {target} execution is only supported for Codex, not {tool!r}"
         )
     codex_profile = preset.get("codex_profile", "")
     if not isinstance(codex_profile, str):
@@ -1181,6 +1181,7 @@ def emit_shell(resolved: ResolvedConfig) -> None:
     host_codex_payload = json.dumps(host_codex_payload_for(resolved), separators=(",", ":"))
     assignments = {
         "CAGE_PRESET": resolved.preset_name,
+        "CAGE_PRESET_SOURCE": resolved.preset_source,
         "CAGE_TOOL_RESOLVED": resolved.tool,
         "CAGE_NET_MODE": resolved.net,
         "CAGE_REMOTE_MCP_SERVERS": remote_json if resolved.remote_mcp else "",
@@ -1551,8 +1552,10 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print(f"Tool:   {resolved.tool}")
     if resolved.codex_profile:
         print(f"Codex profile: {resolved.codex_profile}")
-    if resolved.target != "container":
+    if resolved.target == "host":
         print(f"Target: {resolved.target} (no Docker isolation)")
+    elif resolved.target == "desktop":
+        print("Target: desktop (persistent Cage container through SSH)")
     if resolved.net:
         print(f"Net:    {resolved.net}")
     if resolved.yolo:
@@ -1599,6 +1602,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     print("Capabilities:")
     if resolved.target == "host":
         print("  - execution: host-native (NO Docker isolation boundary)")
+    elif resolved.target == "desktop":
+        print("  - execution: persistent Cage container reached through managed SSH")
     print("  - repository: read/write, including .git")
     if resolved.tool == "claude":
         print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
@@ -1682,9 +1687,29 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             )
         except ConfigError as exc:
             errors.append(str(exc))
-    if resolved.target == "container" and shutil.which("docker") is None:
+    if resolved.target in {"container", "desktop"} and shutil.which("docker") is None:
         errors.append("docker command not found")
-    if resolved.tool == "codex" and resolved.target == "container":
+    if resolved.target == "desktop":
+        if resolved.tool != "codex":
+            errors.append(
+                f"desktop execution is only supported for Codex, not {resolved.tool!r}"
+            )
+        if sys.platform != "darwin":
+            errors.append("desktop execution is currently supported only on macOS")
+        if not Path("/Applications/ChatGPT.app").is_dir() and not Path(
+            "/Applications/Codex.app"
+        ).is_dir():
+            warnings.append("ChatGPT desktop app was not found under /Applications")
+        configured_root = os.environ.get("CAGE_CONFIG_DIR")
+        if configured_root:
+            setup = Path(configured_root).expanduser() / "desktop" / "setup.json"
+        else:
+            setup = Path(
+                os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+            ) / "cage" / "desktop" / "setup.json"
+        if not setup.is_file():
+            warnings.append("desktop SSH setup is missing; run `cage desktop setup`")
+    if resolved.tool == "codex" and resolved.target in {"container", "desktop"}:
         try:
             validate_codex_layers(
                 host_codex_payload_for(resolved),

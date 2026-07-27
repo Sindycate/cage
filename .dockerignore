@@ -3,5 +3,6 @@
 !Dockerfile.codex
 !entrypoint.sh
 !entrypoint-codex.sh
+!codex-remote.py
 !mcp-relay
 !host-cmd-relay

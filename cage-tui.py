@@ -57,6 +57,14 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
 CODEX_PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def execution_target_label(target: str) -> str:
+    if target == "host":
+        return "Host CLI — no Docker boundary"
+    if target == "desktop":
+        return "Desktop via Cage container"
+    return "Container"
+
+
 class UiError(Exception):
     pass
 
@@ -178,6 +186,21 @@ class Controller:
         ], check=False)
         return completed.returncode
 
+    def run_desktop_action(self, action: str, preset: str) -> int:
+        launcher = self.backend.with_name("cage")
+        completed = subprocess.run(
+            [
+                str(launcher),
+                "desktop",
+                action,
+                "--preset",
+                preset,
+                str(self.repo),
+            ],
+            check=False,
+        )
+        return completed.returncode
+
     def effective_preset(self) -> tuple[str, dict[str, Any]]:
         effective = self.snapshot.get("effective", {})
         name = effective.get("preset", "") if isinstance(effective, dict) else ""
@@ -232,6 +255,13 @@ class Controller:
                     "Stdio MCP servers execute directly with host-user authority: "
                     + ", ".join(stdio_names)
                 )
+        elif target == "desktop":
+            risks.append(
+                "A repository- and preset-specific container remains running until explicitly stopped."
+            )
+            risks.append(
+                "Cage registers a managed SSH alias and dedicated key for ChatGPT Desktop."
+            )
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
         if net == "open" and target != "host":
@@ -371,6 +401,17 @@ class Controller:
                     warnings.append(
                         "GitHub authentication is enabled but neither a token nor the gh command is available."
                     )
+        elif target == "desktop":
+            if (self.tool_override or preset.get("tool", "codex")) != "codex":
+                warnings.append("Desktop execution is only supported for Codex.")
+            if sys.platform != "darwin":
+                warnings.append("Desktop execution is currently supported only on macOS.")
+            if not Path("/Applications/ChatGPT.app").is_dir() and not Path(
+                "/Applications/Codex.app"
+            ).is_dir():
+                warnings.append("ChatGPT Desktop was not found under /Applications.")
+            if shutil.which("docker") is None:
+                warnings.append("docker command not found (required for Desktop execution).")
         elif shutil.which("docker") is None:
             warnings.append("Docker is not available in PATH.")
         required: set[str] = set(preset.get("env", []))
@@ -728,7 +769,7 @@ class CursesView:
                 else "off"
             )
             target_value = self.controller.target_override or value.get("target", "container")
-            target_label = "Host CLI — no Docker boundary" if target_value == "host" else "Container"
+            target_label = execution_target_label(str(target_value))
             if self.controller.target_override:
                 target_label += " (command override)"
             rows = [
@@ -770,7 +811,7 @@ class CursesView:
                     if selected == "claude":
                         value.pop("skill_packs", None)
                         value.pop("codex_profile", None)
-                        value.pop("target", None)  # host target is Codex-only
+                        value.pop("target", None)  # non-container targets are Codex-only
             elif choice == "profile":
                 if value.get("tool", "codex") != "codex":
                     self.message = "Named Codex profiles are only supported for Codex."
@@ -795,11 +836,11 @@ class CursesView:
                     self.message = f"Execution target is fixed to {self.controller.target_override} by the command."
                     continue
                 if value.get("tool", "codex") != "codex":
-                    self.message = "Host execution is only supported for Codex."
+                    self.message = "Host and Desktop execution are only supported for Codex."
                     continue
                 selected = self.select_value(
                     "Execution target",
-                    ["container", "host"],
+                    ["container", "desktop", "host"],
                     str(value.get("target", "container")),
                     False,
                 )
@@ -1039,7 +1080,7 @@ class CursesView:
             else "off"
         )
         target = preset.get("target", "container")
-        target_label = "Host CLI — no Docker boundary" if target == "host" else "Container"
+        target_label = execution_target_label(str(target))
         lines = [
             f"Tool: {preset.get('tool', 'codex')}  Execution: {target_label}",
             f"Codex profile: {preset.get('codex_profile', 'base config')}",
@@ -1051,11 +1092,23 @@ class CursesView:
         return lines
 
     def launch_actions(self, preset: dict[str, Any]) -> bool:
-        choice = self.menu("Use configuration", [
+        choices = [
             ("once", "Launch once — discard these customizations after exit"),
             ("remember", "Remember for this exact project — save and launch"),
             ("save", "Save named reusable configuration — project mapping unchanged"),
-        ], details=self._preset_summary(preset), initial_key="remember")
+        ]
+        if hasattr(self.controller, "effective_exec_state"):
+            target, _yolo, _net = self.controller.effective_exec_state(preset)
+        else:
+            target = str(preset.get("target", "container"))
+        if target == "desktop":
+            choices = [choice for choice in choices if choice[0] != "once"]
+        choice = self.menu(
+            "Use configuration",
+            choices,
+            details=self._preset_summary(preset),
+            initial_key="remember",
+        )
         if not choice:
             return False
         name = ""
@@ -1289,7 +1342,7 @@ class CursesView:
                 shown_target, shown_yolo, shown_net = self.controller.effective_exec_state(
                     effective_value
                 )
-                target_label = "Host CLI — no Docker boundary" if shown_target == "host" else "Container"
+                target_label = execution_target_label(shown_target)
                 if self.controller.target_override:
                     target_label += " (command override)"
                 details = [
@@ -1314,6 +1367,14 @@ class CursesView:
                 not self.controller.tool_override or effective.get("tool") == self.controller.tool_override
             ):
                 options.append(("launch", "Launch with this configuration"))
+                if shown_target == "desktop":
+                    options.extend(
+                        [
+                            ("desktop-restart", "Restart Desktop target"),
+                            ("desktop-status", "Show Desktop target status"),
+                            ("desktop-stop", "Stop Desktop target (preserve state)"),
+                        ]
+                    )
             options += [("custom", "Customize launch"), ("manage", "Manage saved configuration"), ("quit", "Quit without launching")]
             choice = self.menu("Launch", options, details, initial_key=cursor)
             if choice in ("", "quit"):
@@ -1321,6 +1382,19 @@ class CursesView:
             cursor = choice
             if choice == "manage":
                 self.manage()
+            elif choice.startswith("desktop-"):
+                name, _preset = self.controller.effective_preset()
+                import curses
+                curses.endwin()
+                status = self.controller.run_desktop_action(
+                    choice.removeprefix("desktop-"), name
+                )
+                self.screen.refresh()
+                self.message = (
+                    "Desktop action completed."
+                    if status == 0
+                    else "Desktop action failed; see terminal output."
+                )
             elif choice == "custom":
                 _, seed = self.controller.effective_preset()
                 edited = self.edit_preset(seed or {"tool": "codex"})
@@ -1335,7 +1409,7 @@ class CursesView:
                     else:
                         preset["target"] = self.controller.target_override
                 if self.risk_review(preset, action=f"Launch saved configuration {name!r}."):
-                    if self.controller.target_override:
+                    if self.controller.target_override and self.controller.target_override != "desktop":
                         # Write a launch-once result with the overridden target
                         self.controller.write_result({"action": "launch_once", "preset": preset})
                     else:
@@ -1352,7 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--net-override", choices=["open", "gate", "off"], default="")
     parser.add_argument("--yolo-override", choices=["on", "off"], default="")
     parser.add_argument("--tool-override", choices=["codex", "claude"], default="")
-    parser.add_argument("--target-override", choices=["container", "host"], default="")
+    parser.add_argument("--target-override", choices=["container", "desktop", "host"], default="")
     args = parser.parse_args(argv)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("curses UI requires a terminal", file=sys.stderr)

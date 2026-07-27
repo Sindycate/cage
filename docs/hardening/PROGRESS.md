@@ -3,6 +3,69 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-27 — v0.26.0 ChatGPT Desktop SSH target
+
+Implemented a macOS-only persistent `desktop` execution target using ChatGPT
+Desktop's documented SSH-host workflow. A detached per-target supervisor owns
+the ordinary Cage launcher and therefore Netgate, MCP/host-command bridges,
+OAuth reconciliation, Docker cleanup, a private control socket, and the
+container heartbeat. Repository plus preset deterministically selects a
+dedicated Codex volume, SSH client key, persistent container host key, alias,
+and known-hosts file.
+
+The generated OpenSSH block points only at the installed Cage helper through
+`ProxyCommand`; there is no TCP listener. Each connection runs `sshd -i` in the
+labeled container with passwords, root login, forwarding, tunnels, user
+environment files, and user rc disabled. The remote Codex launcher reads only
+selected provider and bridge variables from a private ephemeral `/run` file
+and prepends the selected native profile and yolo setting to `codex
+app-server`.
+
+Local release-candidate evidence:
+
+- Python 3.11 and 3.12 each pass the complete suite (`258 passed, 7 skipped`);
+  all seven opt-in real-Docker tests pass, including SSH/app-server profile,
+  provider, yolo, MCP, host-command, UID, state-preservation, and mount-safety
+  coverage;
+- the installed source build registers one idempotent top-level SSH Include,
+  resolves the generated alias through the absolute installed helper, keeps
+  OpenSSH listener-free, publishes no ports, and limits the Desktop-only
+  additional capability to `SYS_CHROOT`;
+- real SSH opens `/Users/sshumilov/cage`, reads Git state, performs and removes
+  a repository write sentinel, keeps unrelated host paths unavailable, and
+  preserves the volume plus pinned host key across restart;
+- the `codex-qwen-token` target completes real requests as
+  `qwen3.8-max-preview` through Netgate, and the same target remains reachable
+  in `off`, `open`, and restored `gate` network modes;
+- provider/proxy/bridge values are absent from Docker `Config.Env`, PID 1,
+  Cage metadata/log/SSH files, and the persistent volume; the short-lived host
+  handoff is removed after readiness and the allowlisted tmpfs file is
+  mode `0600`;
+- shell/Python syntax, Compose configuration, staged installer tests, archive
+  contents, deterministic package bytes/checksums, installed-source byte
+  equality, and `git diff --check` pass.
+
+Installed ChatGPT validation passed with the maintainer:
+
+- ChatGPT discovered `cage-codex-qwen-token-cage-c7827215` through the
+  generated `ProxyCommand` alias and added `/Users/sshumilov/cage` as a remote
+  project;
+- the remote task reported the expected working directory and Git state,
+  created and removed a repository write sentinel, and left no unrelated
+  changes;
+- the persisted session records `qwen3.8-max-preview`,
+  `qwen-token-personal`, `approval_policy = "on-request"`, and
+  `approvals_reviewer = "auto_review"`; its initial bubblewrap loopback setup
+  failed explicitly and automatic review retried the command with escalation
+  successfully;
+- killing the verified detached supervisor caused the container to remove
+  itself after heartbeat expiry with no remaining Netgate or target process.
+  Cage detected stale metadata and recovered the same alias, pinned host key,
+  volume, and session history;
+- explicit `stop` disconnected SSH, removed the target container and processes,
+  and preserved the alias, client key, host-key pin, volume, and history. A
+  final start restored the target to `ready`.
+
 ## 2026-07-27 — v0.25.1 Codex profiles and host integration reuse
 
 Added native Codex profile selection to Cage presets. Both execution targets

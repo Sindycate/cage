@@ -13,10 +13,51 @@ fi
 
 # Ensure home dir and volume are owned by the (possibly remapped) user
 chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true
+gosu "$TARGET_USER" chmod 755 "$HOME"
 
 CODEX_DIR="$HOME/.codex"
 mkdir -p "$CODEX_DIR"
-chmod 700 "$CODEX_DIR" 2>/dev/null || true
+gosu "$TARGET_USER" chmod 700 "$CODEX_DIR"
+
+# Desktop secrets arrive through a private, short-lived bind source instead of
+# Docker Config.Env. Import them into this process before MCP/profile
+# reconciliation; the remote launcher later receives only the allowlisted
+# subset through user-private tmpfs state.
+if [ "${CAGE_DESKTOP_REMOTE:-0}" = "1" ]; then
+    if [ ! -f /cage-desktop/runtime-env.json ] || \
+       [ -L /cage-desktop/runtime-env.json ]; then
+        echo "cage: desktop runtime environment handoff is missing or unsafe" >&2
+        exit 1
+    fi
+    python3 -I - > /run/cage-desktop-env.bin <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+path = "/cage-desktop/runtime-env.json"
+info = os.lstat(path)
+if not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024 * 1024:
+    raise SystemExit("cage: unsafe desktop runtime environment handoff")
+with open(path, "r", encoding="utf-8") as handle:
+    values = json.load(handle)
+if not isinstance(values, dict):
+    raise SystemExit("cage: invalid desktop runtime environment handoff")
+for name, value in values.items():
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise SystemExit("cage: invalid desktop runtime environment name")
+    if not isinstance(value, str) or "\0" in value:
+        raise SystemExit("cage: invalid desktop runtime environment value")
+    sys.stdout.buffer.write(name.encode() + b"\0" + value.encode() + b"\0")
+PY
+    chmod 600 /run/cage-desktop-env.bin
+    while IFS= read -r -d '' _runtime_name && \
+          IFS= read -r -d '' _runtime_value; do
+        export "$_runtime_name=$_runtime_value"
+    done < /run/cage-desktop-env.bin
+    rm -f /run/cage-desktop-env.bin
+fi
 
 # Use WORKSPACE_DIR so each project gets a unique identity
 WORK_DIR="${WORKSPACE_DIR:-/workspace}"
@@ -375,7 +416,10 @@ if os.environ.get('CAGE_MCP_SERVERS'):
             'kind': 'stdio',
             'command': 'mcp-relay',
             'args': [name],
-            'env': {
+            # Desktop app-server inherits these values from the private /run
+            # handoff, so do not persist per-launch bridge credentials in the
+            # volume-owned Codex config.
+            'env': {} if os.environ.get('CAGE_DESKTOP_REMOTE') == '1' else {
                 'MCP_BRIDGE_HOST': bridge_host,
                 port_env: bridge_port,
                 'MCP_BRIDGE_TOKEN': bridge_token,
@@ -522,25 +566,29 @@ if [ "${CAGE_YOLO:-0}" = "1" ]; then
 fi
 
 # Prevent git "dubious ownership" errors from UID mismatch
-git config --global --add safe.directory "$WORK_DIR"
+gosu "$TARGET_USER" git config --global --add safe.directory "$WORK_DIR"
 
 # Git identity from resolved cage config
-[ -n "${GIT_USER_NAME:-}" ]  && git config --global user.name "$GIT_USER_NAME"
-[ -n "${GIT_USER_EMAIL:-}" ] && git config --global user.email "$GIT_USER_EMAIL"
+[ -n "${GIT_USER_NAME:-}" ]  && gosu "$TARGET_USER" git config --global user.name "$GIT_USER_NAME"
+[ -n "${GIT_USER_EMAIL:-}" ] && gosu "$TARGET_USER" git config --global user.email "$GIT_USER_EMAIL"
 
 # SSH alias resolution (e.g. SSH_HOST="github-zse=github.com")
 if [ -d "$HOME/.ssh" ]; then
-    chmod 700 "$HOME/.ssh" 2>/dev/null || true
+    gosu "$TARGET_USER" chmod 700 "$HOME/.ssh"
     if [ -n "${SSH_HOST:-}" ]; then
         alias_name="${SSH_HOST%%=*}"
         real_host="${SSH_HOST#*=}"
         printf 'Host %s\n    Hostname %s\n' "$alias_name" "$real_host" > "$HOME/.ssh/config"
-        chmod 600 "$HOME/.ssh/config"
+        chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME/.ssh/config"
+        gosu "$TARGET_USER" chmod 600 "$HOME/.ssh/config"
     fi
 fi
 
 # GitHub CLI: copy host config (non-auth settings like git_protocol, username)
 if [ -d /host-gh ]; then
+    mkdir -p "${HOME}/.config"
+    chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "${HOME}/.config"
+    gosu "$TARGET_USER" chmod 700 "${HOME}/.config"
     GH_CONFIG_DIR="${HOME}/.config/gh"
     mkdir -p "$GH_CONFIG_DIR"
     cp -rf /host-gh/* "$GH_CONFIG_DIR/" 2>/dev/null || true
@@ -559,6 +607,149 @@ exec host-cmd-relay $_name "\$@"
 SHIM_EOF
         chmod 755 "$_shim"
     done
+fi
+
+# Desktop targets keep this container alive while ChatGPT starts a fresh
+# `codex app-server` through an SSH connection.  The SSH endpoint is never a
+# listener: Cage invokes sshd in inetd mode through a host-side ProxyCommand.
+if [ "${CAGE_DESKTOP_REMOTE:-0}" = "1" ]; then
+    if [ ! -f /cage-desktop/client.pub ] || [ -L /cage-desktop/client.pub ]; then
+        echo "cage: desktop client public key is missing or unsafe" >&2
+        exit 1
+    fi
+    if [ ! -f /cage-desktop/heartbeat ] || [ -L /cage-desktop/heartbeat ]; then
+        echo "cage: desktop supervisor heartbeat is missing or unsafe" >&2
+        exit 1
+    fi
+
+    # Ubuntu's useradd leaves passwordless service accounts locked, and sshd
+    # rejects public keys for a locked account before consulting
+    # AuthorizedKeysFile. Remove only that lock; the server configuration below
+    # still disables every password path and requires public-key authentication.
+    passwd -d "$TARGET_USER" >/dev/null
+
+    REMOTE_STATE="$CODEX_DIR/.cage-desktop"
+    mkdir -p "$REMOTE_STATE" /run/cage /run/cage-user /run/sshd
+    chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$REMOTE_STATE"
+    # REMOTE_STATE persists across launches and is therefore normally owned by
+    # the remapped user already.  Root deliberately lacks CAP_FOWNER, so mode
+    # normalization must happen after chown and as the directory owner.
+    gosu "$TARGET_USER" chmod 700 "$REMOTE_STATE"
+    # Root-owned SSH control state is traversable but not writable by the
+    # remote user. Provider values live in a separate user-private directory.
+    chmod 755 /run/cage
+    chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" /run/cage-user
+    gosu "$TARGET_USER" chmod 700 /run/cage-user
+    chmod 755 /run/sshd
+    if [ ! -f "$REMOTE_STATE/ssh_host_ed25519_key" ]; then
+        if [ -e "$REMOTE_STATE/ssh_host_ed25519_key" ] || [ -e "$REMOTE_STATE/ssh_host_ed25519_key.pub" ]; then
+            echo "cage: refusing unsafe desktop SSH host-key state" >&2
+            exit 1
+        fi
+        gosu "$TARGET_USER" ssh-keygen -q -t ed25519 -N "" \
+            -f "$REMOTE_STATE/ssh_host_ed25519_key"
+    fi
+    if [ -L "$REMOTE_STATE/ssh_host_ed25519_key" ] || \
+       [ -L "$REMOTE_STATE/ssh_host_ed25519_key.pub" ] || \
+       [ ! -f "$REMOTE_STATE/ssh_host_ed25519_key" ] || \
+       [ ! -f "$REMOTE_STATE/ssh_host_ed25519_key.pub" ]; then
+        echo "cage: refusing unsafe desktop SSH host key" >&2
+        exit 1
+    fi
+    # The container intentionally drops CAP_FOWNER.  The persistent host key
+    # belongs to the remapped Codex user, so change its mode as that owner
+    # rather than relying on root's normally implicit chmod privilege.
+    gosu "$TARGET_USER" chmod 600 "$REMOTE_STATE/ssh_host_ed25519_key"
+    gosu "$TARGET_USER" chmod 644 "$REMOTE_STATE/ssh_host_ed25519_key.pub"
+
+    install -m 644 /cage-desktop/client.pub /run/cage/authorized_keys
+
+    python3 -I - <<'PY'
+import json
+import os
+import re
+
+name_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+fixed = {
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GIT_SSH_COMMAND",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "OPENAI_API_KEY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+}
+selected = set(filter(None, os.environ.get("CAGE_DESKTOP_ENV_NAMES", "").split()))
+for name in os.environ:
+    if name.startswith(("MCP_BRIDGE_PORT_", "HOST_CMD_BRIDGE_PORT_")):
+        selected.add(name)
+selected.update(
+    name for name in (
+        "MCP_BRIDGE_HOST",
+        "MCP_BRIDGE_TOKEN",
+        "HOST_CMD_BRIDGE_HOST",
+        "HOST_CMD_BRIDGE_TOKEN",
+    )
+    if name in os.environ
+)
+selected.update(fixed)
+if any(not name_re.fullmatch(name) for name in selected):
+    raise SystemExit("cage: invalid desktop provider environment name")
+values = {name: os.environ[name] for name in sorted(selected) if name in os.environ}
+with open("/run/cage-user/remote-env.json", "x", encoding="utf-8") as handle:
+    json.dump(values, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+
+profile = os.environ.get("CAGE_CODEX_PROFILE", "")
+if profile and not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
+    raise SystemExit("cage: invalid desktop Codex profile")
+launch = {"profile": profile, "yolo": os.environ.get("CAGE_YOLO", "0") == "1"}
+with open("/run/cage-user/remote-launch.json", "x", encoding="utf-8") as handle:
+    json.dump(launch, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+    chmod 600 /run/cage-user/remote-env.json /run/cage-user/remote-launch.json
+    chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" \
+        /run/cage-user/remote-env.json /run/cage-user/remote-launch.json
+
+    cat > /run/cage/sshd_config <<EOF
+HostKey $REMOTE_STATE/ssh_host_ed25519_key
+AuthorizedKeysFile /run/cage/authorized_keys
+AllowUsers $TARGET_USER
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AuthenticationMethods publickey
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+DisableForwarding yes
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+PermitUserEnvironment no
+PermitUserRC no
+StrictModes yes
+UsePAM no
+PrintMotd no
+LogLevel ERROR
+SetEnv PATH=/usr/local/bin:/home/codex/.npm-global/bin:/home/codex/.local/bin:/usr/bin:/bin
+EOF
+    chmod 600 /run/cage/sshd_config
+
+    cd "$WORK_DIR"
+    exec gosu "$TARGET_USER" env -i \
+        "HOME=$HOME" \
+        "LANG=${LANG:-C.UTF-8}" \
+        "LOGNAME=$TARGET_USER" \
+        "PATH=/usr/local/bin:/home/codex/.npm-global/bin:/home/codex/.local/bin:/usr/bin:/bin" \
+        "SHELL=/bin/bash" \
+        "USER=$TARGET_USER" \
+        /usr/local/bin/codex --cage-wait /cage-desktop/heartbeat
 fi
 
 cd "$WORK_DIR"

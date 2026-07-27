@@ -111,12 +111,43 @@ repository. Host execution:
 
 Host execution is supported only for Codex. Claude host execution is rejected.
 
-This implements host-native Codex CLI only. ChatGPT desktop can open a
-workspace through the official `codex app PATH` command, but Codex does not
-document a desktop named-profile launch selector. Cage does not rely on
-process-local `CODEX_HOME` tricks to claim separate desktop identities. A
-desktop UI backed by container execution would require a supported remote
-app-server/SSH design and remains a future milestone.
+## ChatGPT Desktop execution (target = "desktop")
+
+The macOS-only Desktop target keeps ChatGPT's UI on the host while its Codex
+app-server and repository tools run in a persistent Cage container through the
+official SSH-host workflow.
+
+- The transport has no TCP listener or published app-server port. OpenSSH uses
+  a concrete managed alias whose `ProxyCommand` runs the absolute installed
+  Cage helper; that helper validates the target label and invokes `sshd -i`
+  through `docker exec`.
+- Each canonical repository plus preset receives a separate Codex volume,
+  client key, persistent container host key, known-hosts file, alias, log, and
+  private Unix control socket.
+- Password, keyboard-interactive and root login, forwarding, tunnels, public
+  listeners, user environment files, and user rc are disabled. The container
+  host key is pinned and unexpected client or host key replacement fails
+  closed.
+- Desktop containers add `SYS_CHROOT` solely for OpenSSH's per-connection
+  privilege-separation sandbox. Other Cage targets retain the existing
+  capability set, and `CAP_FOWNER` remains disabled.
+- Provider values, authenticated proxy URLs, and bridge credentials are
+  removed from Docker `Config.Env`, transferred through a short-lived private
+  host bind, and written only to a user-readable tmpfs-backed `/run` file.
+  The handoff is unlinked after readiness; PID 1 is launched with a scrubbed
+  environment. SSH configuration, Docker metadata, Cage target metadata,
+  supervisor logs, and the Desktop volume contain no such secret values.
+- The supervisor owns the ordinary Cage child process, Netgate, selected
+  bridges, OAuth reconciliation, heartbeat, and cleanup. Loss of the
+  supervisor or a required bridge stops the target; stale labeled containers
+  are recoverable without deleting the volume.
+- `stop` preserves keys, alias, volume, and history. `remove` requires explicit
+  confirmation before deleting them.
+
+This preserves Cage's existing container threat model; it does not turn the
+host ChatGPT application itself into a containerized process. The repository,
+explicit read-write mounts, selected credentials, MCP/host-command bridges,
+and external connector actions retain their documented authority.
 
 ## Writable repository state
 

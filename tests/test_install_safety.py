@@ -37,6 +37,7 @@ class InstallerSafetyTests(unittest.TestCase):
         required = [
             "cage",
             "cage-config.py",
+            "cage-desktop.py",
             "cage-tui.py",
             "cage-netgate.sh",
             "netgate-proxy.py",
@@ -44,6 +45,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "mcp-relay",
             "host-cmd-bridge.py",
             "host-cmd-relay",
+            "codex-remote.py",
         ]
         for name in required:
             path = release_root / name
@@ -305,6 +307,8 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertFalse((install_dir / ".cage-install").is_symlink())
             self.assertTrue((install_dir / "cage-tui.py").is_file())
             self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
+            self.assertTrue(os.access(install_dir / "cage-desktop.py", os.X_OK))
+            self.assertTrue(os.access(install_dir / "codex-remote.py", os.X_OK))
             self.assertEqual(
                 subprocess.check_output(
                     [str(install_dir / "cage"), "--version"], text=True

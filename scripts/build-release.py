@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_FILES = (
     "cage",
     "cage-config.py",
+    "cage-desktop.py",
     "cage-tui.py",
     "cage-netgate.sh",
     "netgate-proxy.py",
@@ -24,6 +25,7 @@ PAYLOAD_FILES = (
     "mcp-relay",
     "host-cmd-bridge.py",
     "host-cmd-relay",
+    "codex-remote.py",
     "docker-compose.yml",
     "Dockerfile",
     "Dockerfile.codex",

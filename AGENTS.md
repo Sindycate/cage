@@ -152,7 +152,8 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Presets default to `target = "container"` and may opt into Codex-only
-  `target = "host"` (also available as the launch-only `--host` override).
+  `target = "host"` or `target = "desktop"` (also available as launch-only
+  `--host`/`--desktop` overrides).
   The host branch runs before Docker/image/volume/bridge/state-sync work,
   provides no Docker or Cage network boundary, and rejects `gate`/`off`.
   Git/SSH/GitHub identity remains process-scoped. Selected HTTP/stdio MCP packs
@@ -160,6 +161,19 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   the writable repository. Selected skill packs become a process-local filter
   only for the default `~/.agents/skills` registry. Host commands, extra
   mounts, custom agent registries, and SSH aliases still fail closed
+- The macOS-only Desktop branch delegates to `cage-desktop.py`. A detached
+  repository/preset-specific supervisor owns the ordinary container launcher,
+  Netgate and selected bridges, OAuth reconciliation, a private Unix control
+  socket, heartbeat, and cleanup. Cage manages one top-level SSH Include and
+  concrete aliases whose installed-helper `ProxyCommand` runs one `sshd -i`
+  connection through `docker exec`; there is no TCP listener. Each target has
+  a separate Codex volume, client key, persistent container host key, and
+  pinned known-hosts file. `stop` preserves state; confirmed `remove` deletes
+  the alias, keys, metadata, and volume. Provider/proxy/bridge secrets bypass
+  Docker `Config.Env` through a short-lived private handoff, live only in
+  tmpfs-backed `/run` for remote app-server processes, and are scrubbed from
+  the persistent watchdog. Desktop alone adds `SYS_CHROOT` for OpenSSH
+  privilege separation; `CAP_FOWNER` remains absent
 - Runs `docker run` with `cap_drop ALL` followed by the capabilities currently needed for UID/GID remapping; AppArmor and seccomp are unconfined for bubblewrap compatibility, and `no-new-privileges` is not currently set. Treat the container as accidental-damage isolation rather than a hostile-code boundary.
   - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the main direct writable host mount. Explicit read-write extra mounts and selected host-side state synchronization can also write outside it. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
@@ -351,13 +365,16 @@ uses the URL and optional client ID; shared Codex fields such as
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
 - Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
+- Desktop targets are Codex-only, macOS-only, and require a saved or
+  project-owned preset. Launch-once TUI configurations fail closed because a
+  persistent target must be reconstructable
 - `codex_profile` is Codex-only, uses letters/digits/hyphens/underscores, and
   names a separate native file under the resolved `CODEX_HOME`. Cage never
   copies a profile into a different host identity or rewrites it
 - Interactive mode is mutually exclusive with `--preset`, requires a TTY, and
   uses the config-authoring TUI. Direct `cage PATH` launches remain unchanged
-- Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. For container targets, stdio MCP servers run on the host through the authenticated MCP bridge and HTTP MCP servers become tool-native container config. For host targets, both become process-local Codex config overrides; stdio commands execute directly as pinned host processes. A selected name already defined in a base/profile/project Codex layer fails closed
-- Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
+- Central `mcp_packs` are composed per preset. Duplicate MCP server names across selected packs are invalid. For container and desktop targets, stdio MCP servers run on the host through the authenticated MCP bridge and HTTP MCP servers become tool-native container config. For host targets, both become process-local Codex config overrides; stdio commands execute directly as pinned host processes. A selected name already defined in a base/profile/project Codex layer fails closed
+- Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container and desktop targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
 - OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. cage also syncs Codex MCP OAuth `.credentials.json` between host and volume before launch and after exit to preserve rotated refresh tokens. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`,
   legacy Cage profile files, folder mappings, or repo `.cage.conf`; native

@@ -7,6 +7,29 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.0 — 2026-07-27
+
+- add a macOS-only Codex `desktop` target backed by ChatGPT Desktop's SSH-host
+  workflow, with a persistent repository/preset-specific Cage container,
+  volume, client identity, and pinned container host key;
+- add `cage desktop setup|start|restart|status|stop|logs|list|remove`, automatic
+  ChatGPT launch, `--no-open`, and mutually exclusive `--desktop`,
+  `--container`, and `--host` overrides;
+- keep SSH listener-free through an installed-launcher `ProxyCommand`, start
+  `sshd` once per connection, and disable passwords, forwarding, tunnels, root
+  login, user environment files, and public listeners;
+- reuse Cage's mounts, Netgate, MCP and host-command bridges, skill selection,
+  identities, OAuth reconciliation, and volume-owned Codex history;
+- make the detached supervisor own bridge lifetime and a private Unix control
+  socket, stop fail-closed after supervisor or required-bridge loss, and recover
+  stale labeled containers without deleting their volumes;
+- keep provider, proxy, and bridge secrets out of Docker metadata and the
+  Desktop volume through a short-lived private handoff and tmpfs-only remote
+  environment, while scrubbing the persistent watchdog process;
+- manage one transactional SSH Include while preserving the user's config
+  comments, permissions, and symlink target; require explicit confirmation
+  before deleting a Desktop target's keys, history, metadata, and volume.
+
 ## 0.24.1 — 2026-07-23
 
 - replace blocking TUI text prompts with visible, editable fields that support

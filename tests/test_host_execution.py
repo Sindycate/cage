@@ -865,7 +865,7 @@ class TestConfigSchema(unittest.TestCase):
 
     def test_invalid_target_rejected(self):
         data = {"version": 1, "default_preset": "m",
-                "presets": {"m": {"tool": "codex", "target": "desktop"}}}
+                "presets": {"m": {"tool": "codex", "target": "remote"}}}
         with self.assertRaises(cage_config.ConfigError) as ctx:
             cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
         self.assertIn("target", str(ctx.exception))

@@ -8,6 +8,40 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.26.0 — 2026-07-27
+
+### ChatGPT Desktop through an SSH-backed Cage container
+
+Who is affected: macOS users who want ChatGPT Desktop to run repository tools
+inside Cage while retaining preset-specific providers, skills, MCP servers,
+identity, network policy, and persistent Codex history.
+
+New behavior:
+
+- Codex presets may set `target = "desktop"`; `--desktop`, `--container`, and
+  `--host` are mutually exclusive launch overrides.
+- Run `cage desktop setup` once. Cage installs one managed `Include` in
+  `~/.ssh/config`; it generates and owns concrete target blocks automatically.
+- A normal launch starts or reuses the repository/preset target and opens
+  ChatGPT. Use `--no-open` to suppress that final step.
+- `cage desktop stop --preset NAME PATH` disconnects ChatGPT but preserves the
+  alias, keys, Codex volume, and history. `remove` deletes them only after
+  explicit confirmation.
+- Desktop configurations must be saved or project-owned. TUI launch-once
+  configurations are rejected because a persistent target must be
+  reconstructable.
+
+The desktop app remains a host process. Repository commands and Codex
+app-server run in the Cage container reached through the official SSH-host
+workflow. The transport has no listening port: the generated SSH alias invokes
+the installed Cage helper through `ProxyCommand`, which starts one inetd-mode
+`sshd` connection inside the labeled container.
+
+Rollback: stop and remove each target, remove `target = "desktop"` from
+presets, then remove the single Cage `Include` line from `~/.ssh/config` if no
+Desktop targets will be used. Existing container and host targets are
+unchanged.
+
 ## 0.25.1 — 2026-07-27
 
 ### Codex profiles and host-native MCP/skill reuse

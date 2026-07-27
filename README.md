@@ -424,16 +424,43 @@ Host execution is **Codex-only** and provides:
 Unsupported in host mode (fail closed): host command bridges, extra mounts,
 custom `host_agents_dir`/skill-pack sources, and `ssh_host` aliases.
 
-This implements host-native Codex CLI only. The stable `codex app PATH` command
-can open a workspace in ChatGPT desktop, and the desktop app shares the base
-Codex configuration, MCP, skills, and provider support. However, Codex
-currently documents named `--profile` selection for the CLI, not a desktop
-profile launch selector. Cage therefore does not pretend that changing
-`CODEX_HOME` launches an isolated second desktop identity. A true
-desktop-UI/container-execution mode would require a supported remote
-app-server/SSH connection and remains a future milestone. The current
-capability boundary and that future route are recorded in
-[docs/CODEX_DESKTOP.md](docs/CODEX_DESKTOP.md).
+## ChatGPT Desktop via Cage
+
+On macOS, a saved Codex preset can back ChatGPT Desktop through the official
+SSH-host workflow:
+
+```bash
+./install.sh --from-source
+cage desktop setup
+cage --preset codex-company --desktop ~/path/to/repo
+
+cage desktop status --preset codex-company ~/path/to/repo
+cage desktop restart --preset codex-company ~/path/to/repo
+cage desktop stop --preset codex-company ~/path/to/repo
+cage desktop logs --preset codex-company ~/path/to/repo
+cage desktop list
+cage desktop remove --preset codex-company ~/path/to/repo
+```
+
+The first launch displays a generated `cage-...` SSH host. In ChatGPT, open
+**Settings → Connections**, select that host, and choose the displayed
+repository path. Cage opens ChatGPT automatically after readiness; pass
+`--no-open` to suppress it.
+
+`target = "desktop"` is Codex-only and requires a saved or project-owned
+preset. Repository plus preset gets a dedicated persistent Codex volume and
+SSH identity, so providers cannot overwrite one another's configuration or
+history. `stop` preserves that state; `remove` requires confirmation and
+deletes it.
+
+No SSH or app-server port is published. The generated host uses an absolute
+installed Cage helper as `ProxyCommand`, which runs one inetd-mode SSH
+connection inside the labeled container. Netgate, skills, HTTP/stdio MCP,
+host commands, mounts, Git/GitHub/SSH identity, and OAuth reconciliation reuse
+the ordinary container launch path. Provider, proxy, and bridge secrets are
+removed from Docker `Config.Env`, handed through a short-lived private bind,
+and retained only in the container's tmpfs-backed `/run` state. See
+[docs/CODEX_DESKTOP.md](docs/CODEX_DESKTOP.md) for setup and boundaries.
 
 ## How it works
 

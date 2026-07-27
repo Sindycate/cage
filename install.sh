@@ -235,8 +235,9 @@ trap cleanup_install EXIT
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
     SOURCE_FILES=(
-        cage cage-config.py cage-tui.py cage-netgate.sh netgate-proxy.py
+        cage cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
+        codex-remote.py
         docker-compose.yml Dockerfile Dockerfile.codex
         entrypoint.sh entrypoint-codex.sh install.sh Makefile README.md SECURITY.md
         CHANGELOG.md
@@ -255,13 +256,13 @@ else
     tar xzf "$TARBALL" -C "$STAGE_DIR" --strip-components=1
 fi
 
-for required in cage cage-config.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay; do
+for required in cage cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py; do
     [ -f "$STAGE_DIR/$required" ] && [ ! -L "$STAGE_DIR/$required" ] || \
         error "Release archive is missing a safe regular file: $required"
 done
 
 printf '%s\n' "$VERSION" > "$STAGE_DIR/$INSTALL_MARKER"
-chmod +x "$STAGE_DIR/cage" "$STAGE_DIR/cage-config.py" "$STAGE_DIR/cage-tui.py" "$STAGE_DIR/cage-netgate.sh" "$STAGE_DIR/netgate-proxy.py" "$STAGE_DIR/mcp-bridge.py" "$STAGE_DIR/mcp-relay" "$STAGE_DIR/host-cmd-bridge.py" "$STAGE_DIR/host-cmd-relay"
+chmod +x "$STAGE_DIR/cage" "$STAGE_DIR/cage-config.py" "$STAGE_DIR/cage-desktop.py" "$STAGE_DIR/cage-tui.py" "$STAGE_DIR/cage-netgate.sh" "$STAGE_DIR/netgate-proxy.py" "$STAGE_DIR/mcp-bridge.py" "$STAGE_DIR/mcp-relay" "$STAGE_DIR/host-cmd-bridge.py" "$STAGE_DIR/host-cmd-relay" "$STAGE_DIR/codex-remote.py"
 
 validate_launcher_path
 if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.25.1"
+CAGE_VERSION="0.26.0"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
@@ -38,6 +38,13 @@ case "${1:-}" in
     mcp|--mcp)
         shift
         python3 -I "$SCRIPT_DIR/cage-config.py" --config "$CAGE_CONFIG_DIR/config.toml" mcp "$@"; exit $? ;;
+    desktop|--desktop-command)
+        shift
+        python3 -I "$SCRIPT_DIR/cage-desktop.py" \
+            --config-dir "$CAGE_CONFIG_DIR" \
+            --launcher "$SCRIPT_DIR/cage" \
+            "$@"
+        exit $? ;;
     netgate|--netgate)
         shift
         source "$SCRIPT_DIR/cage-netgate.sh"; exit $? ;;
@@ -109,6 +116,8 @@ INTERACTIVE=0
 LEGACY_INTERACTIVE=0
 HOST_FLAG=0
 CONTAINER_FLAG=0
+DESKTOP_FLAG=0
+NO_OPEN=0
 TUI_RESULT=""
 EXTRA_MOUNT_SPECS=()   # entries are "ro<TAB><path>" / "rw<TAB><path>" from CLI flags
 
@@ -169,6 +178,14 @@ while [[ "${1:-}" == -* ]]; do
             CONTAINER_FLAG=1
             shift
             ;;
+        --desktop)
+            DESKTOP_FLAG=1
+            shift
+            ;;
+        --no-open)
+            NO_OPEN=1
+            shift
+            ;;
         --mount-ro)
             [ -n "${2:-}" ] || { echo "Missing path after --mount-ro" >&2; exit 1; }
             EXTRA_MOUNT_SPECS+=("ro"$'\t'"$2"); shift 2
@@ -195,8 +212,8 @@ if [ "$INTERACTIVE" -eq 1 ] && [ -n "$CAGE_PRESET_FLAG" ]; then
     exit 1
 fi
 
-if [ "$HOST_FLAG" -eq 1 ] && [ "$CONTAINER_FLAG" -eq 1 ]; then
-    echo "ERROR: --host and --container cannot be combined" >&2
+if [ $((HOST_FLAG + CONTAINER_FLAG + DESKTOP_FLAG)) -gt 1 ]; then
+    echo "ERROR: --host, --container, and --desktop cannot be combined (they are mutually exclusive)" >&2
     exit 1
 fi
 
@@ -214,7 +231,7 @@ if [ $# -eq 0 ] && [ "$SHOW_HELP" -eq 0 ]; then
 fi
 
 if [ $# -lt 1 ]; then
-    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--host|--container] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]"
+    echo "Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--host|--container|--desktop] [--no-open] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]"
     echo ""
     echo "Tools:"
     echo "  claude    Run Claude Code (default)"
@@ -229,6 +246,14 @@ if [ $# -lt 1 ]; then
     echo "  config doctor PATH        Validate the resolved launch configuration"
     echo "  mcp login NAME PATH       Authenticate with an OAuth MCP server for a resolved Codex preset"
     echo "  mcp logout NAME PATH      Remove OAuth MCP authentication for a resolved Codex preset"
+    echo "  desktop setup             Register Cage's managed SSH Include"
+    echo "  desktop start ...         Start or reuse a persistent Desktop target"
+    echo "  desktop restart ...       Restart a Desktop target"
+    echo "  desktop status ...        Show a Desktop target's state"
+    echo "  desktop stop ...          Stop a Desktop target and preserve its state"
+    echo "  desktop logs ...          Print a Desktop target's supervisor log"
+    echo "  desktop list              List registered Desktop targets"
+    echo "  desktop remove ...        Delete a Desktop target after confirmation"
     echo "  netgate                    Manage domain allow/deny lists for --net gate"
     echo "  netgate list [PATH]        Show rules (defaults + global + project)"
     echo "  netgate allow DOMAIN       Allow a domain (project or --global)"
@@ -249,6 +274,8 @@ if [ $# -lt 1 ]; then
     echo "  --mount-rw PATH    Mount a host dir read-write at the same path (repeatable)"
     echo "  --host             Run Codex natively on the host (no Docker isolation)"
     echo "  --container        Force container execution (override a saved host target)"
+    echo "  --desktop          Run Codex for ChatGPT Desktop in a persistent Cage container"
+    echo "  --no-open          Do not open ChatGPT after a Desktop target becomes ready"
     echo "  --rebuild          Force local rebuild (get latest tool version)"
     echo "  --version, -V      Show version and exit"
     echo "  --help, -h         Show this help and exit"
@@ -260,6 +287,8 @@ if [ $# -lt 1 ]; then
     echo "  cage mcp login dash0 ~/projects/myapp"
     echo "  cage ~/projects/myapp"
     echo "  cage --preset codex-company ~/projects/myapp"
+    echo "  cage --preset codex-company --desktop ~/projects/myapp"
+    echo "  cage desktop status --preset codex-company ~/projects/myapp"
     echo "  cage --interactive ~/projects/myapp"
     echo "  cage codex ~/projects/myapp"
     echo "  cage codex -y ~/projects/myapp"
@@ -310,6 +339,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
     [ "$YOLO_EXPLICIT" -eq 0 ] && _tui_args+=(--yolo-override off)
     [ "$HOST_FLAG" -eq 1 ] && _tui_args+=(--target-override host)
     [ "$CONTAINER_FLAG" -eq 1 ] && _tui_args+=(--target-override container)
+    [ "$DESKTOP_FLAG" -eq 1 ] && _tui_args+=(--target-override desktop)
     python3 -I "$SCRIPT_DIR/cage-tui.py" "${_tui_args[@]}"
     _tui_status=$?
     set -e
@@ -341,7 +371,7 @@ _init_config_vars() {
     GIT_USER_NAME="" GIT_USER_EMAIL="" SSH_KEY="" SSH_HOST=""
     CLAUDE_AUTH="" AWS_PROFILE="" AWS_REGION="" EXTRA_ENV="" CODEX_COPY_AUTH="" HOST_CODEX_DIR="" HOST_AGENTS_DIR="" GH_AUTH="" GH_ACCOUNT=""
     MCP_SERVERS="" SKILL_MOUNTS="" HOST_COMMANDS="" SESSION_SYNC="" EXTRA_MOUNTS=""
-    CAGE_PRESET="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS="" CAGE_YOLO=""
+    CAGE_PRESET="" CAGE_PRESET_SOURCE="" CAGE_TOOL_RESOLVED="" CAGE_NET_MODE="" CAGE_REMOTE_MCP_SERVERS="" CAGE_YOLO=""
     CAGE_HOST_CODEX_PAYLOAD="" CAGE_CODEX_PROFILE=""
 }
 
@@ -424,6 +454,12 @@ if [ "$HOST_FLAG" -eq 1 ]; then
     EXEC_TARGET="host"
 elif [ "$CONTAINER_FLAG" -eq 1 ]; then
     EXEC_TARGET="container"
+elif [ "$DESKTOP_FLAG" -eq 1 ]; then
+    EXEC_TARGET="desktop"
+fi
+if [ "$NO_OPEN" -eq 1 ] && [ "$EXEC_TARGET" != "desktop" ]; then
+    echo "ERROR: --no-open is only valid for desktop execution" >&2
+    exit 1
 fi
 
 # Default NET_MODE: CLI flag > preset/defaults > yolo gate > open
@@ -443,6 +479,46 @@ case "$NET_MODE" in
     open|gate|off) ;;
     *) echo "Invalid --net mode: $NET_MODE (use open, gate, or off)" >&2; exit 1 ;;
 esac
+
+# A public desktop launch delegates to the installed lifecycle manager.  The
+# detached child re-enters this launcher with CAGE_DESKTOP_INTERNAL=1 so the
+# ordinary Docker, bridge, Netgate, OAuth, and mount paths stay authoritative.
+if [ "$EXEC_TARGET" = "desktop" ] && [ "${CAGE_DESKTOP_INTERNAL:-0}" != "1" ]; then
+    if [ "$CAGE_TOOL" != "codex" ]; then
+        echo "ERROR: desktop execution (--desktop / target = \"desktop\") is only supported for Codex, not $CAGE_TOOL" >&2
+        exit 1
+    fi
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "ERROR: desktop execution is currently supported only on macOS" >&2
+        exit 1
+    fi
+    if [ "${CAGE_PRESET_SOURCE:-}" = "tui:launch-once" ] || [ -z "${CAGE_PRESET:-}" ]; then
+        echo "ERROR: desktop targets require a saved or project-owned preset." >&2
+        echo "Save the configuration in the TUI, then start it again." >&2
+        exit 1
+    fi
+    if [ $# -ne 0 ]; then
+        echo "ERROR: desktop launches do not accept one-shot Codex arguments." >&2
+        echo "The selected profile and Cage launch settings are applied to every remote app-server connection." >&2
+        exit 1
+    fi
+    _desktop_args=(
+        --config-dir "$CAGE_CONFIG_DIR"
+        --launcher "$SCRIPT_DIR/cage"
+        start
+        --preset "$CAGE_PRESET"
+        --net "$NET_MODE"
+    )
+    if [ "$YOLO" -eq 1 ]; then
+        _desktop_args+=(--yolo)
+    else
+        _desktop_args+=(--no-yolo)
+    fi
+    [ "$REBUILD" -eq 1 ] && _desktop_args+=(--rebuild)
+    [ "$NO_OPEN" -eq 1 ] && _desktop_args+=(--no-open)
+    _desktop_args+=("$REPO_PATH")
+    exec python3 -I "$SCRIPT_DIR/cage-desktop.py" "${_desktop_args[@]}"
+fi
 
 # --- Execution target: host-native branch ------------------------------------
 if [ "$EXEC_TARGET" = "host" ]; then
@@ -735,6 +811,13 @@ for _mount_entry in "${_EXTRA_MOUNT_SEEN[@]+"${_EXTRA_MOUNT_SEEN[@]}"}"; do
             echo "Move XDG_CONFIG_HOME outside every Cage-writable mount." >&2
             exit 1
         fi
+        if [ "$EXEC_TARGET" = "desktop" ] && { \
+            [ "$SCRIPT_DIR" = "$_writable_root" ] || [[ "$SCRIPT_DIR" == "$_writable_root"/* ]]; \
+        }; then
+            echo "ERROR: installed Cage launcher is inside read-write extra mount '$_writable_root'" >&2
+            echo "Desktop registration requires the installed launcher to remain outside writable mounts." >&2
+            exit 1
+        fi
     fi
 done
 
@@ -746,6 +829,48 @@ else
 fi
 CONTAINER_NAME="${CONTAINER_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
 VOLUME_NAME="${VOLUME_PREFIX}-${REPO_BASENAME}-${REPO_HASH}"
+
+if [ "$EXEC_TARGET" = "desktop" ]; then
+    if [ "${CAGE_DESKTOP_INTERNAL:-0}" != "1" ] || [ "$CAGE_TOOL" != "codex" ]; then
+        echo "ERROR: invalid internal desktop launch state" >&2
+        exit 1
+    fi
+    case "${CAGE_DESKTOP_TARGET_ID:-}" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+        *) echo "ERROR: invalid internal desktop target id" >&2; exit 1 ;;
+    esac
+    _expected_desktop_id="$(python3 -I -c \
+        'import hashlib,sys; print(hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:16])' \
+        "$REPO_PATH" "$CAGE_PRESET")"
+    if [ "$_expected_desktop_id" != "$CAGE_DESKTOP_TARGET_ID" ]; then
+        echo "ERROR: desktop target identity does not match the repository and preset" >&2
+        exit 1
+    fi
+    if [ "${CAGE_DESKTOP_CONTAINER_NAME:-}" != "cage-desktop-${CAGE_DESKTOP_TARGET_ID}" ] || \
+       [ "${CAGE_DESKTOP_VOLUME_NAME:-}" != "cage-codex-desktop-${CAGE_DESKTOP_TARGET_ID}" ]; then
+        echo "ERROR: invalid internal desktop container or volume name" >&2
+        exit 1
+    fi
+    if ! [[ "${CAGE_DESKTOP_FINGERPRINT:-}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "ERROR: invalid internal desktop configuration fingerprint" >&2
+        exit 1
+    fi
+    for _desktop_private_file in \
+        "${CAGE_DESKTOP_PUBLIC_KEY:-}" \
+        "${CAGE_DESKTOP_HEARTBEAT:-}"; do
+        if [ -z "$_desktop_private_file" ] || [ ! -f "$_desktop_private_file" ] || [ -L "$_desktop_private_file" ]; then
+            echo "ERROR: missing or unsafe internal desktop state file" >&2
+            exit 1
+        fi
+        case "$_desktop_private_file" in
+            "$REPO_PATH"|"$REPO_PATH"/*)
+                echo "ERROR: desktop private state cannot be inside the writable repository" >&2
+                exit 1 ;;
+        esac
+    done
+    CONTAINER_NAME="$CAGE_DESKTOP_CONTAINER_NAME"
+    VOLUME_NAME="$CAGE_DESKTOP_VOLUME_NAME"
+fi
 
 # --- Parallel-instance / collision handling ---------------------------------
 # A container with $CONTAINER_NAME already existing means another cage is
@@ -2232,8 +2357,6 @@ echo "=============================="
 
 # Shared Docker args
 DOCKER_ARGS=(
-    --rm
-    -it
     --name "$CONTAINER_NAME"
     --hostname "$CONTAINER_NAME"
     --cap-drop ALL
@@ -2248,6 +2371,9 @@ DOCKER_ARGS=(
     -e "HOST_UID=$(id -u)"
     -e "HOST_GID=$(id -g)"
 )
+if [ "$EXEC_TARGET" != "desktop" ]; then
+    DOCKER_ARGS=(--rm -it "${DOCKER_ARGS[@]}")
+fi
 
 # Forward terminal capability hints from host (cosmetic only)
 if [ -n "${TERM:-}" ]; then
@@ -2346,6 +2472,20 @@ case "$CAGE_TOOL" in
         if [ "${CODEX_COPY_AUTH:-1}" = "0" ]; then
             DOCKER_ARGS+=(-e "CODEX_COPY_AUTH=0")
         fi
+        if [ "$EXEC_TARGET" = "desktop" ]; then
+            DOCKER_ARGS+=(
+                # OpenSSH's per-connection privilege-separation sandbox
+                # chroots into /run/sshd before serving the authenticated
+                # session.  Keep this capability desktop-only.
+                --cap-add SYS_CHROOT
+                --label "com.sindycate.cage.desktop-target=$CAGE_DESKTOP_TARGET_ID"
+                -e "CAGE_DESKTOP_REMOTE=1"
+                -e "CAGE_DESKTOP_ENV_NAMES=$EXTRA_ENV"
+                -e "CAGE_CODEX_PROFILE=${CAGE_CODEX_PROFILE:-}"
+                -v "$CAGE_DESKTOP_PUBLIC_KEY:/cage-desktop/client.pub:ro"
+                -v "$CAGE_DESKTOP_HEARTBEAT:/cage-desktop/heartbeat:ro"
+            )
+        fi
         ;;
 esac
 
@@ -2410,7 +2550,7 @@ fi
 [[ ${#EXTRA_MOUNT_ARGS[@]} -gt 0 ]] && DOCKER_ARGS+=("${EXTRA_MOUNT_ARGS[@]}")
 
 TOOL_ARGS=()
-if [ "$CAGE_TOOL" = "codex" ] && [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
+if [ "$EXEC_TARGET" != "desktop" ] && [ "$CAGE_TOOL" = "codex" ] && [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
     TOOL_ARGS+=(--profile "$CAGE_CODEX_PROFILE")
 fi
 if [ "$YOLO" -eq 1 ]; then
@@ -2421,7 +2561,151 @@ if [ "$YOLO" -eq 1 ]; then
     esac
 fi
 
-if [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ] || [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ]; then
+if [ "$EXEC_TARGET" = "desktop" ]; then
+    _desktop_container_id=""
+    _desktop_runtime_env_file=""
+    cleanup_desktop_runtime() {
+        local original_status=$? oauth_status=0
+        trap - EXIT INT TERM
+        set +e
+        if [ -n "$_desktop_container_id" ]; then
+            docker stop --time 10 "$_desktop_container_id" >/dev/null 2>&1 || true
+            docker rm -f "$_desktop_container_id" >/dev/null 2>&1 || true
+        fi
+        sync_codex_oauth_credentials
+        oauth_status=$?
+        cleanup_session_sync
+        cleanup_host_cmd_bridge
+        cleanup_mcp_bridge
+        cleanup_proxy
+        rm -f -- "${_desktop_runtime_env_file:-}"
+        if [ "$original_status" -ne 0 ]; then
+            exit "$original_status"
+        fi
+        exit "$oauth_status"
+    }
+    trap cleanup_desktop_runtime EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    _desktop_secret_env_names=()
+    _desktop_filtered_args=()
+    _desktop_is_secret_env_name() {
+        local _candidate="$1" _configured
+        case "$_candidate" in
+            GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|http_proxy|https_proxy|no_proxy|MCP_BRIDGE_HOST|MCP_BRIDGE_TOKEN|MCP_BRIDGE_PORT_*|HOST_CMD_BRIDGE_HOST|HOST_CMD_BRIDGE_TOKEN|HOST_CMD_BRIDGE_PORT_*)
+                return 0 ;;
+        esac
+        for _configured in $EXTRA_ENV; do
+            [ "$_candidate" = "$_configured" ] && return 0
+        done
+        return 1
+    }
+    _desktop_arg_index=0
+    while [ "$_desktop_arg_index" -lt "${#DOCKER_ARGS[@]}" ]; do
+        _desktop_arg="${DOCKER_ARGS[$_desktop_arg_index]}"
+        if [ "$_desktop_arg" = "-e" ] && \
+           [ $((_desktop_arg_index + 1)) -lt "${#DOCKER_ARGS[@]}" ]; then
+            _desktop_env_spec="${DOCKER_ARGS[$((_desktop_arg_index + 1))]}"
+            _desktop_env_name="${_desktop_env_spec%%=*}"
+            if _desktop_is_secret_env_name "$_desktop_env_name"; then
+                _desktop_env_value="${_desktop_env_spec#*=}"
+                printf -v "$_desktop_env_name" '%s' "$_desktop_env_value"
+                export "$_desktop_env_name"
+                _desktop_secret_env_names+=("$_desktop_env_name")
+                _desktop_arg_index=$((_desktop_arg_index + 2))
+                continue
+            fi
+        fi
+        _desktop_filtered_args+=("$_desktop_arg")
+        _desktop_arg_index=$((_desktop_arg_index + 1))
+    done
+    DOCKER_ARGS=("${_desktop_filtered_args[@]}")
+
+    _desktop_runtime_env_file="$(mktemp "$CAGE_DESKTOP_STATE_DIR/.runtime-env.XXXXXX")"
+    chmod 600 "$_desktop_runtime_env_file"
+    CAGE_DESKTOP_SECRET_ENV_NAMES="${_desktop_secret_env_names[*]}" \
+        python3 -I - "$_desktop_runtime_env_file" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+names = list(filter(None, os.environ.get("CAGE_DESKTOP_SECRET_ENV_NAMES", "").split()))
+if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+    raise SystemExit("cage: invalid desktop runtime environment name")
+flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(path, flags)
+info = os.fstat(descriptor)
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    os.close(descriptor)
+    raise SystemExit("cage: unsafe desktop runtime environment handoff")
+values = {name: os.environ[name] for name in sorted(set(names)) if name in os.environ}
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    json.dump(values, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
+    DOCKER_ARGS+=(
+        -v "$_desktop_runtime_env_file:/cage-desktop/runtime-env.json:ro"
+    )
+
+    _desktop_container_id="$(docker run -d "${DOCKER_ARGS[@]}" "$IMAGE")"
+    _desktop_ready=0
+    for _ in $(seq 1 150); do
+        if ! docker inspect -f '{{.State.Running}}' "$_desktop_container_id" 2>/dev/null | grep -qx true; then
+            break
+        fi
+        if docker exec --user root "$_desktop_container_id" \
+            /usr/sbin/sshd -T -f /run/cage/sshd_config >/dev/null 2>&1 && \
+           docker exec --user root "$_desktop_container_id" \
+            test -f /home/codex/.codex/.cage-desktop/ssh_host_ed25519_key.pub; then
+            _desktop_ready=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [ "$_desktop_ready" -ne 1 ]; then
+        echo "ERROR: desktop container did not become SSH-ready" >&2
+        docker logs "$_desktop_container_id" >&2 2>/dev/null || true
+        exit 1
+    fi
+    rm -f -- "$_desktop_runtime_env_file"
+    _desktop_runtime_env_file=""
+
+    python3 -I "$SCRIPT_DIR/cage-desktop.py" \
+        --config-dir "$CAGE_CONFIG_DIR" \
+        --launcher "$SCRIPT_DIR/cage" \
+        mark-ready "$CAGE_DESKTOP_TARGET_ID" \
+        --container-id "$_desktop_container_id" \
+        --container-name "$CONTAINER_NAME" \
+        --volume-name "$VOLUME_NAME" \
+        --fingerprint "$CAGE_DESKTOP_FINGERPRINT"
+
+    while docker inspect -f '{{.State.Running}}' "$_desktop_container_id" 2>/dev/null | grep -qx true; do
+        if [ -n "$PROXY_PID" ] && ! kill -0 "$PROXY_PID" 2>/dev/null; then
+            echo "ERROR: desktop Netgate proxy exited; stopping target fail-closed" >&2
+            exit 70
+        fi
+        if [ -n "$MCP_BRIDGE_PID" ] && ! kill -0 "$MCP_BRIDGE_PID" 2>/dev/null; then
+            echo "ERROR: desktop MCP bridge exited; stopping target fail-closed" >&2
+            exit 70
+        fi
+        if [ -n "$HOST_CMD_BRIDGE_PID" ] && ! kill -0 "$HOST_CMD_BRIDGE_PID" 2>/dev/null; then
+            echo "ERROR: desktop host-command bridge exited; stopping target fail-closed" >&2
+            exit 70
+        fi
+        sleep 1
+    done
+    _desktop_exit="$(docker inspect -f '{{.State.ExitCode}}' "$_desktop_container_id" 2>/dev/null || echo 1)"
+    if ! [[ "$_desktop_exit" =~ ^[0-9]+$ ]]; then
+        _desktop_exit=1
+    fi
+    exit "$_desktop_exit"
+elif [ "$NET_MODE" = "gate" ] || [ -n "$MCP_BRIDGE_PID" ] || [ -n "$HOST_CMD_BRIDGE_PID" ] || [ -n "$SESSION_SLUG" ] || [ "$CODEX_OAUTH_CREDENTIALS_SYNC" = "1" ]; then
     # Cannot use exec: need cleanup traps to run via trap EXIT
     trap cleanup_cage_runtime EXIT
     docker run "${DOCKER_ARGS[@]}" "$IMAGE" ${TOOL_ARGS[@]+"${TOOL_ARGS[@]}"} "$@"

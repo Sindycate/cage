@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -25,6 +26,266 @@ def write_executable(path, content):
     "set CAGE_RUN_DOCKER_SMOKE=1 to run local Docker integration smoke tests",
 )
 class DockerSmokeTests(unittest.TestCase):
+    def test_desktop_remote_ssh_injects_profile_provider_and_yolo(self):
+        image = os.environ.get("CAGE_DESKTOP_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_DESKTOP_SMOKE_IMAGE to a built Codex image")
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            temp_path = Path(temp_dir)
+            repo = temp_path / "repo"
+            state = temp_path / "state"
+            repo.mkdir()
+            state.mkdir()
+            key = state / "id_ed25519"
+            generated = subprocess.run(
+                [
+                    "/usr/bin/ssh-keygen",
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-f",
+                    str(key),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            heartbeat = state / "heartbeat"
+            heartbeat.write_text("alive\n", encoding="utf-8")
+            runtime_env = state / "runtime-env.json"
+            runtime_env.write_text(
+                json.dumps(
+                    {
+                        "TEST_DESKTOP_PROVIDER": "provider-secret",
+                        "MCP_BRIDGE_HOST": "host.docker.internal",
+                        "MCP_BRIDGE_PORT_PROBE": "4321",
+                        "MCP_BRIDGE_TOKEN": "mcp-bridge-secret",
+                        "HOST_CMD_BRIDGE_HOST": "host.docker.internal",
+                        "HOST_CMD_BRIDGE_PORT_HOSTPROBE": "5432",
+                        "HOST_CMD_BRIDGE_TOKEN": "host-bridge-secret",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            runtime_env.chmod(0o600)
+            fake_codex = state / "real-codex"
+            write_executable(
+                fake_codex,
+                "#!/bin/sh\n"
+                "[ \"$TEST_DESKTOP_PROVIDER\" = provider-secret ] || exit 41\n"
+                "[ \"$MCP_BRIDGE_TOKEN\" = mcp-bridge-secret ] || exit 42\n"
+                "[ \"$MCP_BRIDGE_PORT_PROBE\" = 4321 ] || exit 43\n"
+                "[ \"$HOST_CMD_BRIDGE_TOKEN\" = host-bridge-secret ] || exit 44\n"
+                "[ \"$HOST_CMD_BRIDGE_PORT_HOSTPROBE\" = 5432 ] || exit 45\n"
+                "[ -x /usr/local/bin/hostprobe ] || exit 46\n"
+                "! grep -q 'mcp-bridge-secret\\|host-bridge-secret' "
+                "\"$HOME/.codex/config.toml\" || exit 47\n"
+                "printf 'ARGS=%s\\n' \"$*\"\n"
+                "printf 'PWD=%s\\n' \"$(pwd)\"\n",
+            )
+            container = f"cage-desktop-smoke-{os.getpid()}"
+            volume = f"cage-desktop-smoke-{os.getpid()}"
+            container_id = ""
+            try:
+                launched = subprocess.run(
+                    [
+                        "docker",
+                        "run",
+                        "-d",
+                        "--name",
+                        container,
+                        "--network",
+                        "none",
+                        "--cap-drop",
+                        "ALL",
+                        "--cap-add",
+                        "CHOWN",
+                        "--cap-add",
+                        "DAC_OVERRIDE",
+                        "--cap-add",
+                        "SETGID",
+                        "--cap-add",
+                        "SETUID",
+                        "--cap-add",
+                        "SYS_CHROOT",
+                        "--tmpfs",
+                        "/run",
+                        "--tmpfs",
+                        "/tmp",
+                        "-v",
+                        f"{repo}:{repo}",
+                        "-v",
+                        f"{volume}:/home/codex/.codex",
+                        "-v",
+                        f"{key}.pub:/cage-desktop/client.pub:ro",
+                        "-v",
+                        f"{heartbeat}:/cage-desktop/heartbeat:ro",
+                        "-v",
+                        f"{runtime_env}:/cage-desktop/runtime-env.json:ro",
+                        "-v",
+                        f"{fake_codex}:/home/codex/.npm-global/bin/codex:ro",
+                        "-e",
+                        f"WORKSPACE_DIR={repo}",
+                        "-e",
+                        f"HOST_UID={os.getuid()}",
+                        "-e",
+                        f"HOST_GID={os.getgid()}",
+                        "-e",
+                        "CAGE_DESKTOP_REMOTE=1",
+                        "-e",
+                        "CAGE_DESKTOP_ENV_NAMES=TEST_DESKTOP_PROVIDER",
+                        "-e",
+                        'CAGE_MCP_SERVERS={"probe":4321}',
+                        "-e",
+                        "CAGE_HOST_COMMANDS=hostprobe",
+                        "-e",
+                        "CAGE_CODEX_PROFILE=desktop_probe",
+                        "-e",
+                        "CAGE_YOLO=1",
+                        "-e",
+                        "CODEX_COPY_AUTH=0",
+                        image,
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(launched.returncode, 0, launched.stderr)
+                container_id = launched.stdout.strip()
+                inspected_env = subprocess.check_output(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        "{{json .Config.Env}}",
+                        container_id,
+                    ],
+                    text=True,
+                )
+                self.assertNotIn("TEST_DESKTOP_PROVIDER=", inspected_env)
+                self.assertNotIn("provider-secret", inspected_env)
+                ready = False
+                for _ in range(100):
+                    checked = subprocess.run(
+                        [
+                            "docker",
+                            "exec",
+                            "--user",
+                            "root",
+                            container_id,
+                            "/usr/sbin/sshd",
+                            "-T",
+                            "-f",
+                            "/run/cage/sshd_config",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                    if checked.returncode == 0:
+                        ready = True
+                        break
+                    time.sleep(0.1)
+                self.assertTrue(ready, "desktop container did not become SSH-ready")
+                host_public = subprocess.check_output(
+                    [
+                        "docker",
+                        "exec",
+                        "--user",
+                        "root",
+                        container_id,
+                        "cat",
+                        "/home/codex/.codex/.cage-desktop/ssh_host_ed25519_key.pub",
+                    ],
+                    text=True,
+                ).strip().split()
+                known_hosts = state / "known_hosts"
+                known_hosts.write_text(
+                    f"desktop-smoke {host_public[0]} {host_public[1]}\n",
+                    encoding="utf-8",
+                )
+                ssh = subprocess.run(
+                    [
+                        "/usr/bin/ssh",
+                        "-o",
+                        (
+                            "ProxyCommand=docker exec -i --user root "
+                            f"{container_id} /usr/sbin/sshd -i -e "
+                            "-f /run/cage/sshd_config"
+                        ),
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "StrictHostKeyChecking=yes",
+                        "-o",
+                        f"UserKnownHostsFile={known_hosts}",
+                        "-o",
+                        "HostKeyAlias=desktop-smoke",
+                        "-i",
+                        str(key),
+                        "codex@desktop-smoke",
+                        "cd",
+                        str(repo),
+                        "&&",
+                        "codex",
+                        "app-server",
+                        "--probe",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=20,
+                )
+                self.assertEqual(ssh.returncode, 0, ssh.stderr)
+                self.assertIn(
+                    "ARGS=--profile desktop_probe --yolo app-server --probe",
+                    ssh.stdout,
+                )
+                self.assertIn(f"PWD={repo}", ssh.stdout)
+                self.assertNotIn("provider-secret", ssh.stdout + ssh.stderr)
+
+                remote_env = subprocess.check_output(
+                    [
+                        "docker",
+                        "exec",
+                        "--user",
+                        "root",
+                        container_id,
+                        "stat",
+                        "-c",
+                        "%a:%U",
+                        "/run/cage-user/remote-env.json",
+                    ],
+                    text=True,
+                ).strip()
+                self.assertEqual(remote_env, "600:codex")
+            finally:
+                if container_id:
+                    subprocess.run(
+                        ["docker", "rm", "-f", container_id],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                subprocess.run(
+                    ["docker", "volume", "rm", volume],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+
     def test_codex_entrypoint_preserves_volume_owned_history(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)
