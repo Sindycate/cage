@@ -1,9 +1,22 @@
 services:
+  base:
+    build:
+      context: .
+      dockerfile: Dockerfile.base
+    image: cage-base:latest
   claude:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CAGE_BASE: cage-base:latest
     image: claude-code:latest
+    depends_on: [base]
   codex:
     build:
       context: .
       dockerfile: Dockerfile.codex
+      args:
+        CAGE_BASE: cage-base:latest
     image: codex:latest
+    depends_on: [base]

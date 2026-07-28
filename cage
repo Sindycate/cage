@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-CAGE_VERSION="0.26.1"
+CAGE_VERSION="0.26.2"
 CAGE_REGISTRY="ghcr.io/sindycate/cage"
+CAGE_BASE_IMAGE="cage-base:${CAGE_VERSION}"
 
 HOST_CLAUDE_DIR="$HOME/.claude"
 CAGE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cage"
@@ -16,6 +17,14 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR"
+
+# Ensure the shared base image exists locally (build from Dockerfile.base if needed)
+_ensure_base_image() {
+    if ! docker image inspect "$CAGE_BASE_IMAGE" &>/dev/null; then
+        echo "Building shared base image $CAGE_BASE_IMAGE..."
+        docker build -t "$CAGE_BASE_IMAGE" -f "$BUILD_DIR/Dockerfile.base" "$BUILD_DIR"
+    fi
+}
 
 _trim_preserving_quotes() {
     local s="$1"
@@ -91,7 +100,8 @@ RUN chown -R codex:codex /home/codex/.npm-global && chmod -R a+rwX /home/codex"
                 echo "Pulled $_upd_registry"
             else
                 echo "Pull failed or unavailable. Building locally..."
-                docker build -t "$_upd_image" -f "$BUILD_DIR/$_upd_dockerfile" "$BUILD_DIR"
+                _ensure_base_image
+                docker build --build-arg CAGE_BASE="$CAGE_BASE_IMAGE" -t "$_upd_image" -f "$BUILD_DIR/$_upd_dockerfile" "$BUILD_DIR"
             fi
         fi
         echo "Updating $_upd_tool in $_upd_image (re-running installer only)..."
@@ -969,7 +979,8 @@ fi
 # Image acquisition: pull from registry, fall back to local build
 if [ "$REBUILD" -eq 1 ]; then
     echo "Rebuilding $IMAGE from local Dockerfile..."
-    docker build --no-cache -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
+    docker build --no-cache -t "$CAGE_BASE_IMAGE" -f "$BUILD_DIR/Dockerfile.base" "$BUILD_DIR"
+    docker build --no-cache --build-arg CAGE_BASE="$CAGE_BASE_IMAGE" -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
 elif ! docker image inspect "$IMAGE" &>/dev/null; then
     echo "Image $IMAGE not found locally."
     if docker pull "$REGISTRY_IMAGE" 2>/dev/null; then
@@ -978,7 +989,8 @@ elif ! docker image inspect "$IMAGE" &>/dev/null; then
         echo "Pulled $REGISTRY_IMAGE"
     else
         echo "Pull failed or unavailable. Building locally..."
-        docker build -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
+        _ensure_base_image
+        docker build --build-arg CAGE_BASE="$CAGE_BASE_IMAGE" -t "$IMAGE" -t "${IMAGE%%:*}:latest" -f "$BUILD_DIR/$DOCKERFILE" "$BUILD_DIR"
     fi
 fi
 

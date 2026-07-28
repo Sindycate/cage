@@ -239,6 +239,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             self.assertIn("cage-9.9.9/cage", names)
             self.assertIn("cage-9.9.9/cage-tui.py", names)
             self.assertIn("cage-9.9.9/install.sh", names)
+            self.assertIn("cage-9.9.9/Dockerfile.base", names)
             self.assertIn("cage-9.9.9/netgate/defaults.json", names)
             self.assertIn("cage-9.9.9/docs/hardening/WORKFLOW.md", names)
             self.assertNotIn("cage-9.9.9/.git", names)
@@ -251,6 +252,86 @@ class ReleaseSupplyChainTests(unittest.TestCase):
                 self.assertEqual(member.uid, 0)
                 self.assertEqual(member.gid, 0)
                 self.assertEqual(member.mtime, 1700000000)
+
+class SharedBaseImageTests(unittest.TestCase):
+    """Validate the shared base image separation (ADR-001)."""
+
+    def test_base_dockerfile_contains_no_agent_binaries(self):
+        base = (ROOT / "Dockerfile.base").read_text(encoding="utf-8")
+        # Base must not install any agent binaries or agent-specific packages.
+        # Comments may mention agent names for context; check instructions only.
+        instructions = [
+            line for line in base.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        instruction_text = "\n".join(instructions)
+        self.assertNotIn("openssh-server", instruction_text)
+        self.assertNotIn("entrypoint", instruction_text)
+        self.assertNotIn("npm install", instruction_text)
+        self.assertNotIn("install.sh", instruction_text)
+        self.assertNotIn("useradd", instruction_text)
+        self.assertNotIn("codex-remote", instruction_text)
+
+    def test_base_dockerfile_contains_shared_infrastructure(self):
+        base = (ROOT / "Dockerfile.base").read_text(encoding="utf-8")
+        self.assertIn("ubuntu:24.04", base)
+        self.assertIn("bubblewrap", base)
+        self.assertIn("gosu", base)
+        self.assertIn("nodejs", base)
+        self.assertIn("gh", base)
+        self.assertIn("mcp-relay", base)
+        self.assertIn("host-cmd-relay", base)
+
+    def test_leaf_dockerfiles_reference_base(self):
+        for dockerfile_name in ("Dockerfile", "Dockerfile.codex"):
+            content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
+            self.assertIn("CAGE_BASE", content, f"{dockerfile_name} must reference CAGE_BASE build arg")
+            self.assertIn("FROM ${CAGE_BASE}", content, f"{dockerfile_name} must build FROM the base image")
+
+    def test_leaf_dockerfiles_do_not_duplicate_base_packages(self):
+        """Leaf images must not reinstall packages already in the base."""
+        base_packages = {"bubblewrap", "gosu", "ripgrep", "python3-venv"}
+        for dockerfile_name in ("Dockerfile", "Dockerfile.codex"):
+            content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
+            for pkg in base_packages:
+                self.assertNotIn(pkg, content,
+                    f"{dockerfile_name} should not reinstall base package '{pkg}'")
+
+    def test_codex_leaf_retains_openssh_server(self):
+        codex = (ROOT / "Dockerfile.codex").read_text(encoding="utf-8")
+        self.assertIn("openssh-server", codex)
+
+    def test_claude_leaf_does_not_have_openssh(self):
+        claude = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("openssh-server", claude)
+
+    def test_docker_compose_builds_base_first(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("Dockerfile.base", compose)
+        self.assertIn("depends_on: [base]", compose)
+
+    def test_cage_script_ensures_base_before_local_build(self):
+        launcher = (ROOT / "cage").read_text(encoding="utf-8")
+        self.assertIn("_ensure_base_image", launcher)
+        self.assertIn("Dockerfile.base", launcher)
+        self.assertIn("CAGE_BASE_IMAGE", launcher)
+
+    def test_release_workflow_builds_base_image(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("docker-base:", workflow)
+        self.assertIn("Dockerfile.base", workflow)
+        self.assertIn("CAGE_BASE=ghcr.io/sindycate/cage/base:", workflow)
+
+    def test_ci_builds_base_before_desktop_codex_smoke_image(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        base_build = "docker build -t cage-base:ci -f Dockerfile.base ."
+        leaf_build = (
+            "docker build --build-arg CAGE_BASE=cage-base:ci "
+            "-t codex:desktop-smoke -f Dockerfile.codex ."
+        )
+        self.assertIn(base_build, workflow)
+        self.assertIn(leaf_build, workflow)
+        self.assertLess(workflow.index(base_build), workflow.index(leaf_build))
 
 
 if __name__ == "__main__":

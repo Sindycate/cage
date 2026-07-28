@@ -1,26 +1,17 @@
-FROM ubuntu:24.04
+ARG CAGE_BASE=cage-base:latest
+FROM ${CAGE_BASE}
 
+LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
+LABEL org.opencontainers.image.description="cage - Docker isolation for AI coding assistants"
+
+# OpenSSH server is Codex-only (required for Desktop SSH target)
 RUN set -eux; \
     attempt=1; \
     while :; do \
       rm -rf /var/lib/apt/lists/*; \
       if apt-get -o Acquire::Retries=5 update && \
          apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-           bash \
-           bubblewrap \
-           ca-certificates \
-           curl \
-           git \
-           gosu \
-           jq \
-           less \
-           openssh-server \
-           procps \
-           python3 \
-           python3-pip \
-           python3-venv \
-           ripgrep \
-           sudo; then \
+           openssh-server; then \
         break; \
       fi; \
       if [ "$attempt" -ge 8 ]; then \
@@ -30,22 +21,6 @@ RUN set -eux; \
       sleep $((attempt * 5)); \
     done; \
     rm -rf /var/lib/apt/lists/*
-
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && apt-get install -y --no-install-recommends gh && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Node.js LTS (needed for Codex CLI npm package)
-RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
-LABEL org.opencontainers.image.description="cage - Docker isolation for AI coding assistants"
 
 # Create user before installing Codex so npm global prefix is user-writable
 # (allows Codex's built-in self-update to work without root)
@@ -62,13 +37,10 @@ RUN npm install -g @openai/codex && \
 
 COPY entrypoint-codex.sh /home/codex/entrypoint.sh
 COPY codex-remote.py /usr/local/bin/codex
-COPY mcp-relay /usr/local/bin/mcp-relay
-COPY host-cmd-relay /usr/local/bin/host-cmd-relay
-RUN chmod 755 /home/codex/entrypoint.sh /usr/local/bin/codex /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
+RUN chmod 755 /home/codex/entrypoint.sh /usr/local/bin/codex
 
 ENV HOME=/home/codex
 ENV PATH=/home/codex/.npm-global/bin:/home/codex/.local/bin:$PATH
-ENV HISTFILE=/dev/null
 
 WORKDIR /home/codex
 RUN chmod -R a+rwX /home/codex

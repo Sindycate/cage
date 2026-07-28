@@ -306,6 +306,7 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue((install_dir / ".cage-install").is_file())
             self.assertFalse((install_dir / ".cage-install").is_symlink())
             self.assertTrue((install_dir / "cage-tui.py").is_file())
+            self.assertTrue((install_dir / "Dockerfile.base").is_file())
             self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "cage-desktop.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "codex-remote.py", os.X_OK))

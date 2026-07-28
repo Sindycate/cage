@@ -32,11 +32,15 @@ from typing import Any
 
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
+MAX_DESKTOP_TARGETS = 256
+MAX_PRESET_CHARS = 128
+MAX_REPO_CHARS = 4096
 TARGET_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 PRESET_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 ALIAS_COMPONENT_RE = re.compile(r"[^A-Za-z0-9-]+")
 SETUP_VERSION = 1
 STATE_VERSION = 1
+LIST_FORMAT_VERSION = 1
 
 
 class DesktopError(RuntimeError):
@@ -165,14 +169,24 @@ def read_json(path: Path, *, missing_ok: bool = False) -> dict[str, Any] | None:
 
 
 def canonical_repo(raw: str) -> Path:
+    if (
+        len(raw) > MAX_REPO_CHARS
+        or any(character in raw for character in "\0\r\n")
+    ):
+        raise DesktopError("repository path is invalid or too long")
     path = Path(raw).expanduser().resolve(strict=True)
+    if (
+        len(str(path)) > MAX_REPO_CHARS
+        or any(character in str(path) for character in "\0\r\n")
+    ):
+        raise DesktopError("repository path is invalid or too long")
     if not path.is_dir():
         raise DesktopError(f"repository is not a directory: {path}")
     return path
 
 
 def validate_preset(name: str) -> str:
-    if not PRESET_RE.fullmatch(name):
+    if len(name) > MAX_PRESET_CHARS or not PRESET_RE.fullmatch(name):
         raise DesktopError(f"invalid preset name: {name!r}")
     return name
 
@@ -461,7 +475,15 @@ def metadata_entries(args: argparse.Namespace) -> list[dict[str, Any]]:
             continue
         value = read_json(metadata_path(child), missing_ok=True)
         if value:
+            if value.get("target_id") != child.name:
+                raise DesktopError(
+                    f"desktop target metadata does not match its directory: {child}"
+                )
             entries.append(value)
+            if len(entries) > MAX_DESKTOP_TARGETS:
+                raise DesktopError(
+                    f"too many registered desktop targets (maximum {MAX_DESKTOP_TARGETS})"
+                )
     return entries
 
 
@@ -803,6 +825,88 @@ def runtime_status(root: Path) -> dict[str, Any]:
     if not value:
         return {"status": "stopped"}
     return value
+
+
+def live_runtime_status(root: Path) -> dict[str, Any]:
+    """Return current state, marking an unreachable running target stale."""
+    runtime = runtime_status(root)
+    status = runtime.get("status")
+    if status in {"starting", "ready", "stopping"}:
+        try:
+            runtime = control_request(root, "status")
+        except DesktopError:
+            transition_key = "started_at" if status == "starting" else "stopping_at"
+            transition_at = runtime.get(transition_key)
+            transition_age = (
+                time.time() - transition_at
+                if isinstance(transition_at, int) and not isinstance(transition_at, bool)
+                else None
+            )
+            if (
+                status != "ready"
+                and transition_age is not None
+                and 0 <= transition_age < 30
+            ):
+                return runtime
+            runtime = merge_runtime(
+                root,
+                {"status": "stale", "container_id": None},
+            )
+    return runtime
+
+
+def public_target_summary(
+    args: argparse.Namespace, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the bounded, non-secret target shape consumed by the TUI."""
+    identifier = metadata.get("target_id")
+    preset = metadata.get("preset")
+    repo = metadata.get("repo")
+    alias = metadata.get("alias")
+    volume = metadata.get("volume_name")
+    if not isinstance(identifier, str) or not TARGET_ID_RE.fullmatch(identifier):
+        raise DesktopError("desktop target metadata has an invalid target id")
+    if (
+        not isinstance(preset, str)
+        or len(preset) > MAX_PRESET_CHARS
+        or not PRESET_RE.fullmatch(preset)
+    ):
+        raise DesktopError(f"desktop target {identifier} has an invalid preset")
+    if (
+        not isinstance(repo, str)
+        or len(repo) > MAX_REPO_CHARS
+        or not Path(repo).is_absolute()
+        or any(character in repo for character in "\0\r\n")
+    ):
+        raise DesktopError(f"desktop target {identifier} has an invalid repository")
+    if target_id(Path(repo), preset) != identifier:
+        raise DesktopError(f"desktop target {identifier} has an invalid identity")
+    expected_alias = target_alias(Path(repo), preset, identifier)
+    if alias != expected_alias:
+        raise DesktopError(f"desktop target {identifier} has an invalid SSH alias")
+    expected_volume = f"cage-codex-desktop-{identifier}"
+    if volume != expected_volume:
+        raise DesktopError(f"desktop target {identifier} has an invalid volume")
+    runtime = live_runtime_status(target_root(args, identifier))
+    status = runtime.get("status", "stopped")
+    if status not in {"starting", "ready", "stopping", "stopped", "stale", "failed"}:
+        status = "unknown"
+    summary: dict[str, Any] = {
+        "target_id": identifier,
+        "alias": alias,
+        "preset": preset,
+        "repo": repo,
+        "status": status,
+        "volume_name": volume,
+    }
+    for key in ("started_at", "ready_at", "stopped_at", "exit_code"):
+        value = runtime.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            summary[key] = value
+    container_id = runtime.get("container_id")
+    if isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{12,64}", container_id):
+        summary["container_id"] = container_id
+    return summary
 
 
 def control_request(root: Path, command: str, timeout: float = 5.0) -> dict[str, Any]:
@@ -1203,12 +1307,7 @@ def command_status(args: argparse.Namespace) -> int:
     located = locate_target(args)
     assert located is not None
     root, metadata = located
-    runtime = runtime_status(root)
-    if runtime.get("status") in {"starting", "ready"}:
-        try:
-            runtime = control_request(root, "status")
-        except DesktopError:
-            runtime = merge_runtime(root, {"status": "stale", "container_id": None})
+    runtime = live_runtime_status(root)
     print(f"Host:       {metadata['alias']}")
     print(f"Repository: {metadata['repo']}")
     print(f"Preset:     {metadata['preset']}")
@@ -1221,14 +1320,20 @@ def command_status(args: argparse.Namespace) -> int:
 
 def command_list(args: argparse.Namespace) -> int:
     entries = metadata_entries(args)
-    if not entries:
+    summaries = [public_target_summary(args, item) for item in entries]
+    if args.json:
+        print(json.dumps(
+            {"version": LIST_FORMAT_VERSION, "targets": summaries},
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+        return 0
+    if not summaries:
         print("No Cage desktop targets.")
         return 0
-    for item in entries:
-        root = target_root(args, str(item["target_id"]))
-        status = runtime_status(root).get("status", "stopped")
+    for item in summaries:
         print(
-            f"{item['alias']}\t{status}\t{item['preset']}\t{item['repo']}"
+            f"{item['alias']}\t{item['status']}\t{item['preset']}\t{item['repo']}"
         )
     return 0
 
@@ -1426,7 +1531,13 @@ def command_supervise(args: argparse.Namespace) -> int:
                     request = connection.recv(128).decode("utf-8", "replace").strip()
                     if request == "stop":
                         stop_requested = True
-                        merge_runtime(root, {"status": "stopping"})
+                        merge_runtime(
+                            root,
+                            {
+                                "status": "stopping",
+                                "stopping_at": int(time.time()),
+                            },
+                        )
                         with contextlib.suppress(ProcessLookupError):
                             os.killpg(child.pid, signal.SIGTERM)
                         response = {"ok": True}
@@ -1482,7 +1593,12 @@ def build_parser() -> argparse.ArgumentParser:
         item = sub.add_parser(name)
         add_target_selector(item)
 
-    sub.add_parser("list")
+    list_targets = sub.add_parser("list")
+    list_targets.add_argument(
+        "--json",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     remove = sub.add_parser("remove")
     add_target_selector(remove)

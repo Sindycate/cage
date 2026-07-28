@@ -238,7 +238,7 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
         cage cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
         codex-remote.py
-        docker-compose.yml Dockerfile Dockerfile.codex
+        docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex
         entrypoint.sh entrypoint-codex.sh install.sh Makefile README.md SECURITY.md
         CHANGELOG.md
     )

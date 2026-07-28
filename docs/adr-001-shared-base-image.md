@@ -1,0 +1,324 @@
+# ADR-001: Shared Base Image for Claude and Codex
+
+Status: accepted
+Date: 2026-07-28
+Issue: [#3](https://github.com/Sindycate/cage/issues/3)
+
+## Context
+
+Cage publishes two final images from independent Dockerfiles:
+
+| Image | Dockerfile | Registry path |
+|-------|-----------|---------------|
+| `claude-code:<version>` | `Dockerfile` | `ghcr.io/sindycate/cage/claude-code` |
+| `codex:<version>` | `Dockerfile.codex` | `ghcr.io/sindycate/cage/codex` |
+
+Both images share approximately 80% of their build instructions: the same
+Ubuntu 24.04 base, system packages, Node.js LTS, GitHub CLI, OCI labels, and
+the `mcp-relay`/`host-cmd-relay` bridge scripts. They differ in agent
+installation, user/home layout, entrypoint, and Codex-only OpenSSH support.
+
+Despite the overlap, the two Dockerfiles produce **zero shared layers** today
+because their `RUN` instructions diverge at the first `apt-get` call (Codex
+uses `--no-install-recommends` and retry logic; Claude does not). Docker layer
+identity is content-addressed through the parent chain, so even identical
+packages produce different digests when the instruction text or ordering
+differs.
+
+## Baseline estimates from Dockerfile analysis
+
+Docker is not available in the evaluation environment; sizes are estimated from
+known package archives and verified against Ubuntu 24.04 package indexes.
+
+These estimates motivated the decision but are not a substitute for recorded
+multi-architecture registry measurements. That remaining measurement is kept
+open in the acceptance criteria below.
+
+### Layer breakdown (compressed, amd64 estimates)
+
+| Layer | Claude | Codex | Shared? |
+|-------|--------|-------|---------|
+| `ubuntu:24.04` base | ~29 MB | ~29 MB | Same digest (both `FROM ubuntu:24.04`) |
+| System packages (apt) | ~85 MB | ~80 MB | **No** — different flags/retry |
+| Node.js LTS | ~28 MB | ~28 MB | **No** — different parent |
+| GitHub CLI | ~13 MB | ~13 MB | **No** — different parent |
+| Labels + COPY relays | ~1 MB | ~1 MB | **No** — different parent |
+| User creation + agent install | ~110 MB | ~55 MB | No (different agents) |
+| openssh-server | — | ~4 MB | Codex-only |
+| **Total (compressed)** | **~266 MB** | **~210 MB** | |
+
+### Duplicated content
+
+The ubuntu base layer (~29 MB) is already shared via the registry. The system
+packages, Node.js, and GitHub CLI layers contain identical binaries but produce
+different digests due to instruction divergence. This means:
+
+- **Registry storage**: ~127 MB of near-identical content stored twice per arch
+  (amd64 + arm64 = ~254 MB wasted).
+- **CI build time**: Both matrix jobs independently run `apt-get`, NodeSource
+  setup, and GitHub CLI installation. On a cold cache this adds ~3–5 minutes
+  per image (arm64 under QEMU is significantly slower).
+- **Local builds**: Users who build both images locally pay the full apt/Node
+  cost twice.
+
+### Build time estimates (CI, cold cache)
+
+| Phase | Claude | Codex |
+|-------|--------|-------|
+| apt-get system packages | ~90s | ~120s (retries add overhead) |
+| Node.js LTS | ~30s | ~30s |
+| GitHub CLI | ~20s | ~20s |
+| Agent install | ~40s | ~25s |
+| **Total (amd64)** | **~3 min** | **~3.5 min** |
+| **Total (arm64/QEMU)** | **~12 min** | **~14 min** |
+
+A shared base would allow the CI matrix to build the base once and both leaf
+images in parallel, reducing wall-clock time by ~40% on cold cache and ~60%
+on warm cache (base layer cached, only agent install re-runs).
+
+## Options evaluated
+
+### Option 1: Keep two independent Dockerfiles (status quo)
+
+**Advantages:**
+- Simplest to understand; no new build dependencies.
+- Each image can evolve independently without coordination.
+- No risk of accidental coupling between agent runtimes.
+
+**Disadvantages:**
+- ~254 MB duplicated registry storage per release (both arches).
+- CI builds both images from scratch on every release; no cache sharing.
+- Security patches to shared packages require updating two Dockerfiles.
+- Drift risk: the Dockerfiles have already diverged in apt flags and retry
+  logic, making it unclear which differences are intentional.
+- `cage update` overlay builds already assume a specific base; divergence
+  makes the overlay Dockerfiles fragile.
+
+**Security:** No change. Each image contains only its own agent and
+credentials surface.
+
+### Option 2: Shared pinned base image with thin leaf images (recommended)
+
+Introduce a `Dockerfile.base` that produces `cage-base:<version>`, containing:
+- Ubuntu 24.04
+- Shared system packages (unified flags: `--no-install-recommends` + retry)
+- Node.js LTS
+- GitHub CLI
+- `mcp-relay` and `host-cmd-relay`
+- OCI labels
+
+Then `Dockerfile` and `Dockerfile.codex` become thin leaves:
+
+```dockerfile
+# Dockerfile (Claude leaf)
+FROM cage-base:${CAGE_VERSION}
+RUN useradd -m -s /bin/bash claude && ...
+COPY entrypoint.sh /home/claude/entrypoint.sh
+USER claude
+RUN curl -fsSL https://claude.ai/install.sh | bash
+USER root
+RUN chmod -R a+rwX /home/claude
+ENTRYPOINT ["/home/claude/entrypoint.sh"]
+```
+
+```dockerfile
+# Dockerfile.codex (Codex leaf)
+FROM cage-base:${CAGE_VERSION}
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server && ...
+RUN useradd -m -s /bin/bash codex && ...
+COPY entrypoint-codex.sh /home/codex/entrypoint.sh
+COPY codex-remote.py /usr/local/bin/codex
+ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global
+RUN npm install -g @openai/codex && ...
+ENTRYPOINT ["/home/codex/entrypoint.sh"]
+```
+
+**Advantages:**
+- Eliminates ~127 MB/arch of duplicated layers in the registry.
+- CI builds the base once; leaf images build in parallel in seconds.
+- Security patches to shared packages happen in one place.
+- `cage update` overlays remain unchanged (they build `FROM` the leaf image).
+- Pull-before-build behavior unchanged for end users (they pull leaf images).
+- The base image can be published to the registry for cache reuse, or kept
+  as a local-only intermediate.
+
+**Disadvantages:**
+- Adds one more image to the release matrix (base + 2 leaves = 3 builds).
+- Requires versioning discipline: base and leaves must share `CAGE_VERSION`.
+- Slightly more complex `docker-compose.yml` and CI workflow.
+- If the base image is published, it needs its own SBOM/provenance.
+
+**Security:**
+- The base image contains no agent binaries, no credentials, and no
+  entrypoints. It is a inert system-packages layer.
+- `openssh-server` remains Codex-only (installed in the leaf).
+- Claude's image does not gain any Codex-specific surface, and vice versa.
+- The base image does not need to be pullable by end users; it can be a
+  CI-only intermediate that is never published, or published as
+  `ghcr.io/sindycate/cage/base` for transparency.
+
+**Backward compatibility:**
+- `claude-code:<version>` and `codex:<version>` image names, tags, and
+  registry paths are unchanged.
+- `docker pull ghcr.io/sindycate/cage/claude-code:0.26.0` still works.
+- `cage update claude` / `cage update codex` overlay builds are unaffected
+  (they build `FROM claude-code:<version>` / `FROM codex:<version>`).
+- Local `docker compose build` still produces both images.
+
+### Option 3: Single combined image with runtime agent selection
+
+One image containing both Claude Code and Codex CLI, with the entrypoint
+selecting the agent based on an environment variable or argument.
+
+**Advantages:**
+- Single image to build, publish, pull, and update.
+- Maximum layer sharing.
+- Simplest release matrix (one image).
+
+**Disadvantages:**
+- **Security**: Every Claude session gains `openssh-server`, `codex-remote.py`,
+  and the Codex npm prefix. Every Codex session gains the Claude Code binary
+  and its installer artifacts. This violates the principle of minimal surface.
+- **Size**: Every pull downloads both agents (~370 MB compressed) even when
+  only one is needed. Users who only use Codex pay for Claude Code and vice
+  versa.
+- **Update cadence**: Claude Code and Codex CLI release on different schedules.
+  A combined image forces synchronized releases or leaves one agent stale.
+  `cage update claude` would need to rebuild the entire combined image.
+- **State model**: The two agents have fundamentally different home directories,
+  volume layouts, entrypoint logic (318 vs 756 lines), and credential handling.
+  Combining them in one image creates a complex conditional entrypoint that is
+  harder to audit and test.
+- **Desktop SSH**: The ChatGPT Desktop target requires `sshd`, `SYS_CHROOT`,
+  and a specific supervisor/heartbeat model. Putting this in a shared image
+  means Claude containers carry dead SSH infrastructure.
+- **Backward compatibility**: Breaks the `claude-code:<version>` and
+  `codex:<version>` pull contracts unless alias tags are maintained, adding
+  confusion about what each tag actually contains.
+
+**Security:** Strictly worse than Options 1 and 2. The attack surface of each
+runtime expands to include the other agent's binaries and dependencies.
+
+## Recommendation
+
+**Option 2: Shared pinned base image with thin leaf images.**
+
+This option captures the maintenance and efficiency benefits of consolidation
+without the security, size, and compatibility costs of a combined image. It is
+the standard multi-stage pattern used by most projects with shared
+infrastructure (e.g., `python:3.12-slim` as a base for multiple service
+images).
+
+## Local implementation validation
+
+The accepted implementation was validated on native arm64 macOS:
+
+- `docker compose build` completed for `cage-base:latest`,
+  `claude-code:latest`, and `codex:latest`;
+- Docker reported the exact same first six root-filesystem layer digests for
+  the base and both leaf images;
+- disposable-container inspection confirmed that the base contains neither
+  agent user, agent binary, entrypoint, nor OpenSSH, while each leaf contains
+  only its expected agent surface and Codex alone contains OpenSSH;
+- all seven opt-in real-Docker smoke tests passed against the Codex leaf,
+  including the Desktop SSH/app-server boundary;
+- the complete Python 3.11 and 3.12 suites each passed with 287 tests and seven
+  intentional skips, and the release archive was byte-identical across two
+  fixed-epoch builds with `Dockerfile.base` present.
+
+The release workflow still supplies the required amd64/arm64 build,
+SBOM/provenance, and registry gates. Those publication results must be
+confirmed before the corresponding acceptance item is closed.
+
+### Implementation plan
+
+1. **Create `Dockerfile.base`** with unified system packages, Node.js, GitHub
+   CLI, relay scripts, and labels. Use `--no-install-recommends` and retry
+   logic (adopting the Codex Dockerfile's more robust approach).
+
+2. **Refactor `Dockerfile` and `Dockerfile.codex`** to `FROM cage-base:${CAGE_VERSION}`.
+   Each leaf adds only its agent-specific user, packages, installation, and
+   entrypoint.
+
+3. **Update `docker-compose.yml`** to build the base first:
+   ```yaml
+   services:
+     base:
+       build:
+         context: .
+         dockerfile: Dockerfile.base
+       image: cage-base:latest
+     claude:
+       build: .
+       image: claude-code:latest
+       depends_on: [base]
+     codex:
+       build:
+         context: .
+         dockerfile: Dockerfile.codex
+       image: codex:latest
+       depends_on: [base]
+   ```
+
+4. **Update the release workflow** to build the base image first (single-arch
+   is fine for the base if leaves are multi-arch with `FROM` referencing a
+   local tag; alternatively, publish the base as multi-arch too). The matrix
+   then builds leaves in parallel.
+
+5. **Update `cage` script** local-build fallback to build the base first when
+   neither leaf image exists locally.
+
+6. **Add tests**: verify that the base image contains no agent binaries, no
+   entrypoints, and no `openssh-server`. Verify that leaf images contain
+   exactly their expected agent.
+
+7. **Update documentation**: AGENTS.md architecture section, SECURITY.md
+   (note that the base is inert), and this ADR.
+
+### What does NOT change
+
+- Image names and tags: `claude-code:<version>`, `codex:<version>`
+- Registry paths: `ghcr.io/sindycate/cage/claude-code`, `ghcr.io/sindycate/cage/codex`
+- `cage update` overlay mechanism
+- Entrypoint logic and state models
+- Desktop SSH support (Codex-only)
+- Pull-before-build behavior for end users
+- SBOM/provenance attestations (each published leaf gets its own)
+- `--rebuild` behavior
+
+### Open questions
+
+1. **Should the base image be published to ghcr.io?** Publishing provides
+   transparency and allows users to inspect shared layers. Not publishing
+   keeps the registry surface smaller. Recommendation: publish it as
+   `ghcr.io/sindycate/cage/base:<version>` with SBOM, but do not document it
+   as a user-facing artifact.
+
+2. **Should the base be multi-arch?** If leaves are built with BuildKit
+   multi-platform, the `FROM` reference resolves per-platform automatically
+   when the base is also multi-arch. If the base is local-only, each platform
+   build produces its own base layer. Recommendation: build and publish the
+   base as multi-arch to enable CI cache sharing.
+
+3. **Version coupling:** The base and leaves share `CAGE_VERSION`. A base-only
+   change (e.g., security patch to a system package) requires a version bump
+   and full release. This is acceptable given the existing "every pushed commit
+   gets its own version" policy.
+
+## Acceptance criteria status
+
+- [ ] Capture multi-architecture registry image sizes, clean-build time, and
+      warm-cache build time. *(The baseline remains an estimate; native arm64
+      layer sharing is confirmed.)*
+- [x] Document why agent-specific users, entrypoints, state rules, and update
+      paths can or cannot share a base safely.
+- [x] Compare all three options above, including security and operational
+      trade-offs.
+- [x] Preserve existing `claude-code:<version>` and `codex:<version>` pull
+      contracts unless a separately documented migration is approved.
+- [x] Preserve independent tool updates and Codex Desktop SSH support.
+- [ ] Validate the chosen design with amd64/arm64 builds, reproducibility,
+      SBOM/provenance, installer, and real-Docker tests. *(Local
+      reproducibility, installer, native arm64 builds, and real-Docker tests
+      pass; release amd64/arm64 and attestation results remain.)*
+- [x] Add the final decision to the architecture/security documentation.

@@ -62,9 +62,10 @@ ln -sf ~/cage/cage ~/.local/bin/cage
 Docker images are built automatically on first run. To pre-build:
 
 ```bash
-docker compose build              # both images
-docker compose build claude       # just Claude Code
-docker compose build codex        # just Codex CLI
+docker compose build              # shared base, then both agent images
+docker compose build base         # just the agent-neutral shared base
+docker compose build claude       # Claude Code (requires the base)
+docker compose build codex        # Codex CLI (requires the base)
 ```
 
 ## Usage
@@ -433,7 +434,18 @@ SSH-host workflow:
 ./install.sh --from-source
 cage desktop setup
 cage --preset codex-company --desktop ~/path/to/repo
+```
 
+After a target has been registered, open the normal TUI with `cage` and choose
+**Manage Desktop targets**. The screen lists all registered targets regardless
+of the configuration selected for the current folder, shows live status, and
+offers start/recover, restart, recent logs, stop, and confirmed removal. Each
+action uses the selected target's own saved preset and repository, so it
+reconnects the same persistent volume and history.
+
+The equivalent lifecycle commands remain available for scripts:
+
+```bash
 cage desktop status --preset codex-company ~/path/to/repo
 cage desktop restart --preset codex-company ~/path/to/repo
 cage desktop stop --preset codex-company ~/path/to/repo
@@ -452,6 +464,10 @@ preset. Repository plus preset gets a dedicated persistent Codex volume and
 SSH identity, so providers cannot overwrite one another's configuration or
 history. `stop` preserves that state; `remove` requires confirmation and
 deletes it.
+
+Mac sleep does not count as missed supervisor time. After wake, the watchdog
+grants a fresh active-time heartbeat window; if the supervisor is genuinely
+gone, the container still shuts down fail-closed after that window.
 
 No SSH or app-server port is published. The generated host uses an absolute
 installed Cage helper as `ProxyCommand`, which runs one inetd-mode SSH
@@ -560,7 +576,10 @@ cage codex --rebuild ~/path/to/repo
 Tagged releases publish the source archive, its SHA-256 checksum, and an SPDX
 SBOM. GitHub also records signed provenance and SBOM attestations for the source
 archive. The two GHCR images carry BuildKit SBOM and max-level provenance
-metadata plus a signed GitHub provenance attestation.
+metadata plus a signed GitHub provenance attestation. Their agent-neutral
+shared base is published under `ghcr.io/sindycate/cage/base` with the same
+metadata and signed provenance; the existing `claude-code` and `codex` image
+names remain unchanged.
 
 ```bash
 VERSION="$(cage --version | awk '{print $NF}')"

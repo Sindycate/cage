@@ -77,9 +77,11 @@ jobs:
           CAGE_RUN_DOCKER_SMOKE: '1'
         run: python -m pytest -q tests/test_docker_smoke.py
 
-      - name: Build Desktop Codex smoke image
+      - name: Build shared base and Desktop Codex smoke image
         if: matrix.python-version == '3.12'
-        run: docker build -t codex:desktop-smoke -f Dockerfile.codex .
+        run: |
+          docker build -t cage-base:ci -f Dockerfile.base .
+          docker build --build-arg CAGE_BASE=cage-base:ci -t codex:desktop-smoke -f Dockerfile.codex .
 
       - name: Run Desktop SSH integration smoke test
         if: matrix.python-version == '3.12'

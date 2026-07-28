@@ -3,6 +3,42 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-28 — v0.26.2 release candidate shared base-image integration
+
+Implemented ADR-001 with one agent-neutral `Dockerfile.base`, thin Claude and
+Codex leaf Dockerfiles, version-coupled local fallback builds, and a
+multi-architecture release base that receives BuildKit SBOM/provenance metadata
+plus signed GitHub provenance. Agent binaries, users, entrypoints, and
+Codex-only OpenSSH remain outside the base; existing leaf registry paths and
+update behavior remain unchanged.
+
+Integration review added the base Dockerfile to source installs and
+reproducible release archives, restored portable source modes, fixed the direct
+unittest entry point so shared-base tests cannot be skipped, and made normal CI
+build the base before its Codex smoke leaf.
+
+## 2026-07-28 — v0.26.2 release candidate Desktop lifecycle TUI
+
+Added a top-level macOS Desktop target manager to the ordinary Cage TUI. It
+discovers registered targets through a versioned, bounded, non-secret JSON
+interface rather than the current folder's resolved preset. The selected
+target's stored repository and preset drive start/recover, restart, logs,
+stop, and exact-alias-confirmed removal, preventing a mismatched project
+mapping from creating or operating on a different persistent volume.
+
+Changed the remote watchdog from wall-clock heartbeat age to active polling
+progress. A Mac sleep or scheduler gap starts a fresh grace window after wake;
+an unchanged or missing heartbeat still exits fail-closed after 45 active
+seconds. The installed TUI discovered the pre-existing Desktop target from an
+ordinary container configuration without restarting or replacing its volume.
+After reconciliation onto the public v0.26.1 privacy-hardening commit, Python
+3.11 and 3.12 each pass the complete suite (`287 passed, 7 skipped`), all seven
+real-Docker smokes pass against the rebuilt Codex leaf, and disposable image
+checks preserve agent/OpenSSH separation. Fixed-epoch v0.26.2 archives are
+byte-identical, contain `Dockerfile.base`, and pass the extracted-archive
+Gitleaks scan; the combined worktree also passes the neutral-public-evidence
+and Gitleaks gates.
+
 ## 2026-07-28 — v0.26.1 public-repository privacy hardening
 
 Removed maintainer-specific validation metadata from current tracked content

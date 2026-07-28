@@ -13,6 +13,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -115,6 +116,19 @@ class StubController:
 
 
 class CageTuiTests(unittest.TestCase):
+    @staticmethod
+    def desktop_target(status: str = "failed") -> dict:
+        identifier = "0123456789abcdef"
+        return {
+            "target_id": identifier,
+            "alias": "cage-qwen-project-01234567",
+            "preset": "qwen",
+            "repo": "/Users/example/project",
+            "status": status,
+            "volume_name": f"cage-codex-desktop-{identifier}",
+            "exit_code": 70 if status == "failed" else None,
+        }
+
     def write_config(self, path: Path) -> None:
         path.write_text(
             """version = 1
@@ -344,6 +358,125 @@ extra_mounts = [{ path = "/tmp/output", mode = "rw" }]
         view = cage_tui.CursesView(FakeScreen(keys), StubController())
 
         self.assertEqual(view.choose_names("Packs", ["a", "b", "c"], []), ["b", "c"])
+
+    def test_failed_desktop_target_offers_recovery_without_current_preset(self):
+        controller = StubController()
+        controller.repo = Path("/different/current/repository")
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        captured = {}
+
+        def choose(_title, options, details=None, **_kwargs):
+            captured["options"] = dict(options)
+            captured["details"] = details
+            return ""
+
+        view.menu = choose
+        view.manage_desktop_target(self.desktop_target())
+
+        self.assertEqual(
+            captured["options"]["start"],
+            "Start / recover and open ChatGPT",
+        )
+        self.assertIn("Status: FAILED", captured["details"])
+        self.assertNotIn(str(controller.repo), "\n".join(captured["details"]))
+
+    def test_main_screen_shows_desktop_manager_for_container_configuration(self):
+        controller = StubController()
+        controller.snapshot = {
+            "effective": {
+                "tool": "codex",
+                "codex_profile": "",
+                "auth": "",
+                "identity": "",
+                "mcp_packs": [],
+                "skill_packs": [],
+                "session_sync": False,
+            }
+        }
+        controller.effective_exec_state = lambda _preset: ("container", False, "open")
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        captured = {}
+
+        def choose(_title, options, *_args, **_kwargs):
+            captured["options"] = dict(options)
+            return "quit"
+
+        view.menu = choose
+        with patch.object(cage_tui.sys, "platform", "darwin"):
+            self.assertEqual(view.run(), 1)
+
+        self.assertEqual(
+            captured["options"]["desktop-targets"],
+            "Manage Desktop targets",
+        )
+
+    def test_ready_desktop_target_offers_restart_and_safe_stop(self):
+        view = cage_tui.CursesView(FakeScreen(), StubController())
+        captured = {}
+
+        def choose(_title, options, *_args, **_kwargs):
+            captured["options"] = dict(options)
+            return ""
+
+        view.menu = choose
+
+        view.manage_desktop_target(self.desktop_target("ready"))
+
+        self.assertIn("restart", captured["options"])
+        self.assertIn("stop", captured["options"])
+        self.assertEqual(
+            captured["options"]["start"],
+            "Open ChatGPT (reuse ready target)",
+        )
+
+    def test_desktop_remove_requires_exact_alias_before_yes_bypass(self):
+        controller = StubController()
+        calls = []
+        controller.run_desktop_action = (
+            lambda action, target, assume_yes=False:
+            calls.append((action, target, assume_yes)) or (0, "removed")
+        )
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        target = self.desktop_target("stopped")
+        view.menu = lambda *_args, **_kwargs: "remove"
+        confirmation = {}
+
+        def confirm(_title, _lines, phrase="yes", **kwargs):
+            confirmation.update(phrase=phrase, **kwargs)
+            return True
+
+        view.confirm = confirm
+        view.manage_desktop_target(target)
+
+        self.assertEqual(confirmation["phrase"], target["alias"])
+        self.assertTrue(confirmation["case_sensitive"])
+        self.assertEqual(calls, [("remove", target, True)])
+
+    def test_desktop_action_failure_is_kept_inside_tui(self):
+        controller = StubController()
+        controller.run_desktop_action = (
+            lambda *_args, **_kwargs: (1, "bridge unavailable")
+        )
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        target = self.desktop_target("failed")
+        view.menu = lambda *_args, **_kwargs: "start"
+        shown = {}
+        view.show_text = lambda title, lines: shown.update(title=title, lines=lines)
+
+        view.manage_desktop_target(target)
+
+        self.assertEqual(shown["title"], "Desktop action failed")
+        self.assertEqual(shown["lines"], ["bridge unavailable"])
+        self.assertIn("failed", view.message)
+
+    def test_scrollable_text_view_keeps_logs_in_curses(self):
+        screen = FakeScreen([curses.KEY_END, 10], height=6, width=30)
+        view = cage_tui.CursesView(screen, StubController())
+
+        view.show_text("Desktop logs", [f"line {index}" for index in range(20)])
+
+        rendered = " ".join(text for _, _, text, _ in screen.writes)
+        self.assertIn("line 19", rendered)
 
     def test_edit_preset_clears_environment_names_without_comma_workaround(self):
         controller = StubController()

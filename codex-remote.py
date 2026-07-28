@@ -16,6 +16,9 @@ REAL_CODEX = "/home/codex/.npm-global/bin/codex"
 ENV_PATH = Path("/run/cage-user/remote-env.json")
 LAUNCH_PATH = Path("/run/cage-user/remote-launch.json")
 ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+HEARTBEAT_TIMEOUT = 45.0
+HEARTBEAT_POLL_INTERVAL = 2.0
+SCHEDULER_GAP_GRACE = 10.0
 
 
 def load_object(path: Path) -> dict:
@@ -57,6 +60,19 @@ def launch() -> None:
     os.execve(REAL_CODEX, arguments, environment)
 
 
+def evaluate_heartbeat(
+    marker: int | None,
+    previous_marker: object,
+    now: float,
+    last_progress: float,
+    last_check: float,
+) -> tuple[object, float, bool]:
+    """Track active-time heartbeat loss without treating host sleep as failure."""
+    if now - last_check > SCHEDULER_GAP_GRACE or marker != previous_marker:
+        last_progress = now
+    return marker, last_progress, now - last_progress > HEARTBEAT_TIMEOUT
+
+
 def wait_for_supervisor(heartbeat: Path) -> None:
     stopping = False
 
@@ -66,15 +82,27 @@ def wait_for_supervisor(heartbeat: Path) -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    previous_marker: object = object()
+    last_progress = time.monotonic()
+    last_check = last_progress
     while not stopping:
+        now = time.monotonic()
         try:
-            age = time.time() - heartbeat.stat().st_mtime
+            marker = heartbeat.stat().st_mtime_ns
         except FileNotFoundError:
-            age = 10_000
-        if age > 45:
+            marker = None
+        previous_marker, last_progress, expired = evaluate_heartbeat(
+            marker,
+            previous_marker,
+            now,
+            last_progress,
+            last_check,
+        )
+        last_check = now
+        if expired:
             print("cage: desktop supervisor heartbeat expired", file=sys.stderr)
             raise SystemExit(70)
-        time.sleep(2)
+        time.sleep(HEARTBEAT_POLL_INTERVAL)
 
 
 def main() -> None:

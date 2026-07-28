@@ -318,6 +318,211 @@ class DesktopSshSetupTests(unittest.TestCase):
 
 
 class DesktopLifecycleSafetyTests(unittest.TestCase):
+    def test_repository_selector_rejects_control_characters_before_resolution(self):
+        for value in (
+            "/Users/example/project\ninjected",
+            "/Users/example/project\rinjected",
+            "/Users/example/project\0injected",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    desktop.DesktopError,
+                    "invalid or too long",
+                ):
+                    desktop.canonical_repo(value)
+
+    def test_json_list_exposes_only_bounded_non_secret_target_state(self):
+        with tempfile.TemporaryDirectory() as raw:
+            config_root = Path(raw)
+            args = argparse.Namespace(config_dir=str(config_root), json=True)
+            repo = Path("/Users/example/project")
+            preset = "qwen"
+            identifier = desktop.target_id(repo, preset)
+            root = desktop.target_root(args, identifier)
+            root.mkdir(parents=True)
+            metadata = {
+                "version": 1,
+                "target_id": identifier,
+                "alias": desktop.target_alias(repo, preset, identifier),
+                "repo": str(repo),
+                "preset": preset,
+                "private_key": "/secret/client-key",
+                "public_key": "/secret/client-key.pub",
+                "known_hosts": "/secret/known-hosts",
+                "container_name": f"cage-desktop-{identifier}",
+                "volume_name": f"cage-codex-desktop-{identifier}",
+            }
+            desktop.write_json(desktop.metadata_path(root), metadata)
+            desktop.write_json(
+                desktop.runtime_path(root),
+                {
+                    "version": 1,
+                    "status": "failed",
+                    "exit_code": 70,
+                    "started_at": 100,
+                    "stopped_at": 200,
+                },
+            )
+            output = io.StringIO()
+
+            with patch.object(desktop.sys, "stdout", output):
+                self.assertEqual(desktop.command_list(args), 0)
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual(payload["targets"][0]["status"], "failed")
+            self.assertEqual(payload["targets"][0]["exit_code"], 70)
+            self.assertNotIn("private_key", payload["targets"][0])
+            self.assertNotIn("/secret/", output.getvalue())
+
+    def test_target_listing_rejects_metadata_moved_to_another_identity(self):
+        with tempfile.TemporaryDirectory() as raw:
+            args = argparse.Namespace(config_dir=raw)
+            root = desktop.target_root(args, "0123456789abcdef")
+            root.mkdir(parents=True)
+            desktop.write_json(
+                desktop.metadata_path(root),
+                {"target_id": "fedcba9876543210"},
+            )
+
+            with self.assertRaisesRegex(
+                desktop.DesktopError,
+                "does not match its directory",
+            ):
+                desktop.metadata_entries(args)
+
+    def test_controller_uses_registered_target_identity_for_actions(self):
+        controller = object.__new__(cage_tui.Controller)
+        controller.backend = ROOT / "cage-config.py"
+        controller.repo = Path("/wrong/current/repository")
+        target = {
+            "target_id": "0123456789abcdef",
+            "preset": "qwen",
+            "repo": "/Users/example/right-repository",
+        }
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="removed\n",
+            stderr="",
+        )
+
+        with patch.object(
+            cage_tui.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            status, output = controller.run_desktop_action(
+                "remove",
+                target,
+                assume_yes=True,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(output, "removed")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(ROOT / "cage"),
+                "desktop",
+                "remove",
+                "--preset",
+                "qwen",
+                "--yes",
+                "/Users/example/right-repository",
+            ],
+        )
+        self.assertNotIn(str(controller.repo), run.call_args.args[0])
+
+    def test_controller_rejects_invalid_structured_target_data(self):
+        controller = object.__new__(cage_tui.Controller)
+        controller.backend = ROOT / "cage-config.py"
+        identifier = "0123456789abcdef"
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({
+                "version": 1,
+                "targets": [{
+                    "target_id": identifier,
+                    "alias": "cage-safe",
+                    "preset": "qwen",
+                    "repo": "relative/repository",
+                    "status": "ready",
+                    "volume_name": f"cage-codex-desktop-{identifier}",
+                }],
+            }),
+            stderr="",
+        )
+
+        with patch.object(cage_tui.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(cage_tui.UiError, "invalid target"):
+                controller.desktop_targets()
+
+    def test_controller_bounds_structured_target_output(self):
+        controller = object.__new__(cage_tui.Controller)
+        controller.backend = ROOT / "cage-config.py"
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="x" * (cage_tui.MAX_DESKTOP_LIST_CHARS + 1),
+            stderr="",
+        )
+
+        with patch.object(cage_tui.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(cage_tui.UiError, "too much data"):
+                controller.desktop_targets()
+
+    def test_live_status_does_not_mark_a_new_start_stale_before_socket_ready(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            desktop.write_json(
+                desktop.runtime_path(root),
+                {
+                    "version": 1,
+                    "status": "starting",
+                    "started_at": 100,
+                },
+            )
+
+            with (
+                patch.object(
+                    desktop,
+                    "control_request",
+                    side_effect=desktop.DesktopError("not ready"),
+                ),
+                patch.object(desktop.time, "time", return_value=110),
+                patch.object(desktop, "merge_runtime") as merge,
+            ):
+                runtime = desktop.live_runtime_status(root)
+
+            self.assertEqual(runtime["status"], "starting")
+            merge.assert_not_called()
+
+    def test_live_status_marks_an_old_unreachable_start_stale(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            desktop.write_json(
+                desktop.runtime_path(root),
+                {
+                    "version": 1,
+                    "status": "starting",
+                    "started_at": 100,
+                },
+            )
+
+            with (
+                patch.object(
+                    desktop,
+                    "control_request",
+                    side_effect=desktop.DesktopError("gone"),
+                ),
+                patch.object(desktop.time, "time", return_value=131),
+            ):
+                runtime = desktop.live_runtime_status(root)
+
+            self.assertEqual(runtime["status"], "stale")
+
     def test_fingerprint_uses_effective_overrides_not_cli_spelling(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -437,6 +642,49 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
 
 
 class RemoteLauncherTests(unittest.TestCase):
+    def test_heartbeat_expires_after_active_time_without_progress(self):
+        marker: object = 100
+        last_progress = 0.0
+        last_check = 40.0
+
+        marker, last_progress, expired = remote.evaluate_heartbeat(
+            100,
+            marker,
+            46.0,
+            last_progress,
+            last_check,
+        )
+
+        self.assertTrue(expired)
+        self.assertEqual(last_progress, 0.0)
+
+    def test_heartbeat_scheduler_gap_after_host_sleep_resets_grace(self):
+        marker: object = 100
+
+        marker, last_progress, expired = remote.evaluate_heartbeat(
+            100,
+            marker,
+            3600.0,
+            0.0,
+            2.0,
+        )
+
+        self.assertFalse(expired)
+        self.assertEqual(last_progress, 3600.0)
+
+    def test_heartbeat_change_resets_active_time_grace(self):
+        marker, last_progress, expired = remote.evaluate_heartbeat(
+            101,
+            100,
+            44.0,
+            0.0,
+            42.0,
+        )
+
+        self.assertEqual(marker, 101)
+        self.assertEqual(last_progress, 44.0)
+        self.assertFalse(expired)
+
     def test_remote_launcher_injects_only_allowlisted_file_values(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

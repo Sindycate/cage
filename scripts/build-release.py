@@ -27,6 +27,7 @@ PAYLOAD_FILES = (
     "host-cmd-relay",
     "codex-remote.py",
     "docker-compose.yml",
+    "Dockerfile.base",
     "Dockerfile",
     "Dockerfile.codex",
     "entrypoint.sh",

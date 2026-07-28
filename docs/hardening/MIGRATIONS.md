@@ -8,6 +8,63 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.26.2 — 2026-07-28
+
+### Shared base image for local and published builds
+
+Who is affected: users who build Cage images locally or inspect release image
+provenance.
+
+New behavior: Claude and Codex leaf images share an agent-neutral
+`cage-base:<version>` containing common operating-system packages, Node.js,
+GitHub CLI, and the bridge relays. Agent users, binaries, entrypoints, and
+Codex-only OpenSSH remain separated in the existing `claude-code` and `codex`
+leaf images. Release workflows publish the multi-architecture base with SBOM
+and provenance metadata before building either leaf.
+
+Migration: none. Existing leaf image names, pull-first behavior, volumes,
+presets, and `cage update` flows are unchanged. Source installers and release
+archives now include `Dockerfile.base`; an automatic local fallback build
+creates the versioned base before the selected leaf.
+
+Rollback: installing 0.26.1 restores independent leaf Dockerfiles. Existing
+container volumes and Cage configuration remain compatible.
+
+### Desktop lifecycle management in the TUI
+
+Who is affected: macOS users with registered ChatGPT Desktop targets,
+especially when the current repository mapping does not itself use
+`target = "desktop"`.
+
+Previous behavior: lifecycle controls appeared only on the launch screen when
+the currently resolved configuration was already a Desktop target. A target
+created with another named preset could therefore be invisible from bare
+`cage`, leaving users to remember its exact lifecycle commands. The remote
+watchdog also compared heartbeat age with wall-clock time, so Mac sleep could
+be interpreted as supervisor loss immediately after wake.
+
+New behavior: bare `cage` has a top-level **Manage Desktop targets** screen on
+macOS. It discovers every registered target independently of the current
+project mapping, shows live status, and offers start/recover, restart, recent
+logs, stop, setup, refresh, and confirmed removal. Actions use the selected
+target's stored preset and repository so they address the existing identity
+and volume. Removal still requires typing the exact alias. Sleep and long
+scheduler gaps now reset the watchdog's active-time grace window; genuine
+supervisor loss remains fail-closed after 45 active seconds.
+
+Migration: none. Install the corrected version, run `cage`, and choose
+**Manage Desktop targets**. Existing aliases, keys, volumes, ChatGPT
+connections, and history are reused without conversion.
+
+Verification: the screen lists a previously registered target even when the
+current project configuration uses `container`; a failed or stopped target
+offers **Start / recover and open ChatGPT**; stop preserves its volume; and
+removal cannot proceed without the exact alias.
+
+Rollback: install 0.26.1 and use `cage desktop ...` lifecycle commands
+directly. Existing Desktop state remains compatible, but TUI discovery and the
+sleep-safe watchdog are lost.
+
 ## 0.26.0 — 2026-07-27
 
 ### ChatGPT Desktop through an SSH-backed Cage container

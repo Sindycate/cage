@@ -42,7 +42,23 @@ cage desktop setup
 
 # Start or reuse the target and open ChatGPT.
 cage --preset codex-provider --desktop ~/path/to/repo
+```
 
+For normal day-to-day control, run `cage` and choose **Manage Desktop
+targets**. This screen is available even when the current folder resolves to a
+container or host configuration. It discovers registered targets directly and
+uses the selected target's saved preset and repository for:
+
+- start or recovery, which preserves and reuses its volume and opens ChatGPT;
+- restart and live status refresh;
+- recent supervisor logs;
+- stop, which preserves history, keys, alias, and volume;
+- removal only after the exact alias is typed, which deletes that target's
+  Desktop history and state.
+
+The commands below remain equivalent for automation and troubleshooting:
+
+```bash
 # Inspect or stop it without deleting history.
 cage desktop status --preset codex-provider ~/path/to/repo
 cage desktop logs --preset codex-provider ~/path/to/repo
@@ -63,6 +79,11 @@ Each canonical repository path plus saved preset name gets its own:
 - detached supervisor, private Unix control socket, heartbeat, and private log;
 - Ed25519 client key, container host key, concrete SSH alias, and pinned
   known-hosts file.
+
+The container watchdog measures missed heartbeats in active polling time. A
+Mac sleep or long scheduler pause resets its grace window after wake instead
+of immediately expiring the target; genuine supervisor loss still shuts down
+the container fail-closed after 45 active seconds.
 
 The SSH block points at the absolute installed Cage helper. `ProxyCommand`
 executes one `sshd -i` connection through `docker exec`; Cage does not publish

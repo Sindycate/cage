@@ -160,9 +160,12 @@ repository metadata after running untrusted or unusually broad tasks.
 
 Tagged source releases include a SHA-256 checksum and SPDX SBOM. The release
 workflow creates signed GitHub provenance and SBOM attestations for the source
-archive. Published container images include BuildKit SBOM and max-level
-provenance metadata and a signed GitHub provenance attestation. Workflow action
-dependencies are pinned to immutable commits and tracked by Dependabot.
+archive. Published container images, including the agent-neutral shared base,
+include BuildKit SBOM and max-level provenance metadata and a signed GitHub
+provenance attestation. The base contains shared operating-system tooling and
+bridge relays only; agent users, entrypoints, agent binaries, and Codex-only
+OpenSSH remain in their leaf images. Workflow action dependencies are pinned
+to immutable commits and tracked by Dependabot.
 
 These records make the source revision, build workflow, and detected components
 auditable. They do not establish that the source, dependencies, container image,

@@ -1,0 +1,54 @@
+FROM ubuntu:24.04
+
+RUN set -eux; \
+    attempt=1; \
+    while :; do \
+      rm -rf /var/lib/apt/lists/*; \
+      if apt-get -o Acquire::Retries=5 update && \
+         apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+           bash \
+           bubblewrap \
+           ca-certificates \
+           curl \
+           git \
+           gosu \
+           jq \
+           less \
+           procps \
+           python3 \
+           python3-pip \
+           python3-venv \
+           ripgrep \
+           sudo; then \
+        break; \
+      fi; \
+      if [ "$attempt" -ge 8 ]; then \
+        exit 1; \
+      fi; \
+      attempt=$((attempt + 1)); \
+      sleep $((attempt * 5)); \
+    done; \
+    rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Node.js LTS (needed for Claude Code installer and Codex CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
+LABEL org.opencontainers.image.description="cage - Docker isolation for AI coding assistants (shared base)"
+
+# Bridge relay scripts shared by both agents
+COPY mcp-relay /usr/local/bin/mcp-relay
+COPY host-cmd-relay /usr/local/bin/host-cmd-relay
+RUN chmod 755 /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
+
+ENV HISTFILE=/dev/null

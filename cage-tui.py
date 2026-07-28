@@ -55,6 +55,13 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 CODEX_PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+DESKTOP_TARGET_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+DESKTOP_PRESET_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+DESKTOP_STATUSES = {
+    "starting", "ready", "stopping", "stopped", "stale", "failed", "unknown",
+}
+MAX_DESKTOP_TARGETS = 256
+MAX_DESKTOP_LIST_CHARS = 2 * 1024 * 1024
 
 
 def execution_target_label(target: str) -> str:
@@ -186,20 +193,131 @@ class Controller:
         ], check=False)
         return completed.returncode
 
-    def run_desktop_action(self, action: str, preset: str) -> int:
+    def desktop_targets(self) -> list[dict[str, Any]]:
         launcher = self.backend.with_name("cage")
         completed = subprocess.run(
-            [
-                str(launcher),
-                "desktop",
-                action,
-                "--preset",
-                preset,
-                str(self.repo),
-            ],
+            [str(launcher), "desktop", "list", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if len(completed.stdout) + len(completed.stderr) > MAX_DESKTOP_LIST_CHARS:
+            raise UiError("Desktop target manager returned too much data")
+        if completed.returncode:
+            raise UiError(
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or "could not list Desktop targets"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise UiError("Desktop target manager returned invalid data") from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != 1
+            or not isinstance(payload.get("targets"), list)
+            or len(payload["targets"]) > MAX_DESKTOP_TARGETS
+        ):
+            raise UiError("Desktop target manager returned an unsupported result")
+        targets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in payload["targets"]:
+            if not isinstance(raw, dict):
+                raise UiError("Desktop target manager returned an invalid target")
+            identifier = raw.get("target_id")
+            alias = raw.get("alias")
+            preset = raw.get("preset")
+            repo = raw.get("repo")
+            status = raw.get("status")
+            volume = raw.get("volume_name")
+            if (
+                not isinstance(identifier, str)
+                or not DESKTOP_TARGET_ID_RE.fullmatch(identifier)
+                or identifier in seen
+                or not isinstance(alias, str)
+                or not alias.startswith("cage-")
+                or len(alias) > 128
+                or any(character in alias for character in "\0\r\n\t")
+                or not isinstance(preset, str)
+                or len(preset) > 128
+                or not DESKTOP_PRESET_RE.fullmatch(preset)
+                or not isinstance(repo, str)
+                or len(repo) > 4096
+                or not Path(repo).is_absolute()
+                or any(character in repo for character in "\0\r\n")
+                or status not in DESKTOP_STATUSES
+                or volume != f"cage-codex-desktop-{identifier}"
+            ):
+                raise UiError("Desktop target manager returned an invalid target")
+            target = {
+                key: raw[key]
+                for key in (
+                    "target_id", "alias", "preset", "repo", "status", "volume_name",
+                    "container_id", "started_at", "ready_at", "stopped_at", "exit_code",
+                )
+                if key in raw
+            }
+            targets.append(target)
+            seen.add(identifier)
+        return targets
+
+    def run_desktop_action(
+        self,
+        action: str,
+        target: dict[str, Any] | None = None,
+        *,
+        assume_yes: bool = False,
+    ) -> tuple[int, str]:
+        if action not in {"setup", "start", "restart", "stop", "logs", "remove"}:
+            raise UiError(f"unsupported Desktop action: {action}")
+        if action == "remove" and not assume_yes:
+            raise UiError("Desktop removal requires an explicit TUI confirmation")
+        launcher = self.backend.with_name("cage")
+        command = [str(launcher), "desktop", action]
+        if action != "setup":
+            if target is None:
+                raise UiError("Desktop action requires a registered target")
+            preset = target.get("preset")
+            repo = target.get("repo")
+            identifier = target.get("target_id")
+            if (
+                not isinstance(preset, str)
+                or len(preset) > 128
+                or not DESKTOP_PRESET_RE.fullmatch(preset)
+                or not isinstance(repo, str)
+                or len(repo) > 4096
+                or not Path(repo).is_absolute()
+                or not isinstance(identifier, str)
+                or not DESKTOP_TARGET_ID_RE.fullmatch(identifier)
+            ):
+                raise UiError("Desktop target selection is invalid")
+            command.extend(["--preset", preset])
+            if action == "remove" and assume_yes:
+                command.append("--yes")
+            command.append(repo)
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
             check=False,
         )
-        return completed.returncode
+        output = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        if len(output) > MAX_DESKTOP_LIST_CHARS:
+            output = (
+                f"(showing the newest {MAX_DESKTOP_LIST_CHARS} characters)\n"
+                + output[-MAX_DESKTOP_LIST_CHARS:]
+            )
+        if action == "logs":
+            lines = output.splitlines()
+            if len(lines) > 250:
+                output = "\n".join(
+                    [f"(showing the newest 250 of {len(lines)} log lines)", *lines[-250:]]
+                )
+        return completed.returncode, output
 
     def effective_preset(self) -> tuple[str, dict[str, Any]]:
         effective = self.snapshot.get("effective", {})
@@ -592,6 +710,44 @@ class CursesView:
             elif key in (27, ord("q")):
                 return ""
 
+    def show_text(self, title: str, lines: list[str]) -> None:
+        import curses
+        scroll = 0
+        while True:
+            height, width = self.screen.getmaxyx()
+            if height < 4 or width < 20:
+                self._draw(title, ["Terminal too small; resize to continue."], "Esc/q back")
+                key = self.screen.getch()
+                if key in (27, ord("q"), 10, 13, curses.KEY_ENTER):
+                    return
+                continue
+            available = max(1, height - 2)
+            wrapped = self._wrapped(lines or ["(no output)"], max(1, width - 2))
+            maximum = max(0, len(wrapped) - available)
+            scroll = max(0, min(scroll, maximum))
+            footer = "↑/↓ scroll • PgUp/PgDn page • Esc/q/Enter back"
+            if len(wrapped) > available:
+                footer += (
+                    f" • rows {scroll + 1}-"
+                    f"{min(len(wrapped), scroll + available)}/{len(wrapped)}"
+                )
+            self._draw(title, wrapped[scroll:scroll + available], footer)
+            key = self.screen.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                scroll = max(0, scroll - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                scroll = min(maximum, scroll + 1)
+            elif key == curses.KEY_PPAGE:
+                scroll = max(0, scroll - available)
+            elif key == curses.KEY_NPAGE:
+                scroll = min(maximum, scroll + available)
+            elif key == curses.KEY_HOME:
+                scroll = 0
+            elif key == curses.KEY_END:
+                scroll = maximum
+            elif key in (27, ord("q"), 10, 13, curses.KEY_ENTER):
+                return
+
     def _line_input(
         self,
         title: str,
@@ -703,7 +859,14 @@ class CursesView:
     def prompt(self, title: str, label: str, default: str = "") -> str | None:
         return self._line_input(title, label, default)
 
-    def confirm(self, title: str, lines: list[str], phrase: str = "yes") -> bool:
+    def confirm(
+        self,
+        title: str,
+        lines: list[str],
+        phrase: str = "yes",
+        *,
+        case_sensitive: bool = False,
+    ) -> bool:
         answer = self._line_input(
             title,
             f"Type '{phrase}' and press Enter to continue:",
@@ -711,7 +874,9 @@ class CursesView:
             details=lines,
             footer="↑/↓ review • Enter submits • Esc cancels",
         )
-        return answer is not None and answer.casefold() == phrase.casefold()
+        if answer is None:
+            return False
+        return answer == phrase if case_sensitive else answer.casefold() == phrase.casefold()
 
     def choose_names(self, title: str, names: list[str], selected: list[str]) -> list[str] | None:
         chosen = set(selected)
@@ -1328,6 +1493,204 @@ class CursesView:
                 self.screen.refresh()
                 self.message = "OAuth action completed." if status == 0 else "OAuth action failed; see terminal output."
 
+    @staticmethod
+    def _desktop_target_details(target: dict[str, Any]) -> list[str]:
+        details = [
+            f"Status: {str(target['status']).upper()}",
+            f"Host: {target['alias']}",
+            f"Repository: {target['repo']}",
+            f"Configuration: {target['preset']}",
+            f"Persistent volume: {target['volume_name']}",
+        ]
+        if target.get("container_id"):
+            details.append(f"Container: {str(target['container_id'])[:12]}")
+        if "exit_code" in target and target.get("exit_code") is not None:
+            details.append(f"Last exit code: {target['exit_code']}")
+        details += [
+            "",
+            "Stop disconnects ChatGPT but preserves this target's history and SSH identity.",
+            "Remove permanently deletes its Desktop history, keys, registration, and volume.",
+        ]
+        return details
+
+    def _perform_desktop_action(
+        self,
+        action: str,
+        target: dict[str, Any] | None,
+        *,
+        assume_yes: bool = False,
+    ) -> tuple[int, str]:
+        label = {
+            "setup": "Setting up Desktop connections…",
+            "start": "Starting or recovering the Desktop target…",
+            "restart": "Restarting the Desktop target…",
+            "stop": "Stopping the Desktop target…",
+            "logs": "Reading Desktop target logs…",
+            "remove": "Removing the Desktop target…",
+        }[action]
+        self.message = ""
+        self._draw(
+            "Desktop targets",
+            [label, "This may take a moment."],
+            "Please wait",
+        )
+        try:
+            return self.controller.run_desktop_action(
+                action,
+                target,
+                assume_yes=assume_yes,
+            )
+        except (UiError, OSError, subprocess.SubprocessError) as exc:
+            return 1, str(exc)
+
+    def manage_desktop_target(self, target: dict[str, Any]) -> None:
+        status = str(target["status"])
+        options: list[tuple[str, str]] = []
+        if status in {"stopped", "stale", "failed", "unknown"}:
+            options.append(("start", "Start / recover and open ChatGPT"))
+        elif status == "ready":
+            options.extend([
+                ("start", "Open ChatGPT (reuse ready target)"),
+                ("restart", "Restart target"),
+                ("stop", "Stop target (preserve history)"),
+            ])
+        elif status == "starting":
+            options.append(("stop", "Stop target (preserve history)"))
+        options += [
+            ("refresh", "Refresh status"),
+            ("logs", "View recent logs"),
+            ("remove", "Remove target and delete Desktop history"),
+        ]
+        action = self.menu(
+            str(target["alias"]),
+            options,
+            self._desktop_target_details(target),
+        )
+        if not action or action == "refresh":
+            return
+        if action == "remove":
+            alias = str(target["alias"])
+            if not self.confirm(
+                "Remove Desktop target",
+                [
+                    f"Target: {alias}",
+                    f"Repository: {target['repo']}",
+                    f"Configuration: {target['preset']}",
+                    f"Volume: {target['volume_name']}",
+                    "",
+                    "This permanently deletes this target's Desktop history, SSH keys, "
+                    "registration, and persistent volume. It cannot be undone by Cage.",
+                ],
+                phrase=alias,
+                case_sensitive=True,
+            ):
+                self.message = "Desktop target removal was cancelled."
+                return
+            code, output = self._perform_desktop_action(
+                "remove",
+                target,
+                assume_yes=True,
+            )
+        else:
+            code, output = self._perform_desktop_action(action, target)
+        if action == "logs" or code != 0 or action in {"start", "restart"}:
+            title = (
+                "Desktop target logs"
+                if action == "logs"
+                else "Desktop action completed"
+                if code == 0
+                else "Desktop action failed"
+            )
+            self.show_text(title, output.splitlines() or ["(no output)"])
+        self.message = (
+            f"Desktop {action} completed."
+            if code == 0
+            else f"Desktop {action} failed. Open the target again to inspect its status or logs."
+        )
+
+    def manage_desktop_targets(self) -> None:
+        cursor: str | None = None
+        while True:
+            try:
+                targets = self.controller.desktop_targets()
+            except (UiError, OSError, subprocess.SubprocessError) as exc:
+                choice = self.menu(
+                    "Desktop targets",
+                    [("refresh", "Try again")],
+                    [
+                        "Cage could not read the registered Desktop targets.",
+                        str(exc),
+                    ],
+                )
+                if choice != "refresh":
+                    return
+                continue
+            options = [
+                (
+                    str(target["target_id"]),
+                    f"{str(target['status']).upper():8}  {target['alias']}  "
+                    f"— {target['preset']} — {Path(str(target['repo'])).name}",
+                )
+                for target in targets
+            ]
+            options += [
+                ("__refresh", "Refresh all statuses"),
+                ("__setup", "Set up ChatGPT Desktop connections"),
+            ]
+            details = [
+                "Registered Desktop targets are shown independently of the configuration "
+                "selected for this folder.",
+                "Choose a target to start, recover, restart, inspect, stop, or remove it.",
+            ]
+            if not targets:
+                details += [
+                    "",
+                    "No Desktop targets are registered yet. Save a Codex configuration, "
+                    "choose Desktop via Cage container, and launch it once to create one.",
+                ]
+            selected = self.menu(
+                "Desktop targets",
+                options,
+                details,
+                initial_key=cursor,
+            )
+            if not selected:
+                return
+            cursor = selected
+            if selected == "__refresh":
+                self.message = "Desktop target statuses refreshed."
+                continue
+            if selected == "__setup":
+                if not self.confirm(
+                    "Set up Desktop connections",
+                    [
+                        "Cage will add one managed Include to ~/.ssh/config and preserve "
+                        "the file's comments, permissions, and symlink target.",
+                        "Cage owns only the included Desktop host blocks.",
+                    ],
+                ):
+                    continue
+                code, output = self._perform_desktop_action("setup", None)
+                if code != 0:
+                    self.show_text(
+                        "Desktop setup failed",
+                        output.splitlines() or ["(no output)"],
+                    )
+                self.message = (
+                    "Desktop connection setup completed."
+                    if code == 0
+                    else "Desktop connection setup failed."
+                )
+                continue
+            target = next(
+                (item for item in targets if item["target_id"] == selected),
+                None,
+            )
+            if target is None:
+                self.message = "That Desktop target no longer exists."
+                continue
+            self.manage_desktop_target(target)
+
     def run(self) -> int:
         cursor: str | None = None
         while True:
@@ -1367,34 +1730,18 @@ class CursesView:
                 not self.controller.tool_override or effective.get("tool") == self.controller.tool_override
             ):
                 options.append(("launch", "Launch with this configuration"))
-                if shown_target == "desktop":
-                    options.extend(
-                        [
-                            ("desktop-restart", "Restart Desktop target"),
-                            ("desktop-status", "Show Desktop target status"),
-                            ("desktop-stop", "Stop Desktop target (preserve state)"),
-                        ]
-                    )
-            options += [("custom", "Customize launch"), ("manage", "Manage saved configuration"), ("quit", "Quit without launching")]
+            options.append(("custom", "Customize launch"))
+            if sys.platform == "darwin":
+                options.append(("desktop-targets", "Manage Desktop targets"))
+            options += [("manage", "Manage saved configuration"), ("quit", "Quit without launching")]
             choice = self.menu("Launch", options, details, initial_key=cursor)
             if choice in ("", "quit"):
                 return 1
             cursor = choice
             if choice == "manage":
                 self.manage()
-            elif choice.startswith("desktop-"):
-                name, _preset = self.controller.effective_preset()
-                import curses
-                curses.endwin()
-                status = self.controller.run_desktop_action(
-                    choice.removeprefix("desktop-"), name
-                )
-                self.screen.refresh()
-                self.message = (
-                    "Desktop action completed."
-                    if status == 0
-                    else "Desktop action failed; see terminal output."
-                )
+            elif choice == "desktop-targets":
+                self.manage_desktop_targets()
             elif choice == "custom":
                 _, seed = self.controller.effective_preset()
                 edited = self.edit_preset(seed or {"tool": "codex"})

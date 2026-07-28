@@ -7,6 +7,24 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.2 — 2026-07-28
+
+- add an always-discoverable macOS **Manage Desktop targets** screen to the
+  main TUI, independent of the current folder's resolved preset;
+- show live registered-target status and provide start/recover, restart, recent
+  logs, stop-with-history, refresh, setup, and confirmed destructive removal
+  without requiring lifecycle commands to be remembered;
+- use a versioned, bounded, non-secret JSON target-list interface between the
+  lifecycle helper and TUI instead of parsing human-readable command output;
+- prevent Mac sleep and long scheduler pauses from being mistaken for a dead
+  Desktop supervisor while retaining active-time fail-closed heartbeat expiry;
+- build the Claude and Codex images from one agent-neutral shared base while
+  keeping users, entrypoints, agent binaries, and OpenSSH in their respective
+  leaf images;
+- publish the multi-architecture base with the same SBOM/provenance controls as
+  the leaf images, and include `Dockerfile.base` in source installs and release
+  archives so local pull-fallback and rebuild flows remain self-contained.
+
 ## 0.26.1 — 2026-07-28
 
 - remove maintainer-specific validation paths, aliases, runtime identifiers,

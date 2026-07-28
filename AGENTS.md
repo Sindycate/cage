@@ -16,10 +16,13 @@ durable source of truth across context compaction and maintainer handoffs.
 ## Build and Run
 
 ```bash
-# Build/rebuild all images
+# Build/rebuild all images (builds shared base first, then both leaves)
 docker compose build
 
-# Build just one image
+# Build just the shared base
+docker compose build base
+
+# Build just one leaf image (requires base to exist)
 docker compose build claude
 docker compose build codex
 
@@ -137,9 +140,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Bare `cage` and `--interactive`/`-i` open `cage-tui.py` before any Docker,
   bridge, sync, or volume operation. The curses UI can launch once, remember a
   hidden project-owned preset, save reusable presets, and manage all central
-  config objects. It returns a private launch artifact that is revalidated by
-  `cage-config.py`; cancellation is a state no-op. If curses is unavailable,
-  Cage falls back to the legacy launch-only numbered prompt
+  config objects. On macOS it also lists all registered Desktop targets
+  independently of the current project mapping and provides their lifecycle
+  actions through a bounded structured helper interface. It returns a private
+  launch artifact that is revalidated by `cage-config.py`; cancellation is a
+  state no-op. If curses is unavailable, Cage falls back to the legacy
+  launch-only numbered prompt
 - Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
 - Codex presets may select a native `$CODEX_HOME/<name>.config.toml` layer with
   `codex_profile = "<name>"`; Cage validates the file and forwards
@@ -148,7 +154,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   atomic. They preserve untouched TOML blocks, source permissions, and symlink
   targets; keep ten private backups under the config directory; and never load
   backup files as config fragments
-- Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. `--rebuild` forces a local build with `--no-cache` (useful for getting the latest tool version)
+- Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the leaf image (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Presets default to `target = "container"` and may opt into Codex-only
@@ -172,8 +178,10 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   the alias, keys, metadata, and volume. Provider/proxy/bridge secrets bypass
   Docker `Config.Env` through a short-lived private handoff, live only in
   tmpfs-backed `/run` for remote app-server processes, and are scrubbed from
-  the persistent watchdog. Desktop alone adds `SYS_CHROOT` for OpenSSH
-  privilege separation; `CAP_FOWNER` remains absent
+  the persistent watchdog. The watchdog counts missed heartbeats in active
+  polling time so host sleep does not cause immediate expiry after wake, while
+  genuine supervisor loss still stops fail-closed. Desktop alone adds
+  `SYS_CHROOT` for OpenSSH privilege separation; `CAP_FOWNER` remains absent
 - Runs `docker run` with `cap_drop ALL` followed by the capabilities currently needed for UID/GID remapping; AppArmor and seccomp are unconfined for bubblewrap compatibility, and `no-new-privileges` is not currently set. Treat the container as accidental-damage isolation rather than a hostile-code boundary.
   - Repo at the **same absolute path as on host** (read-write) — mirrored so Claude's project slug (derived from cwd) matches on both sides, enabling session-history sync. This is the main direct writable host mount. Explicit read-write extra mounts and selected host-side state synchronization can also write outside it. A guard rejects paths that would collide with the container filesystem (`/etc`, `/var`, `/home/claude`, etc.)
   - **Claude (bedrock auth):** `~/.aws/credentials` read-only, `~/.claude` read-only at `/host-claude`
@@ -211,11 +219,13 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Copies GitHub CLI config from `/host-gh` (same as Claude entrypoint)
 - Execs `codex` instead of `claude`
 
-**`Dockerfile`**: Ubuntu 24.04, installs Python 3, Node.js LTS, GitHub CLI, bubblewrap, sudo, gosu, and Claude Code via official installer. Entrypoint runs as root (switches to host UID via gosu). `jq` is required by the statusLine command in the host's `settings.json`.
+**`Dockerfile`**: Thin leaf image (`FROM cage-base`). Creates the `claude` user, installs Claude Code via official installer, and copies `entrypoint.sh`. Entrypoint runs as root (switches to host UID via gosu). `jq` is required by the statusLine command in the host's `settings.json`.
 
-**`Dockerfile.codex`**: Ubuntu 24.04 + Python 3 + GitHub CLI + Node.js LTS, installs Codex CLI via `npm install -g @openai/codex`. Same root→gosu pattern as Claude.
+**`Dockerfile.codex`**: Thin leaf image (`FROM cage-base`). Adds `openssh-server` (Codex-only, for Desktop SSH), creates the `codex` user, installs Codex CLI via `npm install -g @openai/codex`, and copies `entrypoint-codex.sh` and `codex-remote.py`. Same root→gosu pattern as Claude.
 
-**`docker-compose.yml`**: Build-only helper — tags images as `claude-code:latest` and `codex:latest`. Not used for running containers (that's `cage`'s job).
+**`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, and the `mcp-relay`/`host-cmd-relay` bridge scripts. Contains no agent binaries, no entrypoints, no user accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
+
+**`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest` and `codex:latest`. Not used for running containers (that's `cage`'s job).
 
 **`netgate-proxy.py`** (host-side, runs when `--net gate` is active):
 - Python3 forward proxy that gates outbound HTTP/HTTPS by domain
