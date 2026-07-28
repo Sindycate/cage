@@ -37,8 +37,8 @@ remote = load_module("codex_remote", "codex-remote.py")
 class DesktopIdentityTests(unittest.TestCase):
     def test_identity_is_deterministic_and_preset_isolated(self):
         repo = Path("/Users/example/repo")
-        first = desktop.target_id(repo, "qwen")
-        self.assertEqual(first, desktop.target_id(repo, "qwen"))
+        first = desktop.target_id(repo, "provider")
+        self.assertEqual(first, desktop.target_id(repo, "provider"))
         self.assertNotEqual(first, desktop.target_id(repo, "openai"))
         self.assertRegex(first, r"^[0-9a-f]{16}$")
 
@@ -52,7 +52,7 @@ class DesktopIdentityTests(unittest.TestCase):
                 "/opt/cage",
                 "start",
                 "--preset",
-                "qwen",
+                "provider",
                 "--no-open",
                 "/tmp/repo",
             ]
@@ -72,7 +72,7 @@ class DesktopIdentityTests(unittest.TestCase):
                 "--",
                 "/opt/cage",
                 "--preset",
-                "qwen",
+                "provider",
                 "/tmp/repo",
             ]
         )
@@ -166,7 +166,7 @@ class DesktopConfigTests(unittest.TestCase):
         resolved = cage_config.ResolvedConfig(
             config_path=Path("/tmp/config.toml"),
             repo_path="/tmp/repo",
-            preset_name="qwen",
+            preset_name="provider",
             preset_source="project:/tmp/repo",
             tool="codex",
             target="desktop",
@@ -322,7 +322,7 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             (root / "config.toml").write_text(
-                'version = 1\n[presets.qwen]\ntool = "codex"\n',
+                'version = 1\n[presets.provider]\ntool = "codex"\n',
                 encoding="utf-8",
             )
             setup = {"helper": "/installed/cage-desktop.py"}
@@ -355,10 +355,10 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                 patch.object(desktop, "current_version", return_value="0.26.0"),
             ):
                 inherited_hash = desktop.config_fingerprint(
-                    inherited, setup, root, "qwen"
+                    inherited, setup, root, "provider"
                 )
                 explicit_hash = desktop.config_fingerprint(
-                    explicit, setup, root, "qwen"
+                    explicit, setup, root, "provider"
                 )
             self.assertEqual(inherited_hash, explicit_hash)
 
@@ -366,7 +366,7 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             (root / "config.toml").write_text(
-                'version = 1\n[presets.qwen]\ntool = "codex"\n',
+                'version = 1\n[presets.provider]\ntool = "codex"\n',
                 encoding="utf-8",
             )
             args = argparse.Namespace(
@@ -381,7 +381,7 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                 "CAGE_YOLO": "",
                 "CAGE_CODEX_PROFILE": "",
                 "CAGE_HOST_CODEX_PAYLOAD": (
-                    '{"skills":[],"env_names":["QWEN_TEST_TOKEN"]}'
+                    '{"skills":[],"env_names":["PROVIDER_TEST_TOKEN"]}'
                 ),
             }
             with (
@@ -391,9 +391,9 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                     return_value=assignments,
                 ),
                 patch.object(desktop, "current_version", return_value="0.26.0"),
-                patch.dict(os.environ, {"QWEN_TEST_TOKEN": "first"}, clear=True),
+                patch.dict(os.environ, {"PROVIDER_TEST_TOKEN": "first"}, clear=True),
             ):
-                first = desktop.config_fingerprint(args, setup, root, "qwen")
+                first = desktop.config_fingerprint(args, setup, root, "provider")
             with (
                 patch.object(
                     desktop,
@@ -401,9 +401,9 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                     return_value=assignments,
                 ),
                 patch.object(desktop, "current_version", return_value="0.26.0"),
-                patch.dict(os.environ, {"QWEN_TEST_TOKEN": "second"}, clear=True),
+                patch.dict(os.environ, {"PROVIDER_TEST_TOKEN": "second"}, clear=True),
             ):
-                second = desktop.config_fingerprint(args, setup, root, "qwen")
+                second = desktop.config_fingerprint(args, setup, root, "provider")
             self.assertNotEqual(first, second)
 
     def test_stale_recovery_refuses_reused_container_name(self):
@@ -443,11 +443,11 @@ class RemoteLauncherTests(unittest.TestCase):
             env_path = root / "env.json"
             launch_path = root / "launch.json"
             env_path.write_text(
-                json.dumps({"QWEN_TOKEN_PLAN_API_KEY": "token", "HTTP_PROXY": "proxy"}),
+                json.dumps({"PROVIDER_API_KEY": "token", "HTTP_PROXY": "proxy"}),
                 encoding="utf-8",
             )
             launch_path.write_text(
-                json.dumps({"profile": "qwen", "yolo": True}),
+                json.dumps({"profile": "provider", "yolo": True}),
                 encoding="utf-8",
             )
             captured = {}
@@ -469,10 +469,10 @@ class RemoteLauncherTests(unittest.TestCase):
 
             self.assertEqual(
                 captured["argv"],
-                ["/real/codex", "--profile", "qwen", "--yolo", "app-server"],
+                ["/real/codex", "--profile", "provider", "--yolo", "app-server"],
             )
             self.assertEqual(
-                captured["environment"]["QWEN_TOKEN_PLAN_API_KEY"], "token"
+                captured["environment"]["PROVIDER_API_KEY"], "token"
             )
             self.assertNotIn("UNRELATED_SECRET", captured["environment"])
 

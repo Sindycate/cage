@@ -1,0 +1,12 @@
+title = "Cage public repository secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known credential-state helper call; the line contains no credential value"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(?:^|/)cage$''']
+regexes = ['''^\s*current = credential_blob\(path, "host OAuth credentials", missing_ok=observed is None\)\s*$''']

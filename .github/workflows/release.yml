@@ -8,6 +8,26 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install checksum-verified Gitleaks
+        run: .github/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks-bin"
+
+      - name: Scan complete Git history
+        run: |
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" git . \
+            --config .gitleaks.toml \
+            --gitleaks-ignore-path . \
+            --log-opts="--all" \
+            --redact=100 \
+            --no-banner
+
   installer-macos-bash32:
     runs-on: macos-latest
     steps:
@@ -52,7 +72,7 @@ jobs:
         run: |
           python -m pytest -q
           python -m py_compile cage-config.py cage-desktop.py cage-tui.py codex-remote.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay scripts/build-release.py
-          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh
+          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh .github/scripts/install-gitleaks.sh
           docker compose config
 
       - name: Run Docker integration smoke tests
@@ -72,7 +92,7 @@ jobs:
         run: python -m pytest -q tests/test_docker_smoke.py -k desktop_remote
 
   package:
-    needs: [validate, installer-macos-bash32]
+    needs: [validate, installer-macos-bash32, secret-scan]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -100,6 +120,19 @@ jobs:
 
       - name: Create reproducible source archive
         run: python scripts/build-release.py "$VERSION"
+
+      - name: Install checksum-verified Gitleaks
+        run: .github/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks-bin"
+
+      - name: Scan source archive contents
+        run: |
+          mkdir "$RUNNER_TEMP/release-scan"
+          tar -xzf "cage-${VERSION}.tar.gz" -C "$RUNNER_TEMP/release-scan"
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" dir "$RUNNER_TEMP/release-scan" \
+            --config .gitleaks.toml \
+            --gitleaks-ignore-path . \
+            --redact=100 \
+            --no-banner
 
       - name: Generate source archive SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0

@@ -9,6 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install checksum-verified Gitleaks
+        run: .github/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks-bin"
+
+      - name: Scan complete Git history
+        run: |
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" git . \
+            --config .gitleaks.toml \
+            --gitleaks-ignore-path . \
+            --log-opts="--all" \
+            --redact=100 \
+            --no-banner
+
   installer-macos-bash32:
     runs-on: macos-latest
     steps:
@@ -72,7 +92,7 @@ jobs:
         run: python -m py_compile cage-config.py cage-desktop.py cage-tui.py codex-remote.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay scripts/build-release.py
 
       - name: Check shell syntax
-        run: bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh
+        run: bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh .github/scripts/install-gitleaks.sh
 
       - name: Validate Compose configuration
         run: docker compose config

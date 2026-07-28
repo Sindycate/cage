@@ -233,8 +233,8 @@ yolo = false
 tool = "codex"
 auth = "codex-company-proxy"
 identity = "work"
-# Optional: layer ~/.codex-company/qwen-preview.config.toml.
-codex_profile = "qwen-preview"
+# Optional: layer ~/.codex-company/provider-preview.config.toml.
+codex_profile = "provider-preview"
 mcp_packs = ["linear"]
 skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
@@ -353,17 +353,17 @@ env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 A Codex preset can select one of Codex's native named configuration profiles:
 
 ```toml
-[presets.codex-qwen]
+[presets.codex-provider]
 tool = "codex"
 auth = "codex-work"
-codex_profile = "qwen-preview"
+codex_profile = "provider-preview"
 net = "gate"
 ```
 
 The corresponding file is
-`$CODEX_HOME/qwen-preview.config.toml` (for the example auth block above,
-`~/.codex-work/qwen-preview.config.toml`). Cage validates that the file exists
-and launches Codex with `--profile qwen-preview` in either container or host
+`$CODEX_HOME/provider-preview.config.toml` (for the example auth block above,
+`~/.codex-work/provider-preview.config.toml`). Cage validates that the file exists
+and launches Codex with `--profile provider-preview` in either container or host
 mode. The base `$CODEX_HOME/config.toml` is loaded first and the named profile
 is layered over it. Profile names may contain letters, digits, hyphens, and
 underscores. The TUI lists valid `*.config.toml` profile files from the Codex

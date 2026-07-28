@@ -300,17 +300,17 @@ class TestHostModeLaunches(unittest.TestCase):
         config = '\n'.join([
             "version = 1", 'default_preset = "main"',
             "[presets.main]", 'tool = "codex"', 'target = "host"',
-            'net = "open"', 'codex_profile = "qwen-preview"', "",
+            'net = "open"', 'codex_profile = "provider-preview"', "",
         ])
         result, _, _, temporary = setup_host_test(
             config,
-            codex_files={"qwen-preview.config.toml": 'model = "qwen"\n'},
+            codex_files={"provider-preview.config.toml": 'model = "provider-model"\n'},
         )
         self.addCleanup(temporary.cleanup)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ARG_0=--profile", result.stdout)
-        self.assertIn("ARG_1=qwen-preview", result.stdout)
-        self.assertIn("Profile:    qwen-preview", result.stderr)
+        self.assertIn("ARG_1=provider-preview", result.stdout)
+        self.assertIn("Profile:    provider-preview", result.stderr)
 
     def test_missing_named_codex_profile_fails_closed(self):
         config = '\n'.join([
@@ -885,9 +885,9 @@ class TestConfigSchema(unittest.TestCase):
 
     def test_named_codex_profile_resolves(self):
         data = {"version": 1, "default_preset": "m",
-                "presets": {"m": {"tool": "codex", "codex_profile": "qwen-preview_1"}}}
+                "presets": {"m": {"tool": "codex", "codex_profile": "provider-preview_1"}}}
         resolved = cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
-        self.assertEqual(resolved.codex_profile, "qwen-preview_1")
+        self.assertEqual(resolved.codex_profile, "provider-preview_1")
 
     def test_invalid_named_codex_profile_is_rejected(self):
         data = {"version": 1, "default_preset": "m",
@@ -1031,7 +1031,9 @@ class TestTuiEffectiveState(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             codex_home = Path(temporary) / "codex-home"
             codex_home.mkdir()
-            (codex_home / "qwen-preview.config.toml").write_text('model = "qwen"\n')
+            (codex_home / "provider-preview.config.toml").write_text(
+                'model = "provider-model"\n'
+            )
             (codex_home / "bad.name.config.toml").write_text('model = "ignored"\n')
             controller = object.__new__(cage_tui.Controller)
             controller.snapshot = {
@@ -1048,7 +1050,7 @@ class TestTuiEffectiveState(unittest.TestCase):
             discovered_home, names = controller.codex_profiles({"auth": "work"})
 
         self.assertEqual(discovered_home, codex_home)
-        self.assertEqual(names, ["qwen-preview"])
+        self.assertEqual(names, ["provider-preview"])
 
     def test_target_override_appears_in_risks(self):
         """--host override shows host risks even for a container preset."""

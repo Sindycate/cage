@@ -3,6 +3,25 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-28 — v0.26.1 public-repository privacy hardening
+
+Removed maintainer-specific validation metadata from current tracked content
+while preserving the underlying security evidence. Documentation, comments,
+and non-functional fixtures now use provider-neutral examples. Historical
+commits and the v0.26.0 archive intentionally remain unchanged; they contain
+low-sensitivity maintainer metadata but no confirmed public credential.
+
+Added a checksum-pinned Gitleaks full-history gate to normal CI and tagged
+releases. Packaging now waits for that gate and scans the extracted source
+archive before SBOM generation, attestation, or upload. The policy extends the
+default rules with one exact-line exception for a credential-state helper and
+one fingerprint-specific exception for historical private-key header strings.
+
+The ignored local diagnostic log was confirmed absent from public Git objects
+and moved to a private location outside the repository. Its audit record
+contains fingerprints and classifications only, never credential values.
+No credential or provider account was changed as part of this release.
+
 ## 2026-07-27 — v0.26.0 ChatGPT Desktop SSH target
 
 Implemented a macOS-only persistent `desktop` execution target using ChatGPT
@@ -31,12 +50,12 @@ Local release-candidate evidence:
   resolves the generated alias through the absolute installed helper, keeps
   OpenSSH listener-free, publishes no ports, and limits the Desktop-only
   additional capability to `SYS_CHROOT`;
-- real SSH opens `/Users/sshumilov/cage`, reads Git state, performs and removes
-  a repository write sentinel, keeps unrelated host paths unavailable, and
-  preserves the volume plus pinned host key across restart;
-- the `codex-qwen-token` target completes real requests as
-  `qwen3.8-max-preview` through Netgate, and the same target remains reachable
-  in `off`, `open`, and restored `gate` network modes;
+- real SSH opens the canonical test repository, reads Git state, performs and
+  removes a repository write sentinel, keeps unrelated host paths unavailable,
+  and preserves the volume plus pinned host key across restart;
+- a non-default provider target completes real requests with its selected model
+  through Netgate, and the same target remains reachable in `off`, `open`, and
+  restored `gate` network modes;
 - provider/proxy/bridge values are absent from Docker `Config.Env`, PID 1,
   Cage metadata/log/SSH files, and the persistent volume; the short-lived host
   handoff is removed after readiness and the allowlisted tmpfs file is
@@ -47,17 +66,15 @@ Local release-candidate evidence:
 
 Installed ChatGPT validation passed with the maintainer:
 
-- ChatGPT discovered `cage-codex-qwen-token-cage-c7827215` through the
-  generated `ProxyCommand` alias and added `/Users/sshumilov/cage` as a remote
-  project;
+- ChatGPT discovered the generated `ProxyCommand` alias and added the canonical
+  test repository as a remote project;
 - the remote task reported the expected working directory and Git state,
   created and removed a repository write sentinel, and left no unrelated
   changes;
-- the persisted session records `qwen3.8-max-preview`,
-  `qwen-token-personal`, `approval_policy = "on-request"`, and
-  `approvals_reviewer = "auto_review"`; its initial bubblewrap loopback setup
-  failed explicitly and automatic review retried the command with escalation
-  successfully;
+- the persisted session records the expected model, profile, and approval
+  configuration without retaining provider credentials; its initial bubblewrap
+  loopback setup failed explicitly and automatic review retried the command
+  with escalation successfully;
 - killing the verified detached supervisor caused the container to remove
   itself after heartbeat expiry with no remaining Netgate or target process.
   Cage detected stale metadata and recovered the same alias, pinned host key,

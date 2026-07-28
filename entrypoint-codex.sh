@@ -572,7 +572,7 @@ gosu "$TARGET_USER" git config --global --add safe.directory "$WORK_DIR"
 [ -n "${GIT_USER_NAME:-}" ]  && gosu "$TARGET_USER" git config --global user.name "$GIT_USER_NAME"
 [ -n "${GIT_USER_EMAIL:-}" ] && gosu "$TARGET_USER" git config --global user.email "$GIT_USER_EMAIL"
 
-# SSH alias resolution (e.g. SSH_HOST="github-zse=github.com")
+# SSH alias resolution (e.g. SSH_HOST="github-alt=github.com")
 if [ -d "$HOME/.ssh" ]; then
     gosu "$TARGET_USER" chmod 700 "$HOME/.ssh"
     if [ -n "${SSH_HOST:-}" ]; then

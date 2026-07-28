@@ -6,3 +6,37 @@ __pycache__/
 read_claude_logs.py
 .cage.conf
 .claude/
+
+# Local credentials and machine-specific secret state. These are convenience
+# guards only; CI scans committed history independently.
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+!/.env.template
+!/.env.*.example
+/auth.json
+/.credentials.json
+/.auth/
+/.config/gh/
+/.aws/
+/.ssh/
+/*.pem
+/*.key
+/*.p12
+/*.pfx
+/id_rsa
+/id_ed25519
+/id_ecdsa
+/id_dsa
+/config.local.toml
+/secrets.toml
+/secrets.yaml
+/secrets.yml
+/secrets.json
+
+# Root-local logs and scanner output.
+/*.log
+/logs/
+/gitleaks-report.*
+/secret-scan-report.*

@@ -7,6 +7,19 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.1 — 2026-07-28
+
+- remove maintainer-specific validation paths, aliases, runtime identifiers,
+  provider names, and approval details from current public content;
+- replace provider-derived documentation and test fixtures with neutral
+  examples without changing runtime behavior;
+- add checksum-pinned Gitleaks full-history gates to CI and releases, plus an
+  extracted-source-archive scan before publication;
+- add narrow, reviewed false-positive exceptions, public-evidence hygiene
+  regressions, and common local credential-file ignore guards;
+- retain older commits and release assets unchanged, with their low-sensitivity
+  metadata recorded as accepted residual risk rather than claiming erasure.
+
 ## 0.26.0 — 2026-07-27
 
 - add a macOS-only Codex `desktop` target backed by ChatGPT Desktop's SSH-host

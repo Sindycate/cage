@@ -98,6 +98,21 @@ Packet states are `pending`, `in progress`, `verification`, `complete`, or
 - External publication is recorded only after commit, push, tag, and workflow
   status are verified.
 
+## Public evidence hygiene
+
+- Treat every tracked file, commit, tag, workflow log, generated release asset,
+  issue, and pull request as public.
+- Replace maintainer home paths, account or organization aliases, provider,
+  profile and model names, and generated target or volume identifiers with
+  stable examples or capability-level descriptions.
+- Never paste credential values, unredacted authentication output, private
+  configuration, or unredacted scanner reports into tracked evidence.
+- Ignored files are not a security boundary: quarantine sensitive local
+  artifacts outside every Cage-mounted repository.
+- Run the repository secret scan and public-content regression before every
+  publication checkpoint. Keep scanner exceptions rule-specific and as narrow
+  as the exact verified false positive.
+
 ## Release checkpoints
 
 The exact versions may change after integration review.
