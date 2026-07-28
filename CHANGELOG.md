@@ -7,6 +7,20 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.3 — 2026-07-28
+
+- record actual multi-architecture registry image sizes for the shared base
+  image design (ADR-001) from published v0.26.2 images on ghcr.io;
+- confirm all seven base-layer digests are identical across the base,
+  claude-code, and codex image manifests on both amd64 and arm64;
+- correct ADR-001 units (MiB), prior-deduplication baseline (Ubuntu rootfs
+  was already shared in v0.26.1), and storage-deduplication claims (manifest
+  reference identity, not proven GHCR physical deduplication);
+- identify chmod layers (213.1 MiB combined amd64) as a future optimization
+  target with explicit upper-bound caveat;
+- clean-build and warm-cache timings remain unmeasured — that acceptance
+  criterion stays open.
+
 ## 0.26.2 — 2026-07-28
 
 - add an always-discoverable macOS **Manage Desktop targets** screen to the

@@ -27,8 +27,8 @@ differs.
 
 ## Baseline estimates from Dockerfile analysis
 
-Docker is not available in the evaluation environment; sizes are estimated from
-known package archives and verified against Ubuntu 24.04 package indexes.
+Sizes are estimated from known package archives and verified against Ubuntu
+24.04 package indexes. Build timings were not measured.
 
 These estimates motivated the decision but are not a substitute for recorded
 multi-architecture registry measurements. That remaining measurement is kept
@@ -49,12 +49,15 @@ open in the acceptance criteria below.
 
 ### Duplicated content
 
-The ubuntu base layer (~29 MB) is already shared via the registry. The system
-packages, Node.js, and GitHub CLI layers contain identical binaries but produce
-different digests due to instruction divergence. This means:
+The Ubuntu rootfs layer (~29 MiB) is already shared via the registry because
+both images use `FROM ubuntu:24.04`. The system packages, Node.js, and GitHub
+CLI layers contain identical binaries but produce different digests due to
+instruction divergence. This means:
 
-- **Registry storage**: ~127 MB of near-identical content stored twice per arch
-  (amd64 + arm64 = ~254 MB wasted).
+- **Layer references**: ~122 MiB of near-identical compressed content per
+  arch produced divergent digests due to instruction differences, preventing
+    digest-level reuse across the two images (amd64 + arm64 ≈ 244 MiB of
+    logically duplicated content that could not share layer references).
 - **CI build time**: Both matrix jobs independently run `apt-get`, NodeSource
   setup, and GitHub CLI installation. On a cold cache this adds ~3–5 minutes
   per image (arm64 under QEMU is significantly slower).
@@ -76,6 +79,93 @@ A shared base would allow the CI matrix to build the base once and both leaf
 images in parallel, reducing wall-clock time by ~40% on cold cache and ~60%
 on warm cache (base layer cached, only agent install re-runs).
 
+
+## Published registry measurements (v0.26.2)
+
+Measured 2026-07-28 against `ghcr.io/sindycate/cage/{base,claude-code,codex}:0.26.2`
+using the OCI distribution API (anonymous pull token). All sizes are compressed.
+
+### Image sizes
+
+| Image | amd64 | arm64 | Layers |
+|-------|-------|-------|--------|
+| `base:0.26.2` | 150.9 MiB | 148.5 MiB | 7 |
+| `claude-code:0.26.2` | 316.5 MiB | 313.2 MiB | 14 (7 base + 7 leaf) |
+| `codex:0.26.2` | 545.4 MiB | 520.8 MiB | 15 (7 base + 8 leaf) |
+
+Each image also carries two `unknown/unknown` attestation manifests
+(SBOM + provenance) of ~8 MiB each.
+
+### Layer sharing verification
+
+All 7 base layers are **digest-identical** across all three images on both
+architectures. Confirmed by comparing `layer.digest` values from the OCI
+manifests:
+
+| Layer | Content | amd64 size | arm64 size | Shared |
+|-------|---------|-----------|-----------|--------|
+| 0 | `ubuntu:24.04` rootfs | 28.4 MiB | 27.6 MiB | ✓ all three |
+| 1 | System packages (apt) | 50.3 MiB | 50.1 MiB | ✓ all three |
+| 2 | GitHub CLI | 14.1 MiB | 12.8 MiB | ✓ all three |
+| 3 | Node.js LTS | 58.1 MiB | 58.1 MiB | ✓ all three |
+| 4–6 | Labels, COPY relays, chmod | ~3 KB | ~3 KB | ✓ all three |
+
+**Layer reference identity**: all three image manifests reference the same
+seven base-layer digests (150.9 MiB amd64 / 148.5 MiB arm64). Before the
+shared base (v0.26.1), the two leaf images already shared the Ubuntu rootfs
+layer (~29 MiB per arch) because both used `FROM ubuntu:24.04`, but the
+apt/Node.js/GitHub CLI layers diverged due to different instruction flags,
+limiting deduplication to that single base layer. The shared base extends
+identity to all seven infrastructure layers.
+
+Note: matching digests prove the manifests reference identical content. They
+do not prove that GHCR physically stores those blobs once across the three
+separate repository paths (`base`, `claude-code`, `codex`). Cross-repository
+blob mounting is optional in the [OCI Distribution
+Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md),
+and backend storage implementation is not specified. The practical benefit is
+that clients pulling multiple images transfer shared layers only once.
+
+### Leaf-only layers
+
+**Claude leaf** (7 layers, ~165.6 MiB amd64):
+- User creation, entrypoint COPY, sudoers: ~12 KB
+- Claude Code installer (`curl | bash`): 83.0 MiB
+- `chmod -R a+rwX /home/claude`: 82.6 MiB
+
+**Codex leaf** (8 layers, ~394.5 MiB amd64):
+- `openssh-server` install: 3.0 MiB
+- User creation, npm prefix setup: ~11 KB
+- `npm install -g @openai/codex`: 261.0 MiB
+- `codex-remote.py` COPY, entrypoint COPY: ~2 KB
+- `chmod -R a+rwX /home/codex`: 130.5 MiB
+
+### Observations
+
+1. **Estimates vs. reality**: the Codex image is 2.6× larger than estimated
+   (545.4 MiB vs. ~210 MiB). The npm global install layer (261.0 MiB) and the
+   `chmod -R` layer (130.5 MiB) are the main contributors. The chmod layer
+   duplicates file metadata for the entire npm prefix. Claude's chmod layer
+   (82.6 MiB) shows the same pattern at smaller scale.
+
+2. **chmod layers are a future optimization target**: both leaf images carry
+   a full-filesystem-copy chmod layer (82.6 + 130.5 = 213.1 MiB amd64).
+   These sizes establish an upper bound on potential savings, not a
+   guarantee: `COPY --chmod` alone does not repair permissions of files
+   created by npm or the Claude installer. A prototype combining
+   installation and permission adjustment into a single layer would be
+   needed to realize the savings. This is out of scope for the base-image
+   decision but worth a follow-up.
+
+3. **Build timings**: not measured. A local Docker 28.4.0 daemon (aarch64)
+   is available but no cold-cache or warm-cache benchmark was defined or run.
+   Closing this criterion requires a defined benchmark, likely including a CI
+   or Buildx path for amd64. The v0.26.2 release workflow completed
+   successfully on GitHub Actions for both amd64 and arm64; CI run timings
+   are available in the [release workflow
+   run](https://github.com/Sindycate/cage/actions/runs/30358209182) but
+   workflow duration is not a warm-cache measurement.
+
 ## Options evaluated
 
 ### Option 1: Keep two independent Dockerfiles (status quo)
@@ -86,7 +176,8 @@ on warm cache (base layer cached, only agent install re-runs).
 - No risk of accidental coupling between agent runtimes.
 
 **Disadvantages:**
-- ~254 MB duplicated registry storage per release (both arches).
+- ~122 MiB of near-identical apt/Node/GitHub CLI layers duplicated per
+  arch (only the ~29 MiB Ubuntu rootfs was already shared in v0.26.1).
 - CI builds both images from scratch on every release; no cache sharing.
 - Security patches to shared packages require updating two Dockerfiles.
 - Drift risk: the Dockerfiles have already diverged in apt flags and retry
@@ -308,8 +399,10 @@ confirmed before the corresponding acceptance item is closed.
 ## Acceptance criteria status
 
 - [ ] Capture multi-architecture registry image sizes, clean-build time, and
-      warm-cache build time. *(The baseline remains an estimate; native arm64
-      layer sharing is confirmed.)*
+      warm-cache build time. *(Registry sizes measured from v0.26.2 published
+      images; layer sharing confirmed via digest comparison. Clean-build and
+      warm-cache timings have NOT been measured — workflow duration is not a
+      substitute. This criterion remains open until both are recorded.)*
 - [x] Document why agent-specific users, entrypoints, state rules, and update
       paths can or cannot share a base safely.
 - [x] Compare all three options above, including security and operational
@@ -317,8 +410,9 @@ confirmed before the corresponding acceptance item is closed.
 - [x] Preserve existing `claude-code:<version>` and `codex:<version>` pull
       contracts unless a separately documented migration is approved.
 - [x] Preserve independent tool updates and Codex Desktop SSH support.
-- [ ] Validate the chosen design with amd64/arm64 builds, reproducibility,
-      SBOM/provenance, installer, and real-Docker tests. *(Local
-      reproducibility, installer, native arm64 builds, and real-Docker tests
-      pass; release amd64/arm64 and attestation results remain.)*
+- [x] Validate the chosen design with amd64/arm64 builds, reproducibility,
+      SBOM/provenance, installer, and real-Docker tests. *(v0.26.2 release
+      workflow succeeded: amd64/arm64 base and leaf builds, Docker smoke
+      tests, installer tests, SBOMs, and provenance jobs all passed.
+      Published archive verified to contain all three Dockerfiles.)*
 - [x] Add the final decision to the architecture/security documentation.

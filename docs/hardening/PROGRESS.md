@@ -3,6 +3,18 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-28 — v0.26.3 ADR-001 registry measurements recorded
+
+Published v0.26.2 registry image sizes measured via OCI distribution API:
+base 150.9 MiB (amd64), claude-code 316.5 MiB, codex 545.4 MiB. All seven
+base-layer digests confirmed identical across all three images on both
+architectures. Corrected earlier claims: units are MiB not MB; v0.26.1
+already shared the Ubuntu rootfs layer (~29 MiB); matching digests prove
+manifest reference identity, not GHCR physical blob deduplication. Clean-build
+and warm-cache timings remain unmeasured; that acceptance criterion is still
+open. chmod layers (213.1 MiB combined) noted as upper-bound optimization
+target requiring a prototype.
+
 ## 2026-07-28 — v0.26.2 release candidate shared base-image integration
 
 Implemented ADR-001 with one agent-neutral `Dockerfile.base`, thin Claude and
