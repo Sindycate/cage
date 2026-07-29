@@ -8,6 +8,70 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.26.4 — 2026-07-28
+
+### Authoritative MCP pack selection
+
+Who is affected: every Codex and Claude launch that relies on MCP servers
+defined outside the central Cage config — user `~/.codex/config.toml`, named
+Codex profiles, repository `.codex/config.toml` or `.mcp.json`, system or
+plugin-generated configuration, or host `~/.claude.json`.
+
+Previous behavior: Cage added the selected `mcp_packs` on top of whatever MCP
+servers the tool already inherited from those layers. Inherited servers stayed
+enabled, so an unselected server (for example a built-in `node_repl`) could
+still start, fail initialization, and appear in startup-failure output.
+
+New behavior: `mcp_packs` is the authoritative allowlist. Only servers selected
+by the resolved preset may start; an absent or empty `mcp_packs` selection means
+zero active MCPs. At launch Cage inventories the inherited servers in the
+launching runtime (`mcp list --json`, supplemented by direct profile/project
+layer parsing) and disables every unselected inherited server with
+highest-precedence overrides. Loaded servers receive `enabled=false`.
+Direct-only profile/project definitions that Codex has not loaded yet (notably
+an untrusted repository) receive a same-kind inert transport plus
+`enabled=false`, so Codex sees a complete disabled definition before trust and
+the server stays inert if trust is granted in the same process. `target=host`
+inventories the host binary; container launches inventory inside the image
+(entrypoint, after configuration import); Desktop re-inventories inside the
+persistent container on every app-server connection. Caller `-c`/`--config`
+assignments are restricted to an explicit allowlist of runtime-only roots.
+Caller profile (`-p`/`--profile`), working-directory (`-C`/`--cd`), and
+feature (`--enable`/`--disable`) overrides are rejected because they can
+introduce configuration or plugin layers after inventory. Dedicated model and
+sandbox options, normal prompts, and positional/subcommand payload after `--`
+remain available. `--remote` and `--remote-auth-token-env` are also rejected
+because the destination app-server runtime was not inventoried;
+`--ignore-user-config` is rejected because removing the already-inventoried
+layer could leave a transport-less suppression override. Desktop authorization
+metadata is root-owned rather than
+writable by the remote Codex user. For Claude, host `~/.claude.json` MCP definitions are no
+longer merged, the volume `mcpServers` is reconciled to the selected set only,
+and a private read-only `.mcp.json` overlay always suppresses repository MCP
+definitions. Unselected servers may remain visible as disabled in
+`codex mcp list`; they never start. Cage fails closed when a trustworthy
+inventory cannot be obtained, and there is no legacy inheritance escape hatch.
+
+Migration: move every MCP server you want into a central `[mcp_packs.*]` block
+and select it explicitly in the preset. This includes servers previously
+inherited from `~/.codex/config.toml`, named profiles, repository config, or
+host `~/.claude.json`. Replace any launch script that supplies
+`-c mcp_servers.*=...` or `--config mcp_servers.*=...` with an equivalent
+central MCP pack selection. Move caller profile selection into the preset's
+`codex_profile`, use the Cage repository path instead of `-C`/`--cd`, and move
+feature/plugin/project or unknown-root `-c` settings into a Cage-owned Codex
+configuration layer. Do not use `--remote` through Cage; select a Cage-managed
+execution target instead. Container and Desktop launches use the Codex binary
+inside their image and do not require a host Codex executable; `target=host`
+continues to require one. `cage config explain`, `cage config doctor`, and the
+TUI list selected servers; host resolution and container/Desktop launch output
+disclose the terminal-escaped suppressed set.
+
+Rollback: installing 0.26.3 restores additive MCP behavior. Host Codex/Claude
+configuration, repository configuration, plugin files, and OAuth credentials
+are never modified by either version; the suppression is applied per-launch
+through process-local overrides and container state only.
+
 ## 0.26.2 — 2026-07-28
 
 ### Shared base image for local and published builds

@@ -706,14 +706,46 @@ with open("/run/cage-user/remote-env.json", "x", encoding="utf-8") as handle:
 profile = os.environ.get("CAGE_CODEX_PROFILE", "")
 if profile and not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
     raise SystemExit("cage: invalid desktop Codex profile")
-launch = {"profile": profile, "yolo": os.environ.get("CAGE_YOLO", "0") == "1"}
-with open("/run/cage-user/remote-launch.json", "x", encoding="utf-8") as handle:
+# Authoritative MCP selection: record the selected server names so codex-remote
+# re-inventories the live runtime on every app-server connection and disables
+# every inherited server the preset did not select. The repository is a live
+# writable mount, so a fixed snapshot taken at supervisor start would go stale.
+selected_mcp = set()
+bridged_json = os.environ.get("CAGE_MCP_SERVERS", "")
+if bridged_json:
+    try:
+        bridged = json.loads(bridged_json)
+    except Exception as exc:
+        raise SystemExit("cage: invalid CAGE_MCP_SERVERS: %s" % exc)
+    if isinstance(bridged, (dict, list)):
+        selected_mcp.update(str(name) for name in bridged)
+remote_json = os.environ.get("CAGE_REMOTE_MCP_SERVERS", "")
+if remote_json:
+    try:
+        remote = json.loads(remote_json)
+    except Exception as exc:
+        raise SystemExit("cage: invalid CAGE_REMOTE_MCP_SERVERS: %s" % exc)
+    if isinstance(remote, list):
+        for srv in remote:
+            if isinstance(srv, dict) and srv.get("name"):
+                selected_mcp.add(str(srv["name"]))
+launch = {
+    "profile": profile,
+    "yolo": os.environ.get("CAGE_YOLO", "0") == "1",
+    "selected_mcp": sorted(selected_mcp),
+    "work_dir": os.environ.get("WORKSPACE_DIR", "/workspace"),
+}
+with open("/run/cage/remote-launch.json", "x", encoding="utf-8") as handle:
     json.dump(launch, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
 PY
-    chmod 600 /run/cage-user/remote-env.json /run/cage-user/remote-launch.json
+    chmod 600 /run/cage-user/remote-env.json
     chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" \
-        /run/cage-user/remote-env.json /run/cage-user/remote-launch.json
+        /run/cage-user/remote-env.json
+    # Authorization metadata is deliberately root-owned beneath a root-owned
+    # directory. The remote Codex user may read it but cannot edit or replace it
+    # between app-server connections.
+    chmod 644 /run/cage/remote-launch.json
 
     cat > /run/cage/sshd_config <<EOF
 HostKey $REMOTE_STATE/ssh_host_ed25519_key
@@ -752,5 +784,371 @@ EOF
         /usr/local/bin/codex --cage-wait /cage-desktop/heartbeat
 fi
 
+# Caller arguments must not change the configuration/runtime layers after Cage
+# computes its selected-only MCP policy. Keep allowlisted runtime settings and
+# positional payload unchanged.
+if ! gosu "$TARGET_USER" python3 -I - "$@" <<'PY'
+import sys
+import tomllib
+
+SAFE_CONFIG_ROOTS = {
+    "approval_policy",
+    "model",
+    "model_auto_compact_token_limit",
+    "model_context_window",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "personality",
+    "sandbox_mode",
+    "sandbox_permissions",
+    "sandbox_workspace_write",
+    "shell_environment_policy",
+    "web_search",
+}
+
+
+def config_root(expression):
+    quote = ""
+    escaped = False
+    assignment = -1
+    for index, character in enumerate(expression):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quote = ""
+            continue
+        if quote == "'":
+            if character == "'":
+                quote = ""
+            continue
+        if character in {'"', "'"}:
+            quote = character
+        elif character == "=":
+            assignment = index
+            break
+    if assignment < 0:
+        return None
+    key = expression[:assignment].strip()
+    try:
+        parsed = tomllib.loads("%s=0" % key)
+    except tomllib.TOMLDecodeError:
+        return None
+    if len(parsed) != 1:
+        return None
+    return next(iter(parsed))
+
+
+argv = sys.argv[1:]
+index = 0
+while index < len(argv):
+    argument = argv[index]
+    if argument == "--":
+        break
+    if (
+        argument in {"-p", "--profile"}
+        or argument.startswith("--profile=")
+        or argument.startswith("-p=")
+        or (argument.startswith("-p") and len(argument) > 2)
+    ):
+        sys.stderr.write(
+            "cage: Codex launch arguments may not override the profile; "
+            "select codex_profile in the Cage preset\n"
+        )
+        raise SystemExit(2)
+    if (
+        argument in {"-C", "--cd"}
+        or argument.startswith("--cd=")
+        or argument.startswith("-C=")
+        or (argument.startswith("-C") and len(argument) > 2)
+    ):
+        sys.stderr.write(
+            "cage: Codex launch arguments may not override the working directory; "
+            "the Cage repository path is authoritative\n"
+        )
+        raise SystemExit(2)
+    if (
+        argument in {"--enable", "--disable"}
+        or argument.startswith("--enable=")
+        or argument.startswith("--disable=")
+    ):
+        sys.stderr.write(
+            "cage: Codex launch arguments may not change feature flags because "
+            "features can change MCP/plugin discovery\n"
+        )
+        raise SystemExit(2)
+    if (
+        argument in {"--remote", "--remote-auth-token-env"}
+        or argument.startswith("--remote=")
+        or argument.startswith("--remote-auth-token-env=")
+    ):
+        sys.stderr.write(
+            "cage: Codex launch arguments may not select a remote app-server "
+            "runtime because Cage did not inventory that runtime\n"
+        )
+        raise SystemExit(2)
+    if argument == "--ignore-user-config":
+        sys.stderr.write(
+            "cage: Codex launch arguments may not ignore user configuration "
+            "after Cage inventories that layer\n"
+        )
+        raise SystemExit(2)
+    expression = None
+    if argument in {"-c", "--config"}:
+        if index + 1 < len(argv):
+            expression = argv[index + 1]
+            index += 1
+    elif argument.startswith("--config="):
+        expression = argument[len("--config="):]
+    elif argument.startswith("-c="):
+        expression = argument[3:]
+    elif argument.startswith("-c") and len(argument) > 2:
+        expression = argument[2:]
+    if expression is not None:
+        root = config_root(expression)
+        if root == "mcp_servers":
+            sys.stderr.write(
+                "cage: Codex launch arguments may not override mcp_servers; "
+                "define the server in a central Cage mcp_pack and select that pack\n"
+            )
+            raise SystemExit(2)
+        if root not in SAFE_CONFIG_ROOTS:
+            sys.stderr.write(
+                "cage: Codex config override root %r is not safe after MCP "
+                "inventory; move it to the selected Cage-owned Codex "
+                "configuration layer\n" % root
+            )
+            raise SystemExit(2)
+    index += 1
+PY
+then
+    exit 1
+fi
+
+# Authoritative MCP selection: inventory THIS container runtime (the image's
+# codex, the imported configuration, and image system/plugin layers) and disable
+# every inherited server the resolved preset did not select. Running in-container
+# guarantees the suppression list only references servers that exist here, so it
+# can never fail Codex config load with an "invalid transport" stub.
+MCP_DISABLE_OVERRIDES="$(
+    CAGE_INV_CODEX_HOME="$CODEX_DIR" \
+    CAGE_INV_WORK_DIR="$WORK_DIR" \
+    CAGE_INV_PROFILE="${CAGE_CODEX_PROFILE:-}" \
+    gosu "$TARGET_USER" python3 -I - <<'PY'
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - container ships 3.11+
+    tomllib = None
+
+codex_home = os.environ["CAGE_INV_CODEX_HOME"]
+work_dir = os.environ["CAGE_INV_WORK_DIR"]
+profile = os.environ.get("CAGE_INV_PROFILE", "")
+MAX_BYTES = 4 * 1024 * 1024
+INERT_STDIO_COMMAND = "/usr/bin/false"
+INERT_HTTP_URL = "https://invalid.invalid/mcp"
+
+
+def fail(message):
+    sys.stderr.write("cage: %s\n" % message)
+    sys.exit(1)
+
+
+def key_segment(name):
+    if re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return name
+    return json.dumps(name)
+
+
+def toml_transports(path):
+    """Enabled MCP names and command/url transport kinds, or None."""
+    if not os.path.exists(path):
+        return {}
+    if not os.path.isfile(path) or tomllib is None:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            return None
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return None
+    servers = parsed.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        return None
+    transports = {}
+    for name, conf in servers.items():
+        if not isinstance(conf, dict):
+            return None
+        has_command = isinstance(conf.get("command"), str) and bool(conf["command"])
+        has_url = isinstance(conf.get("url"), str) and bool(conf["url"])
+        if has_command == has_url:
+            return None
+        if conf.get("enabled") is not False:
+            transports[str(name)] = "stdio" if has_command else "http"
+    return transports
+
+
+def merge_transports(target, incoming):
+    for name, transport in incoming.items():
+        previous = target.get(name)
+        if previous is not None and previous != transport:
+            fail("conflicting direct transport types for MCP server %r" % name)
+        target[name] = transport
+
+
+selected = set()
+bridged_json = os.environ.get("CAGE_MCP_SERVERS", "")
+if bridged_json:
+    try:
+        bridged = json.loads(bridged_json)
+    except Exception:
+        bridged = None
+    if isinstance(bridged, (dict, list)):
+        selected.update(str(name) for name in bridged)
+remote_json = os.environ.get("CAGE_REMOTE_MCP_SERVERS", "")
+if remote_json:
+    try:
+        remote = json.loads(remote_json)
+    except Exception:
+        remote = None
+    if isinstance(remote, list):
+        for srv in remote:
+            if isinstance(srv, dict) and srv.get("name"):
+                selected.add(str(srv["name"]))
+
+codex_bin = shutil.which("codex")
+if codex_bin is None:
+    fail("cannot inventory MCP servers: codex not found in the container")
+command = [codex_bin]
+if profile:
+    command += ["--profile", profile]
+command += ["mcp", "list", "--json"]
+environment = dict(os.environ)
+environment["CODEX_HOME"] = codex_home
+try:
+    completed = subprocess.run(
+        command,
+        cwd=work_dir,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=60,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired) as exc:
+    fail("cannot inventory MCP servers: %s" % exc)
+if completed.returncode != 0:
+    fail(
+        "cannot build a trustworthy MCP inventory: codex mcp list exited %d"
+        % completed.returncode
+    )
+try:
+    output = completed.stdout or b""
+    if len(output) > MAX_BYTES:
+        fail("cannot build a trustworthy MCP inventory: output too large")
+    entries = json.loads(output.decode("utf-8"))
+except (UnicodeError, json.JSONDecodeError) as exc:
+    fail("cannot build a trustworthy MCP inventory: %s" % exc)
+if not isinstance(entries, list):
+    fail("cannot build a trustworthy MCP inventory: expected a JSON list")
+runtime_enabled = set()
+for entry in entries:
+    if not isinstance(entry, dict):
+        fail(
+            "cannot build a trustworthy MCP inventory: every entry "
+            "must be a JSON object"
+        )
+    name = entry.get("name")
+    enabled_flag = entry.get("enabled")
+    if (
+        not isinstance(name, str)
+        or not name
+        or not isinstance(enabled_flag, bool)
+    ):
+        fail(
+            "cannot build a trustworthy MCP inventory: every entry must "
+            "contain a non-empty string name and boolean enabled flag"
+        )
+    if enabled_flag:
+        runtime_enabled.add(name)
+
+direct_transports = {}
+if profile:
+    profile_transports = toml_transports(
+        os.path.join(codex_home, profile + ".config.toml")
+    )
+    if profile_transports is None:
+        fail("cannot build a trustworthy MCP inventory: unreadable profile layer")
+    merge_transports(direct_transports, profile_transports)
+project_transports = toml_transports(
+    os.path.join(work_dir, ".codex", "config.toml")
+)
+if project_transports is None:
+    fail("cannot build a trustworthy MCP inventory: unreadable project layer")
+merge_transports(direct_transports, project_transports)
+duplicates = sorted(selected & set(direct_transports))
+if duplicates:
+    fail(
+        "selected MCP server(s) already exist in a profile/project layer: %s"
+        % " ".join(json.dumps(name, ensure_ascii=True) for name in duplicates)
+    )
+enabled = runtime_enabled | set(direct_transports)
+
+suppressed = sorted(enabled - selected)
+for name in suppressed:
+    if not name or "\n" in name or "\r" in name:
+        fail("unsafe MCP server name in inventory: %r" % name)
+sys.stderr.write("cage: MCP policy: selected packs only\n")
+if suppressed:
+    sys.stderr.write(
+        "cage: inherited MCPs suppressed for this launch: %s\n"
+        % " ".join(json.dumps(name, ensure_ascii=True) for name in suppressed)
+    )
+for name in suppressed:
+    key = "mcp_servers.%s" % key_segment(name)
+    if name not in runtime_enabled:
+        transport = direct_transports.get(name)
+        if transport == "stdio":
+            print("%s.command=%s" % (key, json.dumps(INERT_STDIO_COMMAND)))
+        elif transport == "http":
+            print("%s.url=%s" % (key, json.dumps(INERT_HTTP_URL)))
+        else:
+            fail("no loaded or direct transport for MCP server %r" % name)
+    print("%s.enabled=false" % key)
+PY
+)" || {
+    echo "ERROR: cage could not build the in-container MCP inventory; refusing to launch" >&2
+    exit 1
+}
+
+CAGE_MCP_DISABLE_ARGS=()
+if [ -n "$MCP_DISABLE_OVERRIDES" ]; then
+    while IFS= read -r _mcp_override; do
+        [ -z "$_mcp_override" ] && continue
+        CAGE_MCP_DISABLE_ARGS+=(-c "$_mcp_override")
+    done <<< "$MCP_DISABLE_OVERRIDES"
+fi
+
+CAGE_CODEX_PROFILE_ARGS=()
+if [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
+    CAGE_CODEX_PROFILE_ARGS+=(--profile "$CAGE_CODEX_PROFILE")
+fi
+
 cd "$WORK_DIR"
-exec gosu "$TARGET_USER" codex "$@"
+exec gosu "$TARGET_USER" codex \
+    ${CAGE_CODEX_PROFILE_ARGS[@]+"${CAGE_CODEX_PROFILE_ARGS[@]}"} \
+    ${CAGE_MCP_DISABLE_ARGS[@]+"${CAGE_MCP_DISABLE_ARGS[@]}"} \
+    "$@"

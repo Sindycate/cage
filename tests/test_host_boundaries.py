@@ -43,23 +43,42 @@ exit 0
     )
 
 
-def write_mcp_config(path: Path, extra_mount: Path | None = None) -> None:
-    lines = [
-                "version = 1",
-                'default_preset = "codex-test"',
-                "[auth.codex-test]",
-                'tool = "codex"',
-                "copy_auth = false",
-                "[mcp_packs.local]",
-                "servers = [",
-                '  { name = "local", type = "stdio", command = "printf ignored" },',
-                "]",
-                "[presets.codex-test]",
-                'tool = "codex"',
-                'auth = "codex-test"',
-                'mcp_packs = ["local"]',
-                'net = "open"',
-    ]
+def write_mcp_config(path: Path, extra_mount: Path | None = None, tool: str = "codex") -> None:
+    if tool == "claude":
+        lines = [
+            "version = 1",
+            'default_preset = "claude-test"',
+            "[auth.claude-test]",
+            'tool = "claude"',
+            'mode = "api-key"',
+            "[mcp_packs.local]",
+            "servers = [",
+            '  { name = "local", type = "stdio", command = "printf ignored" },',
+            "]",
+            "[presets.claude-test]",
+            'tool = "claude"',
+            'auth = "claude-test"',
+            'mcp_packs = ["local"]',
+            'net = "open"',
+            "session_sync = false",
+        ]
+    else:
+        lines = [
+                    "version = 1",
+                    'default_preset = "codex-test"',
+                    "[auth.codex-test]",
+                    'tool = "codex"',
+                    "copy_auth = false",
+                    "[mcp_packs.local]",
+                    "servers = [",
+                    '  { name = "local", type = "stdio", command = "printf ignored" },',
+                    "]",
+                    "[presets.codex-test]",
+                    'tool = "codex"',
+                    'auth = "codex-test"',
+                    'mcp_packs = ["local"]',
+                    'net = "open"',
+        ]
     if extra_mount is not None:
         lines.append(
             "extra_mounts = [{ path = "
@@ -107,6 +126,8 @@ class HostBoundaryTests(unittest.TestCase):
         *,
         xdg: Path | None = None,
         extra_mount: Path | None = None,
+        tool: str = "codex",
+        extra_args: list[str] | None = None,
     ) -> tuple[subprocess.CompletedProcess, Path, Path]:
         xdg = xdg or root / "xdg"
         home = root / "home"
@@ -117,7 +138,7 @@ class HostBoundaryTests(unittest.TestCase):
         home.mkdir(parents=True)
         bin_dir.mkdir(parents=True)
         write_fake_docker(bin_dir / "docker")
-        write_mcp_config(xdg / "cage" / "config.toml", extra_mount)
+        write_mcp_config(xdg / "cage" / "config.toml", extra_mount, tool=tool)
         launcher_dir = root / "launcher"
         launcher_dir.mkdir()
         shutil.copy2(CAGE, launcher_dir / "cage")
@@ -133,9 +154,10 @@ class HostBoundaryTests(unittest.TestCase):
         env.pop("OPENAI_API_KEY", None)
         env.pop("GH_TOKEN", None)
         env.pop("GITHUB_TOKEN", None)
+        env["ANTHROPIC_API_KEY"] = "dummy-test-key"
 
         result = subprocess.run(
-            [str(launcher_dir / "cage"), str(repo)],
+            [str(launcher_dir / "cage"), *(extra_args or []), str(repo)],
             cwd=repo,
             env=env,
             text=True,
@@ -168,19 +190,18 @@ class HostBoundaryTests(unittest.TestCase):
             ) + "\n"
             project_mcp.write_text(original, encoding="utf-8")
 
-            result, capture, docker_args = self.launch_with_mcp(root, repo)
+            result, capture, docker_args = self.launch_with_mcp(root, repo, tool="claude")
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            # The repository .mcp.json is never read, imported, or rewritten.
             self.assertFalse(import_sentinel.exists())
             self.assertEqual(project_mcp.read_text(encoding="utf-8"), original)
             generated = json.loads(capture.read_text(encoding="utf-8"))
+            # Authoritative selection: only the selected bridged server survives;
+            # the repository-defined "other" server is suppressed.
             self.assertEqual(
-                generated["mcpServers"]["local"],
-                {"type": "stdio", "command": "mcp-relay", "args": ["local"]},
-            )
-            self.assertEqual(
-                generated["mcpServers"]["other"],
-                {"command": "project-command"},
+                generated["mcpServers"],
+                {"local": {"type": "stdio", "command": "mcp-relay", "args": ["local"]}},
             )
             run_args = [os.fsdecode(value) for value in docker_args.read_bytes().split(b"\0") if value]
             token_arg = next(value for value in run_args if value.startswith("MCP_BRIDGE_TOKEN="))
@@ -222,7 +243,7 @@ class HostBoundaryTests(unittest.TestCase):
             self.assertIn("inside read-write extra mount", result.stderr)
             self.assertFalse(capture.exists())
 
-    def test_symlinked_project_mcp_fails_closed_without_restore_write(self):
+    def test_symlinked_project_mcp_is_suppressed_without_host_write(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -232,15 +253,20 @@ class HostBoundaryTests(unittest.TestCase):
             victim.write_text(original, encoding="utf-8")
             (repo / ".mcp.json").symlink_to(victim)
 
-            result, capture, _ = self.launch_with_mcp(root, repo)
+            result, capture, _ = self.launch_with_mcp(root, repo, tool="claude")
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("refusing symlinked project MCP configuration", result.stderr)
+            # The overlay is generated from the selected bridge only; the
+            # repository .mcp.json (here a symlink) is never read or followed.
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((repo / ".mcp.json").is_symlink())
             self.assertEqual(victim.read_text(encoding="utf-8"), original)
-            self.assertFalse(capture.exists())
+            generated = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                generated["mcpServers"],
+                {"local": {"type": "stdio", "command": "mcp-relay", "args": ["local"]}},
+            )
 
-    def test_oversized_project_mcp_fails_before_host_json_parse(self):
+    def test_oversized_project_mcp_is_suppressed_without_host_read(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -249,12 +275,40 @@ class HostBoundaryTests(unittest.TestCase):
             with project_mcp.open("wb") as handle:
                 handle.truncate(16 * 1024 * 1024 + 1)
 
-            result, capture, _ = self.launch_with_mcp(root, repo)
+            result, capture, _ = self.launch_with_mcp(root, repo, tool="claude")
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("exceeds the 16 MiB limit", result.stderr)
+            # The oversized repository .mcp.json is never read; it is masked by
+            # the read-only overlay inside the container.
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(project_mcp.stat().st_size, 16 * 1024 * 1024 + 1)
-            self.assertFalse(capture.exists())
+            generated = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(
+                generated["mcpServers"],
+                {"local": {"type": "stdio", "command": "mcp-relay", "args": ["local"]}},
+            )
+
+    def test_net_off_overlay_has_no_broken_relays(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".mcp.json").write_text(
+                json.dumps(
+                    {"mcpServers": {"local": {"command": "x"}, "other": {"command": "y"}}}
+                ),
+                encoding="utf-8",
+            )
+
+            result, capture, _ = self.launch_with_mcp(
+                root, repo, tool="claude", extra_args=["--net", "off"]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = json.loads(capture.read_text(encoding="utf-8"))
+            # The stdio bridge is intentionally skipped under --net off, so the
+            # overlay must not advertise any mcp-relay servers (which would fail
+            # at startup); repository MCPs are still suppressed by the empty overlay.
+            self.assertEqual(generated["mcpServers"], {})
 
     def test_netgate_helpers_ignore_cwd_json_shadow_and_handle_quoted_home(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:

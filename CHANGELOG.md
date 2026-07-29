@@ -7,6 +7,37 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.4 — 2026-07-28
+
+- **Breaking:** `mcp_packs` is now the authoritative allowlist for every Cage
+  session. Only MCP servers selected by the resolved preset may start; inherited
+  servers from user, profile, project, system, and plugin configuration layers
+  are disabled and disclosed. An absent or empty `mcp_packs` selection means
+  zero active MCPs. See `docs/hardening/MIGRATIONS.md`.
+- build the MCP inventory in the launching runtime — host binary for
+  `target=host`, the container `codex mcp list --json` for container launches
+  (entrypoint, after configuration import), and a per-connection inventory for
+  Desktop — supplemented by direct profile/project layer parsing; loaded
+  servers receive `enabled=false`, while direct-only untrusted definitions get
+  a same-kind inert transport plus `enabled=false` so launch remains valid
+  before and after repository trust;
+- reject caller profile (`-p`/`--profile`), working-directory
+  (`-C`/`--cd`), and feature (`--enable`/`--disable`) overrides across host,
+  container, and Desktop paths; restrict `-c`/`--config` to an explicit
+  runtime-only root allowlist so no later argument can change MCP/plugin
+  discovery after inventory; reject `--remote` app-server handoff to an
+  uninventoried runtime and `--ignore-user-config` removal of an inventoried
+  transport layer (`--` still preserves following positional payload);
+- keep Desktop selected-MCP authorization metadata root-owned and
+  non-replaceable by the remote Codex user;
+- stop merging host `~/.claude.json` MCP definitions for Claude; reconcile the
+  volume `mcpServers` to the selected set only and always mount a private
+  read-only `.mcp.json` overlay that suppresses repository MCP definitions;
+- disclose `MCP policy: selected packs only` and selected servers in
+  `config explain`, `config doctor`, and the TUI; host resolution and
+  container/Desktop launch output disclose terminal-escaped suppressed names;
+- fail closed when a trustworthy MCP inventory cannot be obtained.
+
 ## 0.26.3 — 2026-07-28
 
 - record actual multi-architecture registry image sizes for the shared base

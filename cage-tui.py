@@ -943,7 +943,7 @@ class CursesView:
                 ("profile", f"Codex profile: {value.get('codex_profile', 'base config')}"),
                 ("auth", f"Auth: {value.get('auth', 'none')}"),
                 ("identity", f"Identity: {value.get('identity', 'none')}"),
-                ("mcp", f"MCP packs: {', '.join(value.get('mcp_packs', [])) or 'none'}"),
+                ("mcp", f"MCP packs (selected packs only): {', '.join(value.get('mcp_packs', [])) or 'none'}"),
                 ("skills", f"Skill packs: {', '.join(value.get('skill_packs', [])) or 'none'}"),
                 ("commands", f"Host commands: {', '.join(value.get('host_commands', [])) or 'none'}"),
                 ("env", f"Extra environment names: {', '.join(value.get('env', [])) or 'none'}"),

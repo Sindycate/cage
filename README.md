@@ -244,6 +244,62 @@ net = "gate"
 "/Users/me/projects/myapp" = "codex-work"
 ```
 
+### Authoritative MCP selection
+
+`mcp_packs` is the authoritative allowlist for every Cage session. **Only the
+MCP servers selected by the resolved preset may start.** An absent or empty
+`mcp_packs` selection means zero active MCPs.
+
+At launch, Cage inventories the MCP servers the tool would otherwise inherit
+(from user, profile, project, system, and plugin configuration layers) and
+disables every server the preset did not select with highest-precedence
+overrides. Loaded servers receive `mcp_servers.<name>.enabled=false`. A direct
+profile/project definition that Codex has not loaded yet (notably in a newly
+cloned, untrusted repository) receives a same-kind inert transport plus
+`enabled=false`; this prevents Codex's transport-less-table error and keeps the
+server disabled if trust is granted during that same process. The inventory
+always runs in the **launching runtime**:
+
+- `target = "host"` inventories the host Codex binary (`mcp list --json`).
+- Container launches inventory inside the image (the entrypoint runs the
+  container's `codex mcp list --json` after importing configuration).
+- Desktop re-inventories inside the persistent container on **every** app-server
+  connection, so a project MCP added to the live repository mount after the
+  target started is still suppressed.
+
+Unselected servers may still appear as disabled in `codex mcp list`, but they
+never start, fail initialization, or become model-accessible.
+
+Codex launch arguments cannot replace the inventoried profile (`-p` /
+`--profile`) or repository (`-C` / `--cd`), and cannot change feature flags
+with `--enable` / `--disable`, because each can introduce configuration or
+plugin layers after the inventory is built. Caller `-c` / `--config`
+assignments use a small allowlist of runtime-only roots such as model, sandbox,
+approval, personality, shell-environment, and web-search settings; MCP,
+plugin, feature, project, and unknown roots fail closed. Normal positional
+prompts and dedicated options such as `--model` and `--sandbox` remain
+available. `--remote` and `--remote-auth-token-env` are rejected because they
+would hand execution to an app-server runtime Cage did not inventory, and
+`--ignore-user-config` is rejected because it would remove a layer after Cage
+classified its MCP transports. The conventional `--` delimiter ends this
+policy scan, so later tokens are preserved as positional/subcommand payload.
+
+For Claude, Cage no longer merges host `~/.claude.json` MCP definitions. The
+volume `mcpServers` is reconciled to exactly the selected set, and a private
+read-only `.mcp.json` overlay (built from the bridges that actually started, so
+`--net off` leaves it empty) always suppresses repository MCP definitions.
+
+`cage config explain`, `cage config doctor`, and the TUI review state
+`MCP policy: selected packs only` and list the selected active servers. For
+`target = "host"` they also list the suppressed inherited servers; for container
+and Desktop targets the authoritative suppressed set is disclosed at launch by
+the runtime (the host cannot enumerate the image's layers without launching).
+Cage fails closed when a trustworthy MCP inventory cannot be obtained.
+
+**Migration:** move any user-, profile-, or repository-defined MCP you want into
+a central `[mcp_packs.*]` block and select it explicitly in the preset. See
+`docs/hardening/MIGRATIONS.md`.
+
 Use project defaults or override per run:
 
 ```bash

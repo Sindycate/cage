@@ -110,39 +110,11 @@ if not isinstance(prefs, dict):
     sys.stderr.write("cage: Claude preferences must contain a JSON object: %s\n" % store)
     sys.exit(1)
 
-manifest = read_json(manifest_path, {}, "Cage MCP manifest")
-if not isinstance(manifest, dict):
-    sys.stderr.write("cage: Cage MCP manifest must contain a JSON object: %s\n" % manifest_path)
-    sys.exit(1)
-previous_names = manifest.get("mcp_server_names", [])
-previous_names = {name for name in previous_names if isinstance(name, str)}
-shadowed_servers = manifest.get("shadowed_mcp_servers", {})
-if not isinstance(shadowed_servers, dict):
-    sys.stderr.write("cage: Cage MCP manifest shadowed_mcp_servers must be an object\n")
-    sys.exit(1)
-
-existing_mcp = prefs.get("mcpServers")
-mcp = dict(existing_mcp) if isinstance(existing_mcp, dict) else {}
-for name in previous_names:
-    if name in shadowed_servers:
-        mcp[name] = shadowed_servers[name]
-    else:
-        mcp.pop(name, None)
-
-# Preserve the historical precedence: host user config, central HTTP config,
-# then the stdio bridge. Only entries successfully materialized for this launch
-# are recorded as managed.
+# Authoritative MCP selection: the volume mcpServers is reconciled to exactly
+# the servers selected by the resolved preset (central HTTP connectors and the
+# stdio bridge). Host ~/.claude.json MCP definitions are no longer merged, and
+# stale or manually added volume entries are removed on every launch.
 managed = {}
-host = read_json(host_path, {}) if host_path.is_file() else {}
-host_servers = host.get("mcpServers", {}) if isinstance(host, dict) else {}
-if isinstance(host_servers, dict):
-    for name, conf in host_servers.items():
-        missing = []
-        expanded = expand(conf, missing)
-        if missing:
-            warn_missing(name, missing)
-            continue
-        managed[name] = expanded
 
 remote_json = os.environ.get("CAGE_REMOTE_MCP_SERVERS")
 if remote_json:
@@ -196,16 +168,8 @@ if bridged_json:
     for name in bridged_servers:
         managed[name] = {"type": "stdio", "command": "mcp-relay", "args": [name]}
 
-next_shadowed = {}
-for name in managed:
-    if name in previous_names and name in shadowed_servers:
-        next_shadowed[name] = shadowed_servers[name]
-    elif name in mcp:
-        next_shadowed[name] = mcp[name]
-
-mcp.update(managed)
-if mcp:
-    prefs["mcpServers"] = mcp
+if managed:
+    prefs["mcpServers"] = managed
 else:
     prefs.pop("mcpServers", None)
 
@@ -213,9 +177,8 @@ write_json_atomic(store, prefs)
 write_json_atomic(
     manifest_path,
     {
-        "version": 2,
+        "version": 3,
         "mcp_server_names": sorted(managed),
-        "shadowed_mcp_servers": next_shadowed,
     },
 )
 PY

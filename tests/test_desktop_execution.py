@@ -695,7 +695,14 @@ class RemoteLauncherTests(unittest.TestCase):
                 encoding="utf-8",
             )
             launch_path.write_text(
-                json.dumps({"profile": "provider", "yolo": True}),
+                json.dumps(
+                    {
+                        "profile": "provider",
+                        "yolo": True,
+                        "selected_mcp": [],
+                        "work_dir": "/work",
+                    }
+                ),
                 encoding="utf-8",
             )
             captured = {}
@@ -708,6 +715,11 @@ class RemoteLauncherTests(unittest.TestCase):
                 patch.object(remote, "ENV_PATH", env_path),
                 patch.object(remote, "LAUNCH_PATH", launch_path),
                 patch.object(remote, "REAL_CODEX", "/real/codex"),
+                patch.object(
+                    remote,
+                    "inventory_enabled",
+                    return_value=(set(), set(), {}),
+                ),
                 patch.object(remote.os, "execve", side_effect=fake_execve),
                 patch.object(remote.sys, "argv", ["codex", "app-server"]),
                 patch.dict(os.environ, {"UNRELATED_SECRET": "no"}, clear=True),
@@ -723,6 +735,117 @@ class RemoteLauncherTests(unittest.TestCase):
                 captured["environment"]["PROVIDER_API_KEY"], "token"
             )
             self.assertNotIn("UNRELATED_SECRET", captured["environment"])
+
+    def test_remote_launcher_suppresses_inherited_mcp_per_connection(self):
+        """Each connection re-inventories and disables unselected inherited MCPs."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env_path = root / "env.json"
+            launch_path = root / "launch.json"
+            env_path.write_text(json.dumps({}), encoding="utf-8")
+            launch_path.write_text(
+                json.dumps(
+                    {
+                        "profile": "",
+                        "yolo": False,
+                        "selected_mcp": ["linear"],
+                        "work_dir": "/work",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            captured = {}
+
+            def fake_execve(path, argv, environment):
+                captured.update(argv=argv)
+                raise RuntimeError("captured")
+
+            with (
+                patch.object(remote, "ENV_PATH", env_path),
+                patch.object(remote, "LAUNCH_PATH", launch_path),
+                patch.object(remote, "REAL_CODEX", "/real/codex"),
+                patch.object(
+                    remote,
+                    "inventory_enabled",
+                    return_value=(
+                        {"linear", "node_repl"},
+                        {"linear", "node_repl"},
+                        {},
+                    ),
+                ),
+                patch.object(remote.os, "execve", side_effect=fake_execve),
+                patch.object(remote.sys, "argv", ["codex", "app-server"]),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "captured"):
+                    remote.launch()
+
+            # linear is selected and stays; node_repl is inherited and disabled.
+            self.assertEqual(
+                captured["argv"],
+                [
+                    "/real/codex",
+                    "-c",
+                    "mcp_servers.node_repl.enabled=false",
+                    "app-server",
+                ],
+            )
+
+    def test_remote_launcher_rejects_inventory_shaping_passthrough_arguments(self):
+        attempts = [
+            ["app-server", "--config=mcp_servers.injected.command=\"echo\""],
+            ["app-server", "-p", "evil"],
+            ["app-server", "--profile=evil"],
+            ["app-server", "-pevil"],
+            ["app-server", "-C", "/other"],
+            ["app-server", "--cd=/other"],
+            ["app-server", "-C/other"],
+            ["app-server", "--enable=plugins"],
+            ["app-server", "--disable", "plugins"],
+            ["app-server", "--remote", "ws://other.example"],
+            ["app-server", "--remote-auth-token-env=TOKEN"],
+            ["exec", "--ignore-user-config"],
+            ["app-server", "-c", "features.plugins=true"],
+            ["app-server", "--config=plugins.example.enabled=true"],
+            ["app-server", "-c", "unknown_future_layer=true"],
+        ]
+        for argv in attempts:
+            with self.subTest(argv=argv), self.assertRaises(RuntimeError):
+                remote.reject_unsafe_codex_passthrough_args(argv)
+        remote.reject_unsafe_codex_passthrough_args(
+            [
+                "app-server",
+                "--model",
+                "gpt-test",
+                "-c",
+                'sandbox_mode="read-only"',
+                "--",
+                "-p",
+                "--profile=prompt-text",
+            ]
+        )
+
+    def test_remote_rejects_unsafe_passthrough_before_inventory(self):
+        with (
+            patch.object(remote.sys, "argv", ["codex", "--profile=evil"]),
+            patch.object(
+                remote,
+                "load_object",
+                side_effect=[
+                    {},
+                    {
+                        "profile": "",
+                        "yolo": False,
+                        "selected_mcp": [],
+                        "work_dir": "/work",
+                    },
+                ],
+            ),
+            patch.object(remote, "inventory_enabled") as inventory,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "may not override the profile"):
+                remote.launch()
+        inventory.assert_not_called()
 
     def test_image_has_inetd_ssh_and_no_published_port(self):
         dockerfile = (ROOT / "Dockerfile.codex").read_text(encoding="utf-8")

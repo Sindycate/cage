@@ -3,6 +3,53 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-28 — v0.26.4 authoritative MCP pack selection
+
+Made `mcp_packs` the authoritative allowlist for every Cage session. Cage now
+inventories the inherited MCP servers in the launching runtime (`mcp list
+--json`, supplemented by direct profile/project TOML parsing because `codex mcp
+list` does not enumerate those layers) and disables every inherited server the
+preset did not select with highest-precedence overrides. Loaded servers receive
+`enabled=false`; direct-only profile/project definitions receive a same-kind
+inert transport plus `enabled=false`, avoiding Codex's transport-less
+`invalid transport` failure before repository trust and remaining authoritative
+if trust is granted in the same process. The inventory runs in the runtime that eventually launches: the host
+binary for `target=host`, the container `codex` in `entrypoint-codex.sh` after
+configuration import for container launches, and `codex-remote.py` on every
+Desktop app-server connection (so a live project MCP added after the supervisor
+started is still suppressed). Inventorying in the runtime is required for
+correctness: disabling a server that exists only on the host but not in the
+image would fail Codex config load with `invalid transport`. Caller profile,
+working-directory, and feature overrides are rejected across host, container,
+and Desktop paths, and `-c`/`--config` uses an explicit runtime-only root
+allowlist so no caller argument can add a post-inventory MCP/plugin layer.
+Remote app-server handoff is rejected because that runtime was not inventoried;
+`--ignore-user-config` cannot remove an inventoried transport layer; the `--`
+delimiter still preserves following positional payload. Desktop selected-MCP
+metadata is root-owned
+outside the remote user's writable runtime directory. For Claude, the entrypoint
+no longer merges host `~/.claude.json` MCP definitions, reconciles the volume
+`mcpServers` to the selected set only, and the launcher always mounts a private
+read-only `.mcp.json` overlay (selected bridged servers only) that suppresses
+repository MCP definitions. `config explain`, `config doctor`, the TUI review,
+and launch output disclose `MCP policy: selected packs only`; suppressed names
+are terminal-escaped before display. Inventory failure fails closed.
+
+Evidence: the authoritative MCP, entrypoint, host-boundary, host/Desktop,
+configuration, and TUI suites pass (`250 passed`). Coverage includes the
+reported `node_repl` reproduction, real-Codex untrusted-to-trusted project
+behavior, transport-complete direct-layer suppression, every supported
+`-c`/`--config` argument shape (including quoted-key escapes), fail-closed
+profile/cwd/feature/remote/user-config argument guards with `--` delimiter
+handling, per-connection Desktop inventory, root-owned non-replaceable Desktop
+policy state, net-off Claude overlays, malformed inventory/layers, and selected-name conflicts. The
+real-Docker suite passes all six ordinary smokes; its optional Desktop smoke
+also passes against a disposable image containing the patched entrypoint and
+remote wrapper. The complete suite reports `330 passed, 7 skipped, 1 failed`;
+the remaining release-archive assertion is the pre-existing local checkout
+mode mismatch (`cage` is mode `0700` on disk while Git records `0755`), not a
+content or index-mode change in this worktree.
+
 ## 2026-07-28 — v0.26.3 ADR-001 registry measurements recorded
 
 Published v0.26.2 registry image sizes measured via OCI distribution API:

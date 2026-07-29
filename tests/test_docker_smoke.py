@@ -79,6 +79,7 @@ class DockerSmokeTests(unittest.TestCase):
             write_executable(
                 fake_codex,
                 "#!/bin/sh\n"
+                "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
                 "[ \"$TEST_DESKTOP_PROVIDER\" = provider-secret ] || exit 41\n"
                 "[ \"$MCP_BRIDGE_TOKEN\" = mcp-bridge-secret ] || exit 42\n"
                 "[ \"$MCP_BRIDGE_PORT_PROBE\" = 4321 ] || exit 43\n"
@@ -271,6 +272,39 @@ class DockerSmokeTests(unittest.TestCase):
                     text=True,
                 ).strip()
                 self.assertEqual(remote_env, "600:codex")
+                policy_state = subprocess.check_output(
+                    [
+                        "docker",
+                        "exec",
+                        "--user",
+                        "root",
+                        container_id,
+                        "stat",
+                        "-c",
+                        "%a:%U",
+                        "/run/cage",
+                        "/run/cage/remote-launch.json",
+                    ],
+                    text=True,
+                ).splitlines()
+                self.assertEqual(policy_state, ["755:root", "644:root"])
+                replace_policy = subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        "--user",
+                        "codex",
+                        container_id,
+                        "sh",
+                        "-c",
+                        "printf '{}\\n' > /run/cage/remote-launch.json",
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertNotEqual(replace_policy.returncode, 0)
             finally:
                 if container_id:
                     subprocess.run(
@@ -364,6 +398,7 @@ class DockerSmokeTests(unittest.TestCase):
             write_executable(
                 fake_bin / "codex",
                 "#!/bin/sh\n"
+                "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
                 "grep -q 'host-config' \"$HOME/.codex/config.toml\" && "
                 "grep -q 'git' \"$HOME/.codex/rules/host.rules\" && "
                 "for name in history.jsonl session_index.jsonl state_5.sqlite "
@@ -510,6 +545,7 @@ class DockerSmokeTests(unittest.TestCase):
             write_executable(
                 fake_bin / "codex",
                 "#!/bin/sh\n"
+                "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
                 "mode=$(stat -c %a \"$HOME/.codex/.credentials.json\")\n"
                 "owner=$(stat -c %u \"$HOME/.codex/.credentials.json\")\n"
                 "[ \"$mode:$owner\" = 600:22001 ] || { "

@@ -106,9 +106,21 @@ def write_fake_docker_success(path: Path) -> None:
 
 
 def write_fake_codex(path: Path) -> None:
-    """Codex that reports its environment for assertion."""
+    """Codex that reports its environment for assertion.
+
+    Also answers the launch-time MCP inventory query (`mcp list --json`) with
+    a controllable inventory so the authoritative MCP selection logic can run
+    during resolve. Defaults to an empty inventory; tests inject inherited
+    servers through CAGE_FAKE_CODEX_MCP_LIST_JSON.
+    """
     path.write_text(
         '#!/bin/sh\n'
+        'for _cage_arg in "$@"; do\n'
+        '  if [ "$_cage_arg" = "list" ]; then\n'
+        '    printf \'%s\\n\' "${CAGE_FAKE_CODEX_MCP_LIST_JSON:-[]}"\n'
+        '    exit 0\n'
+        '  fi\n'
+        'done\n'
         'echo "CODEX_HOME=$CODEX_HOME"\n'
         'echo "CWD=$(pwd)"\n'
         'echo "ARGS=$*"\n'
@@ -216,6 +228,83 @@ class TestHostModeLaunches(unittest.TestCase):
         self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
         self.assertIn("no Docker isolation", result.stderr)
 
+    def test_host_mode_rejects_passthrough_mcp_config(self):
+        result, _, _, tmp = setup_host_test(
+            HOST_CONFIG,
+            tool_args=["--config=mcp_servers.injected.command=\"echo\""],
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("may not override mcp_servers", result.stderr)
+        self.assertNotIn("CODEX_HOME=", result.stdout)
+
+    def test_host_mode_rejects_inventory_shaping_passthrough_arguments(self):
+        attempts = [
+            ["-p", "evil"],
+            ["--profile=evil"],
+            ["-pevil"],
+            ["-C", "/other"],
+            ["--cd=/other"],
+            ["-C/other"],
+            ["--enable", "plugins"],
+            ["--disable=plugins"],
+            ["--remote", "ws://other.example"],
+            ["--remote-auth-token-env=TOKEN"],
+            ["exec", "--ignore-user-config"],
+            ["-c", "features.plugins=true"],
+            ["--config=plugins.example.enabled=true"],
+            ["-c", "unknown_future_layer=true"],
+        ]
+        for tool_args in attempts:
+            with self.subTest(tool_args=tool_args):
+                result, _, _, temporary = setup_host_test(
+                    HOST_CONFIG,
+                    tool_args=tool_args,
+                )
+                self.addCleanup(temporary.cleanup)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("CODEX_HOME=", result.stdout)
+
+    def test_host_mode_allows_safe_arguments_and_delimited_payload(self):
+        result, _, _, temporary = setup_host_test(
+            HOST_CONFIG,
+            tool_args=[
+                "prompt text",
+                "--model",
+                "o3",
+                "-c",
+                'sandbox_mode="read-only"',
+                "--",
+                "-p",
+                "--profile=prompt-text",
+            ],
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            'ARGS=prompt text --model o3 -c sandbox_mode="read-only" -- -p '
+            "--profile=prompt-text",
+            result.stdout,
+        )
+
+    def test_host_profile_allows_delimited_payload_that_looks_like_profile(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'codex_profile = "saved"', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            tool_args=["--", "-p", "--profile=prompt-text"],
+            codex_files={"saved.config.toml": ""},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "ARGS=--profile saved -- -p --profile=prompt-text",
+            result.stdout,
+        )
+
     def test_host_flag_overrides_container_preset(self):
         config = '\n'.join([
             "version = 1", 'default_preset = "main"',
@@ -289,12 +378,12 @@ class TestHostModeLaunches(unittest.TestCase):
         (cage_dir / "config.toml").write_text(HOST_CONFIG, encoding="utf-8")
         env = make_env(tmp2, bin_dir, home, xdg)
         r = subprocess.run(
-            [str(CAGE), str(repo2), "-p", "do something", "--model", "o3"],
+            [str(CAGE), str(repo2), "do something", "--model", "o3"],
             cwd=ROOT, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("ARGS=-p do something --model o3", r.stdout)
+        self.assertIn("ARGS=do something --model o3", r.stdout)
 
     def test_named_codex_profile_is_forwarded_in_host_mode(self):
         config = '\n'.join([
@@ -336,7 +425,7 @@ class TestHostModeLaunches(unittest.TestCase):
         )
         self.addCleanup(temporary.cleanup)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("also select a profile", result.stderr)
+        self.assertIn("may not override the profile", result.stderr)
 
     def test_yolo_forwarded_with_explicit_net_open(self):
         """Yolo is forwarded when net is explicitly open."""
@@ -395,7 +484,8 @@ class TestHostModeLaunches(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--profile company", result.stdout)
+        self.assertIn("CAGE_CODEX_PROFILE=company", result.stdout)
+        self.assertNotIn("--profile company", result.stdout)
 
     def test_missing_named_codex_profile_fails_before_container_side_effects(self):
         config = '\n'.join([
@@ -1345,6 +1435,76 @@ class TestCancellationNoOp(unittest.TestCase):
         self.assertEqual(config_before, config_after)
         self.assertEqual(result_path.read_bytes(), b"")
 
+
+
+class TestAuthoritativeMcpSelection(unittest.TestCase):
+    """Selected-only MCP suppression reaches the tool across launch targets."""
+
+    def test_inherited_mcp_suppressed_in_host_args(self):
+        config = "\n".join([
+            "version = 1", "default_preset = \"main\"",
+            "[auth.myauth]", "tool = \"codex\"",
+            "[presets.main]", "tool = \"codex\"", "target = \"host\"",
+            "auth = \"myauth\"", "net = \"open\"", "",
+        ])
+        inventory = json.dumps([
+            {"name": "node_repl", "enabled": True},
+            {"name": "user_extra", "enabled": True},
+        ])
+        result, _, _, tmp = setup_host_test(
+            config,
+            codex_files={"config.toml": "[mcp_servers.node_repl]\ncommand = \"echo\"\n"},
+            env_overrides={"CAGE_FAKE_CODEX_MCP_LIST_JSON": inventory},
+        )
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The selected-only overrides reach the codex process arguments.
+        self.assertIn("mcp_servers.node_repl.enabled=false", result.stdout)
+        self.assertIn("mcp_servers.user_extra.enabled=false", result.stdout)
+        # Launch output discloses the policy and the suppressed servers.
+        self.assertIn("MCP policy: selected packs only", result.stderr)
+        self.assertIn("node_repl", result.stderr)
+
+    def test_container_suppression_is_delegated_to_the_runtime(self):
+        """Container suppression is computed inside the image, not on the host.
+
+        A host-side inventory can reference servers that do not exist in the
+        image (which would fail Codex config load), so the launcher must not
+        apply host-derived disable overrides to a container launch. The
+        entrypoint inventories the container runtime and applies them there.
+        """
+        config = "\n".join([
+            "version = 1", "default_preset = \"main\"",
+            "[auth.myauth]", "tool = \"codex\"", "copy_auth = false",
+            "[presets.main]", "tool = \"codex\"", "auth = \"myauth\"",
+            "net = \"open\"", "",
+        ])
+        inventory = json.dumps([{"name": "node_repl", "enabled": True}])
+        temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        self.addCleanup(temporary.cleanup)
+        tmp_path = Path(temporary.name)
+        xdg, home, bin_dir = tmp_path / "xdg", tmp_path / "home", tmp_path / "bin"
+        cage_dir, repo = xdg / "cage", tmp_path / "repo"
+        for d in (bin_dir, cage_dir, home, repo):
+            d.mkdir(parents=True)
+        (home / ".codex").mkdir()
+        (home / ".codex" / "config.toml").write_text(
+            "[mcp_servers.node_repl]\ncommand = \"echo\"\n", encoding="utf-8"
+        )
+        write_fake_docker_success(bin_dir / "docker")
+        write_fake_codex(bin_dir / "codex")
+        (cage_dir / "config.toml").write_text(config, encoding="utf-8")
+        env = make_env(tmp_path, bin_dir, home, xdg)
+        env["CAGE_FAKE_CODEX_MCP_LIST_JSON"] = inventory
+        result = subprocess.run(
+            [str(CAGE), str(repo)], cwd=ROOT, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DOCKER_RUN", result.stdout)
+        # The host-derived override must NOT be injected into the container
+        # command; suppression is enforced by the in-container inventory.
+        self.assertNotIn("mcp_servers.node_repl.enabled=false", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()

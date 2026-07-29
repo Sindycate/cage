@@ -74,7 +74,7 @@ class EntrypointManagedStateTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
-    def test_claude_replaces_managed_mcp_state_and_preserves_user_state(self):
+    def test_claude_reconciles_mcp_to_selected_set_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prefs = root / ".claude.json"
@@ -97,6 +97,7 @@ class EntrypointManagedStateTests(unittest.TestCase):
             manifest.write_text(
                 json.dumps({"version": 1, "mcp_server_names": ["stale"]})
             )
+            # Host ~/.claude.json MCP definitions must no longer be merged.
             host_config.write_text(
                 json.dumps(
                     {
@@ -135,27 +136,33 @@ class EntrypointManagedStateTests(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stderr)
 
             current = json.loads(prefs.read_text())
-            servers = current["mcpServers"]
             self.assertEqual(current["theme"], "dark")
-            self.assertIn("manual", servers)
-            self.assertNotIn("stale", servers)
+            # Authoritative selection: only the selected set survives. Manual and
+            # stale volume entries and host ~/.claude.json servers are removed.
             self.assertEqual(
-                servers["host"]["headers"]["Authorization"],
-                "Bearer host-current",
+                current["mcpServers"],
+                {
+                    "remote": {
+                        "type": "http",
+                        "url": "https://remote.example/mcp",
+                        "headers": {"Authorization": "Bearer remote-current"},
+                    },
+                    "bridge": {
+                        "type": "stdio",
+                        "command": "mcp-relay",
+                        "args": ["bridge"],
+                    },
+                },
             )
-            self.assertEqual(
-                servers["remote"]["headers"]["Authorization"],
-                "Bearer remote-current",
-            )
-            self.assertEqual(servers["bridge"]["command"], "mcp-relay")
+            self.assertNotIn("host-current", prefs.read_text())
             self.assertEqual(
                 set(json.loads(manifest.read_text())["mcp_server_names"]),
-                {"host", "remote", "bridge"},
+                {"remote", "bridge"},
             )
             self.assertEqual(stat.S_IMODE(prefs.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(manifest.stat().st_mode), 0o600)
 
-            # A later preset with no MCP sources removes only Cage-owned state.
+            # A later preset with no MCP sources removes the whole mcpServers key.
             second_env = clean_env()
             second_env.update(
                 {
@@ -168,15 +175,11 @@ class EntrypointManagedStateTests(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             current = json.loads(prefs.read_text())
             self.assertEqual(current["theme"], "dark")
-            self.assertEqual(
-                current["mcpServers"],
-                {"manual": {"command": "manual-server"}},
-            )
+            self.assertNotIn("mcpServers", current)
             self.assertEqual(
                 json.loads(manifest.read_text())["mcp_server_names"],
                 [],
             )
-
     def test_claude_managed_state_refuses_persistent_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -249,7 +252,7 @@ class EntrypointManagedStateTests(unittest.TestCase):
             )
             self.assertIn("unset env var", second.stderr)
 
-    def test_claude_restores_user_server_shadowed_by_managed_name(self):
+    def test_claude_selected_server_overrides_user_server_and_drops_when_deselected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prefs = root / ".claude.json"
@@ -271,9 +274,10 @@ class EntrypointManagedStateTests(unittest.TestCase):
 
             active = self.run_python(self.claude_python, active_env)
             self.assertEqual(active.returncode, 0, active.stderr)
+            # The selected server wins; the user definition is not preserved.
             self.assertEqual(
-                json.loads(prefs.read_text())["mcpServers"]["shared"]["url"],
-                "https://managed.example/mcp",
+                json.loads(prefs.read_text())["mcpServers"],
+                {"shared": {"type": "http", "url": "https://managed.example/mcp"}},
             )
 
             inactive_env = clean_env()
@@ -286,11 +290,8 @@ class EntrypointManagedStateTests(unittest.TestCase):
             )
             inactive = self.run_python(self.claude_python, inactive_env)
             self.assertEqual(inactive.returncode, 0, inactive.stderr)
-            self.assertEqual(
-                json.loads(prefs.read_text())["mcpServers"]["shared"],
-                {"command": "user-server"},
-            )
-
+            # Deselecting removes the entry; the user server is not restored.
+            self.assertNotIn("mcpServers", json.loads(prefs.read_text()))
     def test_claude_does_not_overwrite_malformed_persistent_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

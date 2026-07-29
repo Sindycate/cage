@@ -45,6 +45,26 @@ HEADER_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 TABLE_RE = re.compile(r"^\s*\[\[?[^\]\r\n]+\]\]?\s*(?:#.*)?$")
 PROJECTS_TABLE_RE = re.compile(r"^\s*\[projects\]\s*(?:#.*)?$")
 MAX_CODEX_CONFIG_BYTES = 4 * 1024 * 1024
+MAX_CODEX_INVENTORY_BYTES = 4 * 1024 * 1024
+CODEX_INVENTORY_TIMEOUT = 30.0
+INERT_STDIO_MCP_COMMAND = "/usr/bin/false"
+INERT_HTTP_MCP_URL = "https://invalid.invalid/mcp"
+SAFE_CODEX_PASSTHROUGH_CONFIG_ROOTS = {
+    "approval_policy",
+    "model",
+    "model_auto_compact_token_limit",
+    "model_context_window",
+    "model_provider",
+    "model_reasoning_effort",
+    "model_reasoning_summary",
+    "model_verbosity",
+    "personality",
+    "sandbox_mode",
+    "sandbox_permissions",
+    "sandbox_workspace_write",
+    "shell_environment_policy",
+    "web_search",
+}
 
 TOP_LEVEL_KEYS = {
     "version",
@@ -166,6 +186,9 @@ class ResolvedConfig:
     host_commands: list[dict[str, str]] = field(default_factory=list)
     extra_mounts: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    mcp_inventory_enabled: list[str] = field(default_factory=list)
+    mcp_suppressed: list[str] = field(default_factory=list)
+    mcp_disable_overrides: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -696,6 +719,7 @@ def resolve_interactive_selection(
     repo: str,
     selections: InteractiveSelections,
     explicit_tool: str = "",
+    mcp_inventory: bool = False,
 ) -> ResolvedConfig:
     if explicit_tool and selections.tool != explicit_tool:
         raise ConfigError(
@@ -716,6 +740,7 @@ def resolve_interactive_selection(
         repo,
         preset_name="interactive",
         explicit_tool=explicit_tool,
+        mcp_inventory=mcp_inventory,
     )
     resolved.preset_source = "interactive"
     return resolved
@@ -834,12 +859,349 @@ def interactive_select(
     )
 
 
+def mcp_server_transports_in_toml(path: Path) -> dict[str, str] | None:
+    """Return enabled MCP names and transport kinds from a Codex TOML layer.
+
+    Returns None when the layer exists but cannot be read or parsed, so callers
+    can distinguish "no enumerable servers" from "unreadable layer". Only names
+    plus the command/url discriminator are retained; transport values and
+    environment values are never returned or logged.
+    """
+    if not path.exists():
+        return {}
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_CODEX_INVENTORY_BYTES + 1)
+        if len(raw) > MAX_CODEX_INVENTORY_BYTES:
+            return None
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return None
+    servers = parsed.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        return None
+    transports: dict[str, str] = {}
+    for name, conf in servers.items():
+        if not isinstance(conf, dict):
+            return None
+        has_command = isinstance(conf.get("command"), str) and bool(conf["command"])
+        has_url = isinstance(conf.get("url"), str) and bool(conf["url"])
+        if has_command == has_url:
+            # A complete transport is required even for a disabled definition.
+            # Treat ambiguous or transport-less direct layers as untrustworthy.
+            return None
+        if conf.get("enabled") is False:
+            continue
+        transports[str(name)] = "stdio" if has_command else "http"
+    return transports
+
+
+def merge_mcp_transport_maps(
+    target: dict[str, str],
+    incoming: dict[str, str],
+) -> None:
+    for name, transport in incoming.items():
+        previous = target.get(name)
+        if previous is not None and previous != transport:
+            raise ConfigError(
+                "cannot build a trustworthy MCP inventory: conflicting direct "
+                f"transport types for server {name!r}"
+            )
+        target[name] = transport
+
+
+def mcp_disable_plan(
+    suppressed: list[str],
+    runtime_enabled: set[str],
+    direct_transports: dict[str, str],
+) -> list[str]:
+    """Build transport-complete, highest-precedence suppression overrides.
+
+    `codex mcp list` omits an untrusted project layer. An enabled-only override
+    for such a name creates a transport-less table and makes Codex abort with
+    `invalid transport`. Seed a same-kind inert transport for definitions seen
+    only by direct parsing; it remains disabled before trust and safely shadows
+    the real transport if the user grants trust in the same Codex process.
+    """
+    overrides: list[str] = []
+    for name in suppressed:
+        if not name or "\n" in name or "\r" in name:
+            raise ConfigError(f"suppressed MCP server name is unsafe: {name!r}")
+        key = f"mcp_servers.{codex_key_segment(name)}"
+        if name not in runtime_enabled:
+            transport = direct_transports.get(name)
+            if transport == "stdio":
+                overrides.append(
+                    f"{key}.command={toml_string(INERT_STDIO_MCP_COMMAND)}"
+                )
+            elif transport == "http":
+                overrides.append(f"{key}.url={toml_string(INERT_HTTP_MCP_URL)}")
+            else:
+                raise ConfigError(
+                    "cannot build a trustworthy MCP inventory: no loaded or "
+                    f"direct transport for server {name!r}"
+                )
+        overrides.append(f"{key}.enabled=false")
+    return overrides
+
+
+def codex_mcp_inventory_enabled(
+    resolved: ResolvedConfig,
+) -> tuple[set[str], set[str], dict[str, str]]:
+    """Enumerate inherited MCP servers the host Codex runtime would enable.
+
+    This is the host-target inventory (and the disclosure source for host-side
+    inspection commands). Container and Desktop launches inventory inside the
+    launching runtime instead, because only that runtime knows its own system,
+    plugin, and imported configuration layers.
+
+    The primary source is the active codex binary's `mcp list --json`, run with
+    the resolved CODEX_HOME, profile, and project directory. The selected
+    profile layer and the project layer are then merged in, because
+    `codex mcp list` does not enumerate them. Only server names and the enabled
+    flag are read; transport configuration and environment values are never
+    logged. Fails closed when a trustworthy inventory cannot be obtained.
+    """
+    codex_home = Path(resolved.host_codex_dir or "~/.codex").expanduser()
+    repo_path = Path(resolved.repo_path).expanduser()
+    runtime_enabled: set[str] = set()
+
+    codex_bin = shutil.which("codex")
+    if codex_bin is None:
+        raise ConfigError(
+            "cannot build the launch-time MCP inventory: the codex executable "
+            "was not found in PATH"
+        )
+    # Reject a repository-controlled codex binary (parity with host-mode
+    # executable pinning) before executing anything.
+    resolved_bin = Path(codex_bin).resolve(strict=False)
+    repo_resolved = repo_path.resolve(strict=False)
+    if resolved_bin == repo_resolved or resolved_bin.is_relative_to(repo_resolved):
+        raise ConfigError(
+            f"refusing codex executable from a Cage-writable path: {resolved_bin}"
+        )
+
+    # A missing user CODEX_HOME does not mean there are no inherited MCPs:
+    # system and bundled plugin layers can still define servers. Inventory
+    # against an empty temporary home in that case rather than skipping, so
+    # those layers are still discovered.
+    inventory_home = codex_home
+    temporary_home: tempfile.TemporaryDirectory | None = None
+    if not codex_home.is_dir():
+        temporary_home = tempfile.TemporaryDirectory(prefix="cage-mcp-inventory-")
+        inventory_home = Path(temporary_home.name)
+
+    command = [codex_bin]
+    if resolved.codex_profile:
+        command += ["--profile", resolved.codex_profile]
+    command += ["mcp", "list", "--json"]
+    environment = dict(os.environ)
+    environment["CODEX_HOME"] = str(inventory_home)
+    try:
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repo_path),
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=CODEX_INVENTORY_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError(f"cannot build the launch-time MCP inventory: {exc}") from exc
+        if completed.returncode != 0:
+            raise ConfigError(
+                "cannot build a trustworthy MCP inventory: codex mcp list exited "
+                f"with status {completed.returncode}"
+            )
+        stdout = completed.stdout or b""
+        if len(stdout) > MAX_CODEX_INVENTORY_BYTES:
+            raise ConfigError("cannot build a trustworthy MCP inventory: output too large")
+        try:
+            entries = json.loads(stdout.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"cannot build a trustworthy MCP inventory: {exc}") from exc
+        if not isinstance(entries, list):
+            raise ConfigError("cannot build a trustworthy MCP inventory: expected a JSON list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ConfigError(
+                    "cannot build a trustworthy MCP inventory: every entry "
+                    "must be a JSON object"
+                )
+            name = entry.get("name")
+            enabled = entry.get("enabled")
+            if not isinstance(name, str) or not name or not isinstance(enabled, bool):
+                raise ConfigError(
+                    "cannot build a trustworthy MCP inventory: every entry "
+                    "must contain a non-empty string name and boolean enabled flag"
+                )
+            if enabled:
+                runtime_enabled.add(name)
+    finally:
+        if temporary_home is not None:
+            temporary_home.cleanup()
+
+    direct_transports: dict[str, str] = {}
+    if resolved.codex_profile:
+        profile_transports = mcp_server_transports_in_toml(
+            codex_home / f"{resolved.codex_profile}.config.toml"
+        )
+        if profile_transports is None:
+            raise ConfigError(
+                "cannot build a trustworthy MCP inventory: the selected Codex "
+                "profile layer is unreadable"
+            )
+        merge_mcp_transport_maps(direct_transports, profile_transports)
+    project_transports = mcp_server_transports_in_toml(
+        repo_path / ".codex" / "config.toml"
+    )
+    if project_transports is None:
+        raise ConfigError(
+            "cannot build a trustworthy MCP inventory: the project Codex config "
+            "layer is present but unreadable"
+        )
+    merge_mcp_transport_maps(direct_transports, project_transports)
+    enabled = runtime_enabled | set(direct_transports)
+    return enabled, runtime_enabled, direct_transports
+
+
+def mcp_disable_override(name: str) -> str:
+    """Build the highest-precedence Codex override that disables one MCP server."""
+    if not name or "\n" in name or "\r" in name:
+        raise ConfigError(f"suppressed MCP server name is unsafe: {name!r}")
+    return f"mcp_servers.{codex_key_segment(name)}.enabled=false"
+
+
+def config_override_root(expression: str) -> str | None:
+    """Return the decoded root key from a Codex `-c` assignment.
+
+    The CLI accepts quoted dotted keys and raw-string values, so inspect only
+    the assignment key. TOML parsing decodes quoted-key escapes even when the
+    original value is a Codex raw-string fallback.
+    """
+    quote = ""
+    escaped = False
+    assignment = -1
+    for index, character in enumerate(expression):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quote = ""
+            continue
+        if quote == "'":
+            if character == "'":
+                quote = ""
+            continue
+        if character in {'"', "'"}:
+            quote = character
+        elif character == "=":
+            assignment = index
+            break
+    if assignment < 0:
+        return None
+    key = expression[:assignment].strip()
+    try:
+        parsed = tomllib.loads(f"{key}=0")
+    except tomllib.TOMLDecodeError:
+        return None
+    if len(parsed) != 1:
+        return None
+    return next(iter(parsed))
+
+
+def reject_unsafe_codex_passthrough_args(argv: list[str]) -> None:
+    """Reject caller arguments that invalidate the MCP inventory boundary."""
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--":
+            break
+        if (
+            argument in {"-p", "--profile"}
+            or argument.startswith("--profile=")
+            or argument.startswith("-p=")
+            or (argument.startswith("-p") and len(argument) > 2)
+        ):
+            raise ConfigError(
+                "Codex launch arguments may not override the profile; select "
+                "codex_profile in the Cage preset"
+            )
+        if (
+            argument in {"-C", "--cd"}
+            or argument.startswith("--cd=")
+            or argument.startswith("-C=")
+            or (argument.startswith("-C") and len(argument) > 2)
+        ):
+            raise ConfigError(
+                "Codex launch arguments may not override the working directory; "
+                "the Cage repository path is authoritative"
+            )
+        if (
+            argument in {"--enable", "--disable"}
+            or argument.startswith("--enable=")
+            or argument.startswith("--disable=")
+        ):
+            raise ConfigError(
+                "Codex launch arguments may not change feature flags because "
+                "features can change MCP/plugin discovery"
+            )
+        if (
+            argument in {"--remote", "--remote-auth-token-env"}
+            or argument.startswith("--remote=")
+            or argument.startswith("--remote-auth-token-env=")
+        ):
+            raise ConfigError(
+                "Codex launch arguments may not select a remote app-server "
+                "runtime because Cage did not inventory that runtime"
+            )
+        if argument == "--ignore-user-config":
+            raise ConfigError(
+                "Codex launch arguments may not ignore user configuration after "
+                "Cage inventories that layer"
+            )
+        expression: str | None = None
+        if argument in {"-c", "--config"}:
+            if index + 1 < len(argv):
+                expression = argv[index + 1]
+                index += 1
+        elif argument.startswith("--config="):
+            expression = argument[len("--config=") :]
+        elif argument.startswith("-c="):
+            expression = argument[3:]
+        elif argument.startswith("-c") and len(argument) > 2:
+            expression = argument[2:]
+        if expression is not None:
+            root = config_override_root(expression)
+            if root == "mcp_servers":
+                raise ConfigError(
+                    "Codex launch arguments may not override mcp_servers; define "
+                    "the server in a central Cage mcp_pack and select that pack"
+                )
+            if root not in SAFE_CODEX_PASSTHROUGH_CONFIG_ROOTS:
+                rendered_root = repr(root) if root is not None else "an unreadable key"
+                raise ConfigError(
+                    "Codex config override root "
+                    f"{rendered_root} is not safe after MCP inventory; move it "
+                    "to the selected Cage-owned Codex configuration layer"
+                )
+        index += 1
+
+
 def resolve_config(
     data: dict[str, Any],
     config_path: Path,
     repo: str,
     preset_name: str = "",
     explicit_tool: str = "",
+    mcp_inventory: bool = False,
 ) -> ResolvedConfig:
     repo_path = normalize_project_path(repo)
     defaults = as_table(data, "defaults")
@@ -1162,6 +1524,26 @@ def resolve_config(
         else:
             raise ConfigError(f"presets.{preset_name}.extra_mounts entries must be strings or tables")
 
+    # Host-target launches inventory the host Codex runtime here. Container and
+    # Desktop launches inventory inside the launching runtime (entrypoint and
+    # codex-remote.py), because only that runtime knows its own system, plugin,
+    # and imported configuration layers; a host inventory can reference servers
+    # that do not exist in the image, which would fail Codex config load.
+    if mcp_inventory and resolved.tool == "codex" and resolved.target == "host":
+        selected_mcp_names = {server["name"] for server in resolved.stdio_mcp}
+        selected_mcp_names |= {server["name"] for server in resolved.remote_mcp}
+        inventory, runtime_enabled, direct_transports = codex_mcp_inventory_enabled(
+            resolved
+        )
+        suppressed = sorted(inventory - selected_mcp_names)
+        resolved.mcp_inventory_enabled = sorted(inventory)
+        resolved.mcp_suppressed = suppressed
+        resolved.mcp_disable_overrides = mcp_disable_plan(
+            suppressed,
+            runtime_enabled,
+            direct_transports,
+        )
+
     resolved.extra_env = dedupe(env)
     return resolved
 
@@ -1204,6 +1586,8 @@ def emit_shell(resolved: ResolvedConfig) -> None:
         "SKILL_MOUNTS": skill_mounts,
         "HOST_COMMANDS": host_commands,
         "EXTRA_MOUNTS": extra_mounts,
+        "CAGE_MCP_DISABLE_OVERRIDES": "\n".join(resolved.mcp_disable_overrides),
+        "CAGE_MCP_SUPPRESSED": "\n".join(resolved.mcp_suppressed),
         "SESSION_SYNC": resolved.session_sync,
         "CAGE_YOLO": resolved.yolo,
         "CAGE_EXEC_TARGET": resolved.target,
@@ -1219,6 +1603,8 @@ def host_codex_payload_for(resolved: ResolvedConfig) -> dict[str, Any]:
         "remote": resolved.remote_mcp,
         "skills": resolved.skill_mounts,
         "env_names": resolved.extra_env,
+        "disable_mcp": resolved.mcp_suppressed,
+        "disable_mcp_overrides": resolved.mcp_disable_overrides,
     }
 
 
@@ -1281,6 +1667,45 @@ def validate_codex_layers(payload: dict[str, Any], repo: Path, codex_home: Path)
         if name in selected_mcp_names:
             raise ConfigError(f"duplicate MCP server in Codex launch payload: {name}")
         selected_mcp_names.add(name)
+
+    disable_mcp = payload.get("disable_mcp", [])
+    if not isinstance(disable_mcp, list):
+        raise ConfigError("invalid Codex launch payload: disable_mcp must be a list")
+    for suppressed_name in disable_mcp:
+        if (
+            not isinstance(suppressed_name, str)
+            or not suppressed_name
+            or "\n" in suppressed_name
+            or "\r" in suppressed_name
+        ):
+            raise ConfigError("invalid suppressed MCP name in Codex launch payload")
+    disable_overrides = payload.get("disable_mcp_overrides", [])
+    if not isinstance(disable_overrides, list) or any(
+        not isinstance(value, str) or "\n" in value or "\r" in value
+        for value in disable_overrides
+    ):
+        raise ConfigError(
+            "invalid Codex launch payload: disable_mcp_overrides must be safe strings"
+        )
+    allowed_overrides: set[str] = set()
+    required_enabled: set[str] = set()
+    for suppressed_name in disable_mcp:
+        key = f"mcp_servers.{codex_key_segment(suppressed_name)}"
+        enabled_override = f"{key}.enabled=false"
+        required_enabled.add(enabled_override)
+        allowed_overrides.update(
+            {
+                enabled_override,
+                f"{key}.command={toml_string(INERT_STDIO_MCP_COMMAND)}",
+                f"{key}.url={toml_string(INERT_HTTP_MCP_URL)}",
+            }
+        )
+    if len(disable_overrides) != len(set(disable_overrides)):
+        raise ConfigError("duplicate MCP suppression override in Codex launch payload")
+    if not required_enabled.issubset(disable_overrides) or any(
+        value not in allowed_overrides for value in disable_overrides
+    ):
+        raise ConfigError("invalid MCP suppression override in Codex launch payload")
 
     if not selected_mcp_names:
         return
@@ -1455,6 +1880,12 @@ def host_codex_arg_lines(payload: dict[str, Any], repo: Path, codex_home: Path) 
             )
         args.extend(["-c", "skills.config=[" + ",".join(entries) + "]"])
 
+    disable_overrides = payload.get("disable_mcp_overrides", [])
+    # Highest precedence: apply the validated transport seeds and disable
+    # overrides after Cage's selected server definitions.
+    for override in disable_overrides:
+        args.extend(["-c", override])
+
     if any("\n" in arg or "\r" in arg for arg in args):
         raise ConfigError("host Codex arguments contain an unsafe line break")
     return args
@@ -1471,6 +1902,12 @@ def command_host_codex_args(args: argparse.Namespace) -> int:
         Path(args.codex_home).expanduser(),
     ):
         print(line)
+    return 0
+
+
+def command_validate_codex_argv(args: argparse.Namespace) -> int:
+    argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+    reject_unsafe_codex_passthrough_args(argv)
     return 0
 
 
@@ -1568,12 +2005,24 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print(f"MCP packs: {', '.join(resolved.mcp_pack_names)}")
     if resolved.skill_pack_names:
         print(f"Skill packs: {', '.join(resolved.skill_pack_names)}")
+    print("MCP policy: selected packs only")
     if resolved.stdio_mcp or resolved.remote_mcp:
-        print("MCP servers:")
+        print("Active MCP servers:")
         for server in resolved.stdio_mcp:
             print(f"  - {server['name']} (stdio bridge)")
         for server in resolved.remote_mcp:
             print(f"  - {format_server(server)}")
+    else:
+        print("Active MCP servers: none")
+    if resolved.mcp_suppressed:
+        print("Inherited MCPs suppressed for this launch:")
+        for name in resolved.mcp_suppressed:
+            print(f"  - {json.dumps(name, ensure_ascii=True)}")
+    elif resolved.tool == "codex" and resolved.target in {"container", "desktop"}:
+        print(
+            f"Inherited MCP suppression: enforced at launch by the {resolved.target} "
+            "runtime (not enumerable from the host without launching)"
+        )
     if resolved.skill_mounts:
         print("Skills:")
         for skill in resolved.skill_mounts:
@@ -1767,7 +2216,10 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
 
 def command_resolve(args: argparse.Namespace) -> int:
     data = load_config(args.config)
-    resolved = resolve_config(data, args.config, args.repo, args.preset or "", args.tool or "")
+    resolved = resolve_config(
+        data, args.config, args.repo, args.preset or "", args.tool or "",
+        mcp_inventory=True,
+    )
     emit_shell(resolved)
     return 0
 
@@ -1787,6 +2239,7 @@ def command_interactive_resolve(args: argparse.Namespace) -> int:
         args.repo,
         selections,
         explicit_tool=args.tool or "",
+        mcp_inventory=True,
     )
     emit_shell(resolved)
     return 0
@@ -1794,13 +2247,19 @@ def command_interactive_resolve(args: argparse.Namespace) -> int:
 
 def command_explain(args: argparse.Namespace) -> int:
     data = load_config(args.config)
-    resolved = resolve_config(data, args.config, args.repo, args.preset or "", args.tool or "")
+    resolved = resolve_config(
+        data, args.config, args.repo, args.preset or "", args.tool or "",
+        mcp_inventory=True,
+    )
     return explain(resolved, doctor=False)
 
 
 def command_doctor(args: argparse.Namespace) -> int:
     data = load_config(args.config)
-    resolved = resolve_config(data, args.config, args.repo, args.preset or "", args.tool or "")
+    resolved = resolve_config(
+        data, args.config, args.repo, args.preset or "", args.tool or "",
+        mcp_inventory=True,
+    )
     return explain(resolved, doctor=True)
 
 
@@ -2575,7 +3034,10 @@ def command_ui_resolve(args: argparse.Namespace) -> int:
     if action == "preset":
         name = request.get("preset_name")
         require_name(name, "TUI preset name")
-        resolved = resolve_config(data, args.config, args.repo, name, args.tool or "")
+        resolved = resolve_config(
+            data, args.config, args.repo, name, args.tool or "",
+            mcp_inventory=True,
+        )
     elif action == "launch_once":
         value = request.get("preset")
         if not isinstance(value, dict):
@@ -2589,6 +3051,7 @@ def command_ui_resolve(args: argparse.Namespace) -> int:
             args.repo,
             "__cage_launch_once",
             args.tool or "",
+            mcp_inventory=True,
         )
         resolved.preset_source = "tui:launch-once"
     else:
@@ -2650,6 +3113,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codex-home", required=True)
     p.add_argument("--payload", required=True)
     p.set_defaults(func=command_host_codex_args)
+
+    p = sub.add_parser("validate-codex-argv", help=argparse.SUPPRESS)
+    p.add_argument("argv", nargs=argparse.REMAINDER)
+    p.set_defaults(func=command_validate_codex_argv)
 
     p = sub.add_parser("validate-codex-layers", help=argparse.SUPPRESS)
     p.add_argument("--repo", required=True)
