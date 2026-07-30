@@ -6,46 +6,45 @@ Issue: [#3](https://github.com/Sindycate/cage/issues/3)
 
 ## Context
 
-Cage publishes two final images from independent Dockerfiles:
+Before v0.26.2, Cage published two final images from independent Dockerfiles:
 
 | Image | Dockerfile | Registry path |
 |-------|-----------|---------------|
 | `claude-code:<version>` | `Dockerfile` | `ghcr.io/sindycate/cage/claude-code` |
 | `codex:<version>` | `Dockerfile.codex` | `ghcr.io/sindycate/cage/codex` |
 
-Both images share approximately 80% of their build instructions: the same
+Both images shared approximately 80% of their build instructions: the same
 Ubuntu 24.04 base, system packages, Node.js LTS, GitHub CLI, OCI labels, and
 the `mcp-relay`/`host-cmd-relay` bridge scripts. They differ in agent
 installation, user/home layout, entrypoint, and Codex-only OpenSSH support.
 
-Despite the overlap, the two Dockerfiles produce **zero shared layers** today
-because their `RUN` instructions diverge at the first `apt-get` call (Codex
-uses `--no-install-recommends` and retry logic; Claude does not). Docker layer
-identity is content-addressed through the parent chain, so even identical
-packages produce different digests when the instruction text or ordering
-differs.
+Despite the overlap, only the Ubuntu rootfs layer was shared. The two
+Dockerfiles' `RUN` instructions diverged at the first `apt-get` call (Codex
+used `--no-install-recommends` and retry logic; Claude did not). Docker layer
+identity is content-addressed through the parent chain, so later layers
+containing the same packages still produced different digests.
 
 ## Baseline estimates from Dockerfile analysis
 
 Sizes are estimated from known package archives and verified against Ubuntu
-24.04 package indexes. Build timings were not measured.
+24.04 package indexes. Build timings were not measured at decision time; later
+release observations are recorded below.
 
 These estimates motivated the decision but are not a substitute for recorded
-multi-architecture registry measurements. That remaining measurement is kept
-open in the acceptance criteria below.
+multi-architecture registry measurements and release evidence below.
 
 ### Layer breakdown (compressed, amd64 estimates)
 
 | Layer | Claude | Codex | Shared? |
 |-------|--------|-------|---------|
-| `ubuntu:24.04` base | ~29 MB | ~29 MB | Same digest (both `FROM ubuntu:24.04`) |
-| System packages (apt) | ~85 MB | ~80 MB | **No** — different flags/retry |
-| Node.js LTS | ~28 MB | ~28 MB | **No** — different parent |
-| GitHub CLI | ~13 MB | ~13 MB | **No** — different parent |
-| Labels + COPY relays | ~1 MB | ~1 MB | **No** — different parent |
-| User creation + agent install | ~110 MB | ~55 MB | No (different agents) |
-| openssh-server | — | ~4 MB | Codex-only |
-| **Total (compressed)** | **~266 MB** | **~210 MB** | |
+| `ubuntu:24.04` base | ~29 MiB | ~29 MiB | Same digest (both `FROM ubuntu:24.04`) |
+| System packages (apt) | ~85 MiB | ~80 MiB | **No** — different flags/retry |
+| Node.js LTS | ~28 MiB | ~28 MiB | **No** — different parent |
+| GitHub CLI | ~13 MiB | ~13 MiB | **No** — different parent |
+| Labels + COPY relays | ~1 MiB | ~1 MiB | **No** — different parent |
+| User creation + agent install | ~110 MiB | ~55 MiB | No (different agents) |
+| openssh-server | — | ~4 MiB | Codex-only |
+| **Total (compressed)** | **~266 MiB** | **~210 MiB** | |
 
 ### Duplicated content
 
@@ -64,7 +63,7 @@ instruction divergence. This means:
 - **Local builds**: Users who build both images locally pay the full apt/Node
   cost twice.
 
-### Build time estimates (CI, cold cache)
+### Historical build-time estimates (not measurements)
 
 | Phase | Claude | Codex |
 |-------|--------|-------|
@@ -75,9 +74,10 @@ instruction divergence. This means:
 | **Total (amd64)** | **~3 min** | **~3.5 min** |
 | **Total (arm64/QEMU)** | **~12 min** | **~14 min** |
 
-A shared base would allow the CI matrix to build the base once and both leaf
-images in parallel, reducing wall-clock time by ~40% on cold cache and ~60%
-on warm cache (base layer cached, only agent install re-runs).
+These estimates established a hypothesis that moving common work into one base
+would reduce both aggregate builder work and pipeline wall time. They were not
+measurements. The release evidence below confirms shorter leaf builds and lower
+aggregate work, but does **not** confirm a cold-pipeline wall-time reduction.
 
 
 ## Published registry measurements (v0.26.2)
@@ -126,6 +126,44 @@ Specification](https://github.com/opencontainers/distribution-spec/blob/main/spe
 and backend storage implementation is not specified. The practical benefit is
 that clients pulling multiple images transfer shared layers only once.
 
+### Observed release build timings
+
+The following measurements come from successful GitHub Actions release runs:
+
+- [v0.26.1](https://github.com/Sindycate/cage/actions/runs/30346339300),
+  the last independent-Dockerfile release;
+- [v0.26.2](https://github.com/Sindycate/cage/actions/runs/30358209182), the
+  first shared-base release; and
+- [v0.26.3](https://github.com/Sindycate/cage/actions/runs/30363803333), a
+  second shared-base release with unchanged Dockerfiles and copied-file inputs.
+
+Each image time is the interval from the start of its
+`docker/build-push-action` step to the start of the following provenance
+attestation step. Aggregate work is the sum of those image times. Pipeline span
+is the interval from the first image-build step to the last image-build step;
+the independent leaves run in parallel, while the shared leaves wait for the
+base job.
+
+| Release | Design | Base | Claude | Codex | Aggregate work | Pipeline span |
+|---------|--------|------|--------|-------|----------------|---------------|
+| v0.26.1 | independent leaves | — | 5:15 | 7:16 | 12:31 | 7:16 |
+| v0.26.2 | shared base | 6:33 | 1:33 | 2:40 | 10:46 (−14%) | 9:46 (+34%) |
+| v0.26.3 | shared base | 4:25 | 1:36 | 2:42 | 8:43 (−30%) | 7:39 (+5%) |
+
+Compared with v0.26.1, the shared-base leaf steps were 63–70% shorter and
+aggregate builder work was 14–30% lower. The new serial base prerequisite
+offset those gains in both observed cold release pipelines, however, so the
+original estimate of a 40% cold wall-clock reduction was not supported.
+
+These are observed release timings, not a controlled performance benchmark:
+the jobs ran on separate ephemeral `ubuntu-24.04` hosted runners and include
+network and registry variance. The workflow configures neither `cache-from`
+nor `cache-to`, and the inspected build logs contained no cached build steps.
+It therefore has no cross-run warm-cache timing to measure. The fast shared
+leaf jobs demonstrate the operational base-reuse case—build the base once,
+then build both agent-specific leaves—but must not be labeled a fully warm
+rebuild.
+
 ### Leaf-only layers
 
 **Claude leaf** (7 layers, ~165.6 MiB amd64):
@@ -157,14 +195,16 @@ that clients pulling multiple images transfer shared layers only once.
    needed to realize the savings. This is out of scope for the base-image
    decision but worth a follow-up.
 
-3. **Build timings**: not measured. A local Docker 28.4.0 daemon (aarch64)
-   is available but no cold-cache or warm-cache benchmark was defined or run.
-   Closing this criterion requires a defined benchmark, likely including a CI
-   or Buildx path for amd64. The v0.26.2 release workflow completed
-   successfully on GitHub Actions for both amd64 and arm64; CI run timings
-   are available in the [release workflow
-   run](https://github.com/Sindycate/cage/actions/runs/30358209182) but
-   workflow duration is not a warm-cache measurement.
+3. **Build timings**: successful release logs provide comparable image-step,
+   aggregate-work, and pipeline-span observations. They confirm substantially
+   shorter leaf builds and lower aggregate work, but no cold pipeline
+   wall-clock improvement in the two shared-base samples. A true cross-run
+   warm-cache measurement is unavailable because the release workflow does
+   not persist BuildKit cache. This residual performance uncertainty is
+   accepted: it does not affect the verified security boundary, compatibility,
+   image reuse, or release correctness. If persistent CI caching is added, its
+   design must include a new cold/warm benchmark and must not reuse these
+   release observations as warm-cache evidence.
 
 ## Options evaluated
 
@@ -225,7 +265,8 @@ ENTRYPOINT ["/home/codex/entrypoint.sh"]
 ```
 
 **Advantages:**
-- Eliminates ~127 MB/arch of duplicated layers in the registry.
+- Makes ~122 MiB/arch of previously divergent infrastructure content
+  digest-identical across the leaf manifests.
 - CI builds the base once; leaf images build in parallel in seconds.
 - Security patches to shared packages happen in one place.
 - `cage update` overlays remain unchanged (they build `FROM` the leaf image).
@@ -270,7 +311,7 @@ selecting the agent based on an environment variable or argument.
 - **Security**: Every Claude session gains `openssh-server`, `codex-remote.py`,
   and the Codex npm prefix. Every Codex session gains the Claude Code binary
   and its installer artifacts. This violates the principle of minimal surface.
-- **Size**: Every pull downloads both agents (~370 MB compressed) even when
+- **Size**: Every pull downloads both agents (~370 MiB compressed) even when
   only one is needed. Users who only use Codex pay for Claude Code and vice
   versa.
 - **Update cadence**: Claude Code and Codex CLI release on different schedules.
@@ -398,11 +439,13 @@ confirmed before the corresponding acceptance item is closed.
 
 ## Acceptance criteria status
 
-- [ ] Capture multi-architecture registry image sizes, clean-build time, and
-      warm-cache build time. *(Registry sizes measured from v0.26.2 published
-      images; layer sharing confirmed via digest comparison. Clean-build and
-      warm-cache timings have NOT been measured — workflow duration is not a
-      substitute. This criterion remains open until both are recorded.)*
+- [x] Capture multi-architecture registry image sizes, layer overlap, and
+      applicable build/cache evidence. *(Registry sizes and exact layer
+      identity were measured from published v0.26.2 images. Step-level timings
+      from v0.26.1–v0.26.3 quantify observed fresh-run release builds and base
+      reuse. The current workflow has no persistent cache, so a cross-run
+      warm-cache timing is explicitly accepted as not applicable rather than
+      inferred from workflow duration.)*
 - [x] Document why agent-specific users, entrypoints, state rules, and update
       paths can or cannot share a base safely.
 - [x] Compare all three options above, including security and operational

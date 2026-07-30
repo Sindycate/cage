@@ -3,6 +3,27 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-30 — v0.26.6 ADR-001 release timing evidence
+
+Replaced unverified ADR-001 build-time estimates with step-level evidence from
+the successful v0.26.1, v0.26.2, and v0.26.3 release workflows. Shared-base
+Claude and Codex leaf steps were 63–70% shorter than the independent builds,
+and aggregate image-build work fell by 14–30%. The serial base prerequisite
+left observed cold pipeline wall time 5–34% longer, so the earlier estimate of
+a 40% cold wall-clock reduction was withdrawn.
+
+The release workflow uses fresh hosted runners and configures no persistent
+BuildKit cache; inspected logs contained no cached build steps. Cross-run
+warm-cache timing is therefore recorded as not applicable to the shipped
+workflow, not inferred from overall workflow duration. Residual risk is limited
+to unquantified performance if persistent caching is introduced later; such a
+change requires its own cold/warm benchmark.
+
+Issue #3 was updated with this evidence and closed as completed on 2026-07-28.
+This release synchronizes the repository ADR, changelog, and durable progress
+record with that decision; it does not change image architecture or runtime
+behavior.
+
 ## 2026-07-29 — P3 host launcher modularization complete
 
 Replaced the 2,691-line Bash host launcher with a 28-line Bash 3.2-compatible

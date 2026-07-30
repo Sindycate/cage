@@ -7,6 +7,20 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.6 — 2026-07-30
+
+- replace ADR-001's unverified clean/warm build-time estimates with step-level
+  observations from the successful v0.26.1, v0.26.2, and v0.26.3 release
+  workflows;
+- record that shared-base leaf builds were 63–70% shorter and aggregate image
+  build work fell by 14–30%, while the serial base prerequisite left observed
+  cold release-pipeline wall time 5–34% longer;
+- explicitly record that no cross-run warm-cache timing exists for the current
+  release workflow because it uses fresh hosted runners without a persistent
+  BuildKit cache;
+- complete ADR-001's evidence criteria and synchronize the repository record
+  with the completed closure of issue #3.
+
 ## 0.26.5 — 2026-07-30
 
 - refactor the 2,691-line host launcher into a Bash 3.2-compatible bootstrap
