@@ -3,6 +3,55 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-29 — P3 host launcher modularization complete
+
+Replaced the 2,691-line Bash host launcher with a 28-line Bash 3.2-compatible
+bootstrap and a Python 3.11 standard-library core. The bootstrap resolves its
+real installation directory, validates Python, enters isolated mode, and
+rejects symlink/non-regular package entries before import.
+
+The core now has typed `LaunchRequest`, `ResolvedConfig`, immutable
+`RuntimeConfig`, and `LaunchPlan` boundaries. Resolution and redacted,
+versioned JSON serialization occur before target side effects. Runtime command,
+MCP, skill, identity, and state inputs are frozen into the plan; environment
+values and other secrets are resolved only at process creation and are never
+serialized. Host, ordinary container, and Desktop adapters consume the same
+plan. OAuth and Claude session reconciliation are dedicated state adapters, and
+a lifecycle coordinator owns immediate registration, reverse cleanup, bounded
+TERM/KILL, readiness, and primary-status precedence.
+
+Codex passthrough and MCP suppression decisions now have one pure policy
+implementation. A separate runtime adapter owns file inspection and Codex
+inventory execution. `entrypoint-codex.sh` and `codex-remote.py` delegate to
+the packaged helper instead of carrying independent policy copies. Both host
+bridge frontends share environment allowlisting, command parsing, executable
+pinning, authentication, process-group tracking, and shutdown infrastructure.
+
+Compatibility frontends remain for configuration, TUI, Desktop management,
+bridges, container entrypoints, and remote Codex. The legacy shell-assignment
+emitter and every launcher `eval` consumer were removed. Source/release
+installation, the reproducible archive, CI syntax gates, and the Codex image
+now package and validate `cage-main.py` plus `cage_core`.
+
+Validation evidence:
+
+- Python 3.12: `333 passed, 7 skipped` outside the separately privileged bridge
+  suite; all 14 authenticated bridge tests passed with real loopback sockets;
+- Python 3.11.14: 339 non-bridge tests passed with 7 optional skips, and all 14
+  bridge tests passed;
+- all seven real-Docker smokes passed against a current local Codex image,
+  including optional Desktop SSH/secret-handoff coverage;
+- all 28 installer/release focused tests passed, including macOS system Bash
+  3.2 source install, generated-release install parity, package symlink
+  rejection, deterministic archive bytes, and checksum validation;
+- recursive Python compilation, shell syntax, `docker compose config`,
+  public-evidence/secret-pattern scans, and `git diff --check` passed;
+- `cage` is 28 lines and contains no Docker construction, heredocs, trap chains,
+  state logic, or launch policy.
+
+P3 is complete and versioned as v0.26.5. The tag-triggered release workflow is
+the publication gate.
+
 ## 2026-07-28 — v0.26.4 authoritative MCP pack selection
 
 Made `mcp_packs` the authoritative allowlist for every Cage session. Cage now

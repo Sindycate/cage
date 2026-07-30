@@ -36,8 +36,10 @@ RUN npm install -g @openai/codex && \
     chown -R codex:codex /home/codex/.npm-global
 
 COPY entrypoint-codex.sh /home/codex/entrypoint.sh
+COPY cage_core /usr/local/lib/cage/cage_core
 COPY codex-remote.py /usr/local/bin/codex
-RUN chmod 755 /home/codex/entrypoint.sh /usr/local/bin/codex
+RUN chmod -R a+rX /usr/local/lib/cage && \
+    chmod 755 /home/codex/entrypoint.sh /usr/local/bin/codex
 
 ENV HOME=/home/codex
 ENV PATH=/home/codex/.npm-global/bin:/home/codex/.local/bin:$PATH

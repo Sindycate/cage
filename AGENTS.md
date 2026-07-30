@@ -135,7 +135,27 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 ## Architecture
 
-**`cage`** (host-side launcher, symlinked to `~/.local/bin/`):
+**`cage`** (host-side bootstrap, symlinked to `~/.local/bin/`):
+- Is a Bash 3.2-compatible bootstrap only: resolves its real installation
+  directory, validates Python 3.11+, exports the internal Cage version, and
+  `exec`s `python3 -I cage-main.py`. It contains no launch policy, Docker
+  construction, heredocs, state reconciliation, or trap chains
+- `cage-main.py` rejects symlink/non-regular `cage_core` package entries before
+  adding only the resolved installation root to isolated Python's `sys.path`
+- `cage_core` owns the typed `LaunchRequest` → `ResolvedConfig` → immutable
+  `LaunchPlan` pipeline. The complete plan is validated before Docker/image,
+  bridge, session/OAuth, or target side effects. Its versioned `resolve-json`
+  contract reports normalized public evidence and environment names only,
+  never secret values, commands, headers, OAuth data, or raw passthrough
+  arguments
+- Core target adapters implement host, ordinary container, and Desktop
+  execution; state adapters own OAuth/session reconciliation; the lifecycle
+  coordinator owns reverse-order cleanup. Pure policy/model modules do not
+  execute processes or mutate the filesystem
+- `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
+  `codex-remote.py`, and the container entrypoints remain compatibility
+  frontends. Codex host/container/Desktop paths delegate passthrough and MCP
+  suppression decisions to one shared policy implementation
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
 - Bare `cage` and `--interactive`/`-i` open `cage-tui.py` before any Docker,
   bridge, sync, or volume operation. The curses UI can launch once, remember a
@@ -146,7 +166,11 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   launch artifact that is revalidated by `cage-config.py`; cancellation is a
   state no-op. If curses is unavailable, Cage falls back to the legacy
   launch-only numbered prompt
-- Requires central config at `~/.config/cage/config.toml` for launches. It is parsed by `cage-config.py` (Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`, `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]` mappings. Project mappings use longest-prefix matching
+- Requires central config at `~/.config/cage/config.toml` for launches. It is
+  parsed by `cage_core.config` (`cage-config.py` remains the compatibility
+  frontend; Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`,
+  `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]`
+  mappings. Project mappings use longest-prefix matching
 - Codex presets may select a native `$CODEX_HOME/<name>.config.toml` layer with
   `codex_profile = "<name>"`; Cage validates the file and forwards
   `--profile <name>` to either execution target

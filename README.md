@@ -536,9 +536,18 @@ and retained only in the container's tmpfs-backed `/run` state. See
 
 ## How it works
 
-`cage` is a host launcher around `docker run`. It constructs mounts, generated
-tool configuration, state synchronization, optional host integrations, and
-network mode from the selected central preset. Mounts vary by tool:
+`cage` is a small Bash 3.2-compatible bootstrap around a Python 3.11
+standard-library host core. The core parses a request, resolves central
+configuration, and validates an immutable launch plan before inspecting images,
+changing Docker state, starting bridges, or synchronizing persistent state.
+Host, container, and Desktop execution consume that same plan and shared
+security policy. See
+[ADR-002](docs/adr-002-python-host-launcher.md) for the dependency boundaries
+and redacted internal contract.
+
+The host core constructs mounts, generated tool configuration, state
+synchronization, optional host integrations, and network mode from the selected
+central preset. Mounts vary by tool:
 
 **Claude Code** (`cage claude ~/repo`):
 

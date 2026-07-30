@@ -400,17 +400,18 @@ class CageConfigTests(unittest.TestCase):
         with self.assertRaises(cage_config.ConfigError):
             self.resolve(data)
 
-    def test_shell_output_is_quoted_and_json_encoded(self):
+    def test_public_resolver_contract_is_json_and_redacted(self):
         resolved = self.resolve(self.base_config())
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "out.json"
-            # Check the JSON value that would be carried through the shell.
-            remote = json.dumps(resolved.remote_mcp, separators=(",", ":"))
-            path.write_text(remote)
-            loaded = json.loads(path.read_text())
+        loaded = json.loads(json.dumps(resolved.public_dict()))
 
-        self.assertEqual(loaded[0]["bearer_token_env_var"], "LINEAR_API_KEY")
-        self.assertIn(" ", cage_config.shell_assign("GIT_USER_NAME", resolved.git_user_name))
+        self.assertEqual(
+            loaded["mcp"]["remote"][0]["environment_names"],
+            ["LINEAR_API_KEY"],
+        )
+        self.assertEqual(loaded["identity"]["git_user_name"], "A User")
+        rendered = json.dumps(loaded)
+        self.assertNotIn('"command":', rendered)
+        self.assertNotIn("bearer_token_env_var", rendered)
 
     def test_resolves_oauth_http_mcp_server(self):
         data = self.base_config()

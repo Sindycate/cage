@@ -15,6 +15,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from cage_core.models import LaunchRequest, ResolvedConfig
+from cage_core.planning import build_launch_plan
+from cage_core.targets import container as container_target
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,13 +135,44 @@ class DesktopIdentityTests(unittest.TestCase):
             self.assertIn("only valid for desktop", result.stderr)
 
     def test_desktop_adds_only_the_openssh_chroot_capability(self):
-        launcher = (ROOT / "cage").read_text(encoding="utf-8")
-        desktop_block = launcher[
-            launcher.index('if [ "$EXEC_TARGET" = "desktop" ]; then', launcher.index("DOCKER_ARGS=(")):
-            launcher.index("# Git/SSH mounts and env vars", launcher.index("DOCKER_ARGS=("))
-        ]
-        self.assertIn("--cap-add SYS_CHROOT", desktop_block)
-        self.assertNotIn("--cap-add FOWNER", desktop_block)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            config_root = root / "config"
+            repo.mkdir()
+            config_root.mkdir()
+            resolved = ResolvedConfig(
+                config_path=config_root / "config.toml",
+                repo_path=str(repo),
+                preset_name="desktop",
+                preset_source="flag",
+                tool="codex",
+                target="desktop",
+            )
+            prepared = build_launch_plan(
+                LaunchRequest(repo_operand=str(repo), target="desktop"),
+                resolved,
+                cage_version="0.26.4",
+                config_root=config_root,
+                install_root=ROOT,
+            )
+            target_id = desktop.target_id(repo, "desktop")
+            environment = {
+                "CAGE_DESKTOP_TARGET_ID": target_id,
+                "CAGE_DESKTOP_PUBLIC_KEY": str(root / "client.pub"),
+                "CAGE_DESKTOP_HEARTBEAT": str(root / "heartbeat"),
+            }
+            runtime = container_target.ContainerRuntime(
+                prepared=prepared,
+                install_root=ROOT,
+                config_root=config_root,
+                docker="docker",
+            )
+            with patch.dict(os.environ, environment, clear=False):
+                arguments = container_target._base_docker_arguments(runtime)
+        capability_pairs = list(zip(arguments, arguments[1:]))
+        self.assertIn(("--cap-add", "SYS_CHROOT"), capability_pairs)
+        self.assertNotIn(("--cap-add", "FOWNER"), capability_pairs)
 
         entrypoint = (ROOT / "entrypoint-codex.sh").read_text(encoding="utf-8")
         self.assertIn("DisableForwarding yes", entrypoint)
@@ -162,7 +196,7 @@ class DesktopConfigTests(unittest.TestCase):
                 data, Path("/tmp/config.toml"), "/tmp/repo", "main"
             )
 
-    def test_shell_output_carries_target_and_saved_source(self):
+    def test_json_output_carries_target_and_saved_source(self):
         resolved = cage_config.ResolvedConfig(
             config_path=Path("/tmp/config.toml"),
             repo_path="/tmp/repo",
@@ -173,9 +207,10 @@ class DesktopConfigTests(unittest.TestCase):
         )
         output = io.StringIO()
         with patch("sys.stdout", output):
-            cage_config.emit_shell(resolved)
-        self.assertIn("CAGE_EXEC_TARGET=desktop", output.getvalue())
-        self.assertIn("CAGE_PRESET_SOURCE=project:/tmp/repo", output.getvalue())
+            cage_config.emit_resolved_json(resolved)
+        payload = json.loads(output.getvalue())["resolved_config"]
+        self.assertEqual(payload["target"], "desktop")
+        self.assertEqual(payload["preset"]["source"], "project:/tmp/repo")
 
     def test_tui_surfaces_persistent_ssh_risks(self):
         controller = object.__new__(cage_tui.Controller)

@@ -78,7 +78,7 @@ Excluded unless needed by an included fix:
 | P2-A | Repair config schema/editor, trust handling, and starter config | complete | strict-schema and round-trip tests |
 | P2-B | Add trust modes, capability manifest, dry-run, and state tooling | pending | CLI acceptance tests and migration guide |
 | P2-C | Harden installer, builds, release workflow, and supply chain | verification | CI release gate, installer safety, SBOM/provenance checks |
-| P3 | Consolidate architecture and remove duplicated orchestration | pending | behavior parity and cross-platform matrix |
+| P3 | Consolidate architecture and remove duplicated orchestration | complete | behavior parity and cross-platform matrix |
 
 Packet states are `pending`, `in progress`, `verification`, `complete`, or
 `deferred`. A packet is not complete merely because code was edited.

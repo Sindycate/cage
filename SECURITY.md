@@ -48,6 +48,27 @@ Users should prefer least-privilege provider accounts and repository-scoped or
 short-lived credentials when available. Do not place secrets in repository
 configuration.
 
+## Host launcher control plane
+
+The host launcher validates one immutable launch plan before image inspection,
+Docker volume changes, bridge startup, OAuth/session synchronization, or target
+execution. Its versioned public JSON contract contains environment-variable
+names and selected capability names, but never their values, MCP commands or
+header values, OAuth state, proxy/bridge credentials, GitHub tokens, or raw
+passthrough prompts.
+
+`cage` executes the Python core in isolated mode. The bootstrap resolves the
+installation directory rather than trusting the current directory,
+`PYTHONPATH`, or user-site packages, and rejects symlink or non-regular
+`cage_core` entries before import. Source and release installers apply the same
+package-entry checks.
+
+The Codex passthrough and selected-only MCP suppression rules are implemented
+once as pure policy. Host, container entrypoint, and Desktop remote execution
+delegate to it; target-specific adapters own filesystem inspection and process
+execution. Secret values are resolved only after plan validation and at the
+process-creation boundary.
+
 ## Network behavior
 
 `--net off` applies Docker's `--network none` to the main tool container.

@@ -4,5 +4,10 @@
 !entrypoint.sh
 !entrypoint-codex.sh
 !codex-remote.py
+!cage_core/
+!cage_core/**
+cage_core/**/__pycache__/
+cage_core/**/*.pyc
+cage_core/**/*.pyo
 !mcp-relay
 !host-cmd-relay

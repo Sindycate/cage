@@ -237,6 +237,11 @@ class ReleaseSupplyChainTests(unittest.TestCase):
                 members = archive.getmembers()
             names = [member.name for member in members]
             self.assertIn("cage-9.9.9/cage", names)
+            self.assertIn("cage-9.9.9/cage-main.py", names)
+            self.assertIn("cage-9.9.9/cage_core/models.py", names)
+            self.assertIn(
+                "cage-9.9.9/cage_core/targets/desktop.py", names
+            )
             self.assertIn("cage-9.9.9/cage-tui.py", names)
             self.assertIn("cage-9.9.9/install.sh", names)
             self.assertIn("cage-9.9.9/Dockerfile.base", names)
@@ -300,6 +305,12 @@ class SharedBaseImageTests(unittest.TestCase):
     def test_codex_leaf_retains_openssh_server(self):
         codex = (ROOT / "Dockerfile.codex").read_text(encoding="utf-8")
         self.assertIn("openssh-server", codex)
+        self.assertIn(
+            "COPY cage_core /usr/local/lib/cage/cage_core", codex
+        )
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("!cage_core/**", dockerignore)
+        self.assertIn("cage_core/**/*.pyc", dockerignore)
 
     def test_claude_leaf_does_not_have_openssh(self):
         claude = (ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -312,9 +323,14 @@ class SharedBaseImageTests(unittest.TestCase):
 
     def test_cage_script_ensures_base_before_local_build(self):
         launcher = (ROOT / "cage").read_text(encoding="utf-8")
-        self.assertIn("_ensure_base_image", launcher)
-        self.assertIn("Dockerfile.base", launcher)
-        self.assertIn("CAGE_BASE_IMAGE", launcher)
+        container_target = (
+            ROOT / "cage_core" / "targets" / "container.py"
+        ).read_text(encoding="utf-8")
+        self.assertLessEqual(len(launcher.splitlines()), 100)
+        self.assertNotIn("docker ", launcher)
+        self.assertIn("def _ensure_base_image", container_target)
+        self.assertIn("Dockerfile.base", container_target)
+        self.assertIn('base_image = f"cage-base:', container_target)
 
     def test_release_workflow_builds_base_image(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

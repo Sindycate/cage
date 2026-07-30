@@ -71,7 +71,7 @@ jobs:
       - name: Run validation
         run: |
           python -m pytest -q
-          python -m py_compile cage-config.py cage-desktop.py cage-tui.py codex-remote.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay scripts/build-release.py
+          python -m compileall -q cage-main.py cage-config.py cage_core cage-desktop.py cage-tui.py codex-remote.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay scripts/build-release.py
           bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh .github/scripts/install-gitleaks.sh
           docker compose config
 

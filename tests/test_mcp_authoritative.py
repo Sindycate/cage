@@ -6,7 +6,6 @@ Claude reconciliation. The invariant under test: the effective enabled MCP set
 equals the resolved preset's selected packs on every launch.
 """
 
-import ast
 import importlib.util
 import json
 import os
@@ -535,20 +534,29 @@ class RealCodexSelectionTests(unittest.TestCase):
 
 
 def entrypoint_inventory_block() -> str:
-    """Extract the in-container MCP inventory program from entrypoint-codex.sh."""
-    src = (ROOT / "entrypoint-codex.sh").read_text(encoding="utf-8")
-    for block in re.findall(r"<<'PY'\n(.*?)\nPY", src, re.S):
-        if "CAGE_INV_CODEX_HOME" in block:
-            return block
-    raise AssertionError("in-container inventory block not found")
+    """Execute the same packaged policy helper used by the entrypoint."""
+    policy = ROOT / "cage_core" / "codex_runtime.py"
+    return (
+        "import os,runpy,sys;"
+        f"p={str(policy)!r};"
+        "sys.argv=[p,'runtime-overrides','--codex-bin','codex',"
+        "'--codex-home',os.environ['CAGE_INV_CODEX_HOME'],"
+        "'--repo',os.environ['CAGE_INV_WORK_DIR'],"
+        "'--profile',os.environ.get('CAGE_INV_PROFILE',''),"
+        "'--selected-stdio-json',os.environ.get('CAGE_MCP_SERVERS',''),"
+        "'--selected-remote-json',os.environ.get('CAGE_REMOTE_MCP_SERVERS','')];"
+        "runpy.run_path(p,run_name='__main__')"
+    )
 
 
 def entrypoint_arg_guard_block() -> str:
-    src = (ROOT / "entrypoint-codex.sh").read_text(encoding="utf-8")
-    for block in re.findall(r"<<'PY'\n(.*?)\nPY", src, re.S):
-        if "Codex launch arguments may not override mcp_servers" in block:
-            return block
-    raise AssertionError("in-container Codex argv guard block not found")
+    policy = ROOT / "cage_core" / "codex_runtime.py"
+    return (
+        "import runpy,sys;"
+        f"p={str(policy)!r};"
+        "sys.argv=[p,'validate-argv','--',*sys.argv[1:]];"
+        "runpy.run_path(p,run_name='__main__')"
+    )
 
 
 class EntrypointContainerInventoryTests(unittest.TestCase):
@@ -765,29 +773,26 @@ class CodexRemoteInventoryTests(unittest.TestCase):
         }
         return self.mod.inventory_enabled(profile, str(self.work_dir), env)
 
-    def test_passthrough_safe_root_allowlist_is_identical_in_every_runtime(self):
-        tree = ast.parse(entrypoint_arg_guard_block())
-        entrypoint_roots = None
-        for node in tree.body:
-            if (
-                isinstance(node, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name)
-                    and target.id == "SAFE_CONFIG_ROOTS"
-                    for target in node.targets
-                )
-            ):
-                entrypoint_roots = ast.literal_eval(node.value)
-                break
-        self.assertIsNotNone(entrypoint_roots)
-        self.assertEqual(
-            entrypoint_roots,
-            cage_config.SAFE_CODEX_PASSTHROUGH_CONFIG_ROOTS,
+    def test_every_runtime_delegates_to_the_shared_passthrough_policy(self):
+        self.assertIs(
+            self.mod.codex_policy,
+            cage_config.codex_policy,
         )
-        self.assertEqual(
-            self.mod.SAFE_PASSTHROUGH_CONFIG_ROOTS,
-            cage_config.SAFE_CODEX_PASSTHROUGH_CONFIG_ROOTS,
+        entrypoint = (ROOT / "entrypoint-codex.sh").read_text(
+            encoding="utf-8"
         )
+        self.assertIn(
+            "/usr/local/lib/cage/cage_core/codex_runtime.py",
+            entrypoint,
+        )
+        accepted = ["--model", "gpt-test", "-c", 'sandbox_mode="read-only"']
+        rejected = ["--profile=evil"]
+        cage_config.reject_unsafe_codex_passthrough_args(accepted)
+        self.mod.reject_unsafe_codex_passthrough_args(accepted)
+        with self.assertRaises(cage_config.ConfigError):
+            cage_config.reject_unsafe_codex_passthrough_args(rejected)
+        with self.assertRaises(RuntimeError):
+            self.mod.reject_unsafe_codex_passthrough_args(rejected)
 
     def test_inherited_server_present_for_suppression(self):
         enabled, runtime_enabled, direct = self.inventory(

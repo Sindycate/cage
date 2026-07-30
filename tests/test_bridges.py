@@ -269,7 +269,9 @@ exit 0
             launcher_dir = root / "launcher"
             launcher_dir.mkdir()
             shutil.copy2(CAGE, launcher_dir / "cage")
+            shutil.copy2(ROOT / "cage-main.py", launcher_dir / "cage-main.py")
             shutil.copy2(ROOT / "cage-config.py", launcher_dir / "cage-config.py")
+            shutil.copytree(ROOT / "cage_core", launcher_dir / "cage_core")
             fake_bridge = launcher_dir / "host-cmd-bridge.py"
             fake_bridge.write_text(
                 """import json

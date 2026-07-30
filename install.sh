@@ -235,7 +235,7 @@ trap cleanup_install EXIT
 
 if [ "$FROM_SOURCE" -eq 1 ]; then
     SOURCE_FILES=(
-        cage cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
+        cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
         codex-remote.py
         docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex
@@ -247,22 +247,43 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
             error "Source checkout is missing a safe regular file: $source_file"
         cp "$SOURCE_DIR/$source_file" "$STAGE_DIR/$source_file"
     done
-    for source_dir in netgate docs; do
+    for source_dir in cage_core netgate docs; do
         [ -d "$SOURCE_DIR/$source_dir" ] && [ ! -L "$SOURCE_DIR/$source_dir" ] || \
             error "Source checkout is missing a safe directory: $source_dir"
+        unsafe_entry="$(find "$SOURCE_DIR/$source_dir" -type l -print -quit)"
+        [ -z "$unsafe_entry" ] || error "Source checkout contains a symlink: $unsafe_entry"
+        unsafe_entry="$(find "$SOURCE_DIR/$source_dir" ! -type f ! -type d -print -quit)"
+        [ -z "$unsafe_entry" ] || error "Source checkout contains a non-regular entry: $unsafe_entry"
         cp -R "$SOURCE_DIR/$source_dir" "$STAGE_DIR/$source_dir"
     done
+    find "$STAGE_DIR/cage_core" -type f \( -name '*.pyc' -o -name '*.pyo' \) \
+        -exec rm -f {} +
+    find "$STAGE_DIR/cage_core" -type d -name '__pycache__' -prune \
+        -exec rm -rf {} +
 else
     tar xzf "$TARBALL" -C "$STAGE_DIR" --strip-components=1
 fi
 
-for required in cage cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py; do
+for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py; do
     [ -f "$STAGE_DIR/$required" ] && [ ! -L "$STAGE_DIR/$required" ] || \
         error "Release archive is missing a safe regular file: $required"
 done
+[ -d "$STAGE_DIR/cage_core" ] && [ ! -L "$STAGE_DIR/cage_core" ] || \
+    error "Release archive is missing a safe cage_core package"
+unsafe_entry="$(find "$STAGE_DIR/cage_core" -type l -print -quit)"
+[ -z "$unsafe_entry" ] || error "Release archive contains a package symlink: $unsafe_entry"
+unsafe_entry="$(find "$STAGE_DIR/cage_core" ! -type f ! -type d -print -quit)"
+[ -z "$unsafe_entry" ] || error "Release archive contains a non-regular package entry: $unsafe_entry"
+for required in \
+    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py planning.py \
+    state/__init__.py state/oauth.py state/sessions.py \
+    targets/__init__.py targets/container.py targets/desktop.py targets/host.py; do
+    [ -f "$STAGE_DIR/cage_core/$required" ] && [ ! -L "$STAGE_DIR/cage_core/$required" ] || \
+        error "Release archive is missing a safe core module: cage_core/$required"
+done
 
 printf '%s\n' "$VERSION" > "$STAGE_DIR/$INSTALL_MARKER"
-chmod +x "$STAGE_DIR/cage" "$STAGE_DIR/cage-config.py" "$STAGE_DIR/cage-desktop.py" "$STAGE_DIR/cage-tui.py" "$STAGE_DIR/cage-netgate.sh" "$STAGE_DIR/netgate-proxy.py" "$STAGE_DIR/mcp-bridge.py" "$STAGE_DIR/mcp-relay" "$STAGE_DIR/host-cmd-bridge.py" "$STAGE_DIR/host-cmd-relay" "$STAGE_DIR/codex-remote.py"
+chmod +x "$STAGE_DIR/cage" "$STAGE_DIR/cage-main.py" "$STAGE_DIR/cage-config.py" "$STAGE_DIR/cage-desktop.py" "$STAGE_DIR/cage-tui.py" "$STAGE_DIR/cage-netgate.sh" "$STAGE_DIR/netgate-proxy.py" "$STAGE_DIR/mcp-bridge.py" "$STAGE_DIR/mcp-relay" "$STAGE_DIR/host-cmd-bridge.py" "$STAGE_DIR/host-cmd-relay" "$STAGE_DIR/codex-remote.py"
 
 validate_launcher_path
 if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then

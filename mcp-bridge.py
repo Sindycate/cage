@@ -20,6 +20,12 @@ import threading
 import time
 from pathlib import Path
 
+_INSTALL_ROOT = Path(__file__).resolve().parent
+if str(_INSTALL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_INSTALL_ROOT))
+
+from cage_core import bridge as bridge_common
+
 BUFSIZE = 65536
 AUTH_TIMEOUT_SECONDS = 5.0
 HANDSHAKE_PREFIX = b"CAGE-MCP/1 "
@@ -27,299 +33,34 @@ MAX_HANDSHAKE_BYTES = 160
 DEFAULT_PROCESS_TIMEOUT_SECONDS = 12 * 60 * 60
 DEFAULT_MAX_IO_BYTES = 256 * 1024 * 1024
 MAX_LOGGED_STDERR_BYTES = 1024 * 1024
-ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+\Z")
-RESERVED_ENV_NAMES = {"CAGE_BRIDGE_AUTH_TOKEN"}
-SHELL_OPERATORS = {
-    "|",
-    "||",
-    "&&",
-    ";",
-    "&",
-    ">",
-    ">>",
-    "<",
-    "<<",
-    "2>",
-    "2>>",
-}
-BASE_ENV_NAMES = (
-    "HOME",
-    "PATH",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TZ",
-    "XDG_CONFIG_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "SECURITYSESSIONID",
-    "__CF_USER_TEXT_ENCODING",
+Runtime = lambda: bridge_common.BridgeRuntime(  # noqa: E731
+    "mcp-bridge",
+    maximum_logged_stderr=MAX_LOGGED_STDERR_BYTES,
 )
-
-
-class Runtime:
-    """Track resources so bridge shutdown also stops spawned process groups."""
-
-    def __init__(self):
-        self.shutdown = threading.Event()
-        self.lock = threading.Lock()
-        self.log_lock = threading.Lock()
-        self.processes = set()
-        self.connections = set()
-        self.logged_server_stderr = 0
-        self.stderr_truncated = False
-        self.rejection_logged = False
-
-    def add_connection(self, conn):
-        with self.lock:
-            self.connections.add(conn)
-
-    def remove_connection(self, conn):
-        with self.lock:
-            self.connections.discard(conn)
-
-    def add_process(self, proc):
-        with self.lock:
-            self.processes.add(proc)
-
-    def remove_process(self, proc):
-        with self.lock:
-            self.processes.discard(proc)
-
-    def note_rejected_client(self):
-        with self.log_lock:
-            if self.rejection_logged:
-                return
-            self.rejection_logged = True
-            print(
-                "mcp-bridge: rejected unauthenticated client "
-                "(further rejections are suppressed)",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    def write_server_stderr(self, data):
-        with self.log_lock:
-            remaining = MAX_LOGGED_STDERR_BYTES - self.logged_server_stderr
-            if remaining > 0:
-                visible = data[:remaining]
-                sys.stderr.buffer.write(visible)
-                sys.stderr.buffer.flush()
-                self.logged_server_stderr += len(visible)
-            if len(data) > max(remaining, 0) and not self.stderr_truncated:
-                print(
-                    "\nmcp-bridge: configured server stderr log capped at 1 MiB",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                self.stderr_truncated = True
-
-    def stop(self):
-        self.shutdown.set()
-        with self.lock:
-            connections = list(self.connections)
-            processes = list(self.processes)
-        for conn in connections:
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                conn.close()
-            except OSError:
-                pass
-        for proc in processes:
-            terminate_process_group(proc)
-
-
-def positive_number(value):
-    number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return number
-
-
-def positive_integer(value):
-    number = int(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return number
-
-
-def parse_command(command):
-    """Parse a host-owned command without invoking a shell."""
-    try:
-        argv = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise ValueError(f"invalid command quoting: {exc}") from exc
-    if not argv:
-        raise ValueError("command is empty")
-    operators = [token for token in argv if token in SHELL_OPERATORS]
-    if operators:
-        raise ValueError(
-            "shell operators are not supported; use an executable wrapper "
-            "script or explicitly configure a shell command"
-        )
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argv[0]):
-        raise ValueError(
-            "leading environment assignments are not supported; declare the "
-            "variable in the selected preset/MCP env list"
-        )
-    return argv
-
+positive_number = bridge_common.positive_number
+positive_integer = bridge_common.positive_integer
+build_child_environment = bridge_common.build_child_environment
+normalize_denied_roots = bridge_common.normalize_denied_roots
+sanitize_child_path = bridge_common.sanitize_child_path
+pin_executable = bridge_common.pin_executable
+terminate_process_group = bridge_common.terminate_process_group
 
 def parse_named_commands(entries):
-    parsed = []
-    seen = {}
-    for name, command in entries:
-        if not NAME_PATTERN.fullmatch(name):
-            raise ValueError(f"invalid MCP server name: {name!r}")
-        transport_name = name.upper().replace("-", "_")
-        if transport_name in seen:
-            raise ValueError(
-                "MCP server names collide after relay normalization: "
-                f"{seen[transport_name]!r} and {name!r}"
-            )
-        seen[transport_name] = name
-        parsed.append((name, parse_command(command)))
-    return parsed
-
-
-def build_child_environment(pass_env):
-    requested = list(BASE_ENV_NAMES)
-    for name in pass_env:
-        if not ENV_NAME.fullmatch(name):
-            raise ValueError(f"invalid environment variable name: {name!r}")
-        if name in RESERVED_ENV_NAMES:
-            raise ValueError(f"refusing to forward internal bridge variable: {name}")
-        if name not in requested:
-            requested.append(name)
-    child_env = {name: os.environ[name] for name in requested if name in os.environ}
-    child_env.setdefault("HOME", str(Path.home()))
-    child_env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-    return child_env
-
-
-def normalize_denied_roots(values):
-    roots = []
-    for value in values:
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError(f"untrusted executable root must be absolute: {value!r}")
-        resolved = candidate.resolve(strict=False)
-        if resolved not in roots:
-            roots.append(resolved)
-    return roots
-
-
-def path_is_within(candidate, roots):
-    return any(candidate == root or candidate.is_relative_to(root) for root in roots)
-
-
-def sanitize_child_path(child_env, denied_roots):
-    safe_entries = []
-    for value in child_env.get("PATH", "").split(os.pathsep):
-        if not value:
-            continue
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            continue
-        resolved = candidate.resolve(strict=False)
-        if path_is_within(resolved, denied_roots):
-            continue
-        rendered = str(resolved)
-        if rendered not in safe_entries:
-            safe_entries.append(rendered)
-    if not safe_entries:
-        raise ValueError("host PATH has no entries outside writable Cage mounts")
-    child_env["PATH"] = os.pathsep.join(safe_entries)
-
-
-def pin_executable(argv, cwd, child_env, denied_roots):
-    program = argv[0]
-    if os.path.sep in program:
-        candidate = Path(program).expanduser()
-        if not candidate.is_absolute():
-            candidate = Path(cwd) / candidate
-    else:
-        located = shutil.which(program, path=child_env["PATH"])
-        if located is None:
-            raise ValueError(f"host executable not found on sanitized PATH: {program!r}")
-        candidate = Path(located)
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as exc:
-        raise ValueError(f"cannot resolve host executable {program!r}: {exc}") from exc
-    if path_is_within(resolved, denied_roots):
-        raise ValueError(
-            f"refusing host executable from a Cage-writable mount: {resolved}"
-        )
-    if not resolved.is_file() or not os.access(resolved, os.X_OK):
-        raise ValueError(f"host executable is not a runnable regular file: {resolved}")
-    return [str(resolved), *argv[1:]]
-
-
-def read_line(conn, maximum, timeout_seconds):
-    data = bytearray()
-    deadline = time.monotonic() + timeout_seconds
-    while len(data) <= maximum:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("handshake timed out")
-        conn.settimeout(remaining)
-        chunk = conn.recv(1)
-        if not chunk:
-            return bytes(data)
-        data.extend(chunk)
-        if chunk == b"\n":
-            return bytes(data)
-    raise ValueError("handshake is too large")
-
+    return bridge_common.parse_named_commands(
+        entries,
+        noun="MCP server",
+        env_hint="preset/MCP env list",
+    )
 
 def authenticate(conn, token):
-    conn.settimeout(AUTH_TIMEOUT_SECONDS)
-    try:
-        supplied = read_line(conn, MAX_HANDSHAKE_BYTES, AUTH_TIMEOUT_SECONDS)
-        expected = HANDSHAKE_PREFIX + token.encode("ascii") + b"\n"
-        accepted = hmac.compare_digest(supplied, expected)
-        if not accepted:
-            conn.sendall(b"ERR\n")
-        return accepted
-    except (OSError, TimeoutError, UnicodeError, ValueError):
-        return False
-    finally:
-        conn.settimeout(None)
-
-
-def terminate_process_group(proc, grace_seconds=2.0):
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.terminate()
-    try:
-        proc.wait(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.kill()
-    try:
-        proc.wait(timeout=grace_seconds)
-    except subprocess.TimeoutExpired:
-        pass
+    return bridge_common.authenticate(
+        conn,
+        token,
+        prefix=HANDSHAKE_PREFIX,
+        maximum=MAX_HANDSHAKE_BYTES,
+        timeout_seconds=AUTH_TIMEOUT_SECONDS,
+        acknowledge_success=False,
+    )
 
 
 def relay(conn, proc, runtime, process_timeout, max_input, max_output):

@@ -31,11 +31,19 @@ class InstallerSafetyTests(unittest.TestCase):
             check=False,
         )
 
-    def make_release(self, root: pathlib.Path, version: str, reported_version: str):
+    def make_release(
+        self,
+        root: pathlib.Path,
+        version: str,
+        reported_version: str,
+        *,
+        unsafe_core_symlink: bool = False,
+    ):
         release_root = root / f"cage-{version}"
         release_root.mkdir()
         required = [
             "cage",
+            "cage-main.py",
             "cage-config.py",
             "cage-desktop.py",
             "cage-tui.py",
@@ -57,6 +65,31 @@ class InstallerSafetyTests(unittest.TestCase):
             else:
                 path.write_text("placeholder\n", encoding="utf-8")
             path.chmod(0o755)
+        core_files = [
+            "__init__.py",
+            "bridge.py",
+            "cli.py",
+            "codex_policy.py",
+            "codex_runtime.py",
+            "config.py",
+            "lifecycle.py",
+            "models.py",
+            "planning.py",
+            "state/__init__.py",
+            "state/oauth.py",
+            "state/sessions.py",
+            "targets/__init__.py",
+            "targets/container.py",
+            "targets/desktop.py",
+            "targets/host.py",
+        ]
+        for name in core_files:
+            path = release_root / "cage_core" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if unsafe_core_symlink and name == "models.py":
+                path.symlink_to("__init__.py")
+            else:
+                path.write_text("placeholder = True\n", encoding="utf-8")
         archive = root / f"cage-{version}.tar.gz"
         with tarfile.open(archive, "w:gz") as handle:
             handle.add(release_root, arcname=release_root.name)
@@ -306,6 +339,9 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue((install_dir / ".cage-install").is_file())
             self.assertFalse((install_dir / ".cage-install").is_symlink())
             self.assertTrue((install_dir / "cage-tui.py").is_file())
+            self.assertTrue((install_dir / "cage-main.py").is_file())
+            self.assertTrue((install_dir / "cage_core" / "models.py").is_file())
+            self.assertFalse((install_dir / "cage_core").is_symlink())
             self.assertTrue((install_dir / "Dockerfile.base").is_file())
             self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "cage-desktop.py", os.X_OK))
@@ -315,6 +351,78 @@ class InstallerSafetyTests(unittest.TestCase):
                     [str(install_dir / "cage"), "--version"], text=True
                 ).strip(),
                 subprocess.check_output([str(CAGE), "--version"], text=True).strip(),
+            )
+
+    def test_release_install_rejects_core_package_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            home = root / "home"
+            install_dir = root / "install"
+            home.mkdir()
+            archive, checksum = self.make_release(
+                root,
+                "9.9.9",
+                "9.9.9",
+                unsafe_core_symlink=True,
+            )
+
+            result = self.run_install(
+                home, install_dir, archive, checksum, "9.9.9"
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("package symlink", result.stderr)
+            self.assertFalse(install_dir.exists())
+
+    def test_generated_release_install_matches_source_launcher(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            home = root / "home"
+            install_dir = root / "install"
+            output = root / "dist"
+            home.mkdir()
+            version = subprocess.check_output(
+                [str(CAGE), "--version"], text=True
+            ).strip().split()[-1]
+            built = subprocess.run(
+                [
+                    os.environ.get("PYTHON", "python3"),
+                    str(ROOT / "scripts" / "build-release.py"),
+                    version,
+                    str(output),
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            archive = output / f"cage-{version}.tar.gz"
+            checksum = output / f"cage-{version}.tar.gz.sha256"
+            result = self.run_install(
+                home, install_dir, archive, checksum, version
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = home / ".local" / "bin" / "cage"
+            self.assertEqual(
+                subprocess.check_output(
+                    [str(installed), "--version"], text=True
+                ).strip(),
+                subprocess.check_output(
+                    [str(CAGE), "--version"], text=True
+                ).strip(),
+            )
+            self.assertIn(
+                "Usage: cage",
+                subprocess.check_output(
+                    [str(installed), "--help"], text=True
+                ),
+            )
+            self.assertTrue(
+                (install_dir / "cage_core" / "targets" / "desktop.py").is_file()
             )
 
     def test_unauthenticated_latest_release_lookup_installs_cleanly(self):

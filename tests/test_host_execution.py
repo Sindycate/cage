@@ -1001,7 +1001,7 @@ class TestConfigSchema(unittest.TestCase):
             ):
                 cage_config.selected_mcp_names_in_file(layer, {"x"})
 
-    def test_emit_shell_includes_target(self):
+    def test_resolved_json_includes_target(self):
         import io
         from unittest.mock import patch
         data = {"version": 1, "default_preset": "m",
@@ -1009,8 +1009,9 @@ class TestConfigSchema(unittest.TestCase):
         resolved = cage_config.resolve_config(data, Path("/f.toml"), "/tmp/r")
         buf = io.StringIO()
         with patch("sys.stdout", buf):
-            cage_config.emit_shell(resolved)
-        self.assertIn("CAGE_EXEC_TARGET=host", buf.getvalue())
+            cage_config.emit_resolved_json(resolved)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["resolved_config"]["target"], "host")
 
     def test_explain_shows_host_target_and_network_honesty(self):
         import io

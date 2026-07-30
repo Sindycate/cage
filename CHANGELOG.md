@@ -7,6 +7,21 @@ details live in the linked migration guide.
 
 No changes yet.
 
+## 0.26.5 — 2026-07-30
+
+- refactor the 2,691-line host launcher into a Bash 3.2-compatible bootstrap
+  and a Python 3.11 standard-library core with typed request, resolved-config,
+  and immutable launch-plan boundaries;
+- add a versioned, strictly validated, secret-redacted `resolve-json` contract;
+- validate the complete launch plan before any Docker, bridge, state-sync, or
+  target side effects and centralize reverse-order lifecycle cleanup;
+- centralize Codex passthrough and MCP suppression policy across host,
+  container, and Desktop execution while keeping runtime inventory outside the
+  pure policy layer;
+- package and integrity-check `cage_core` in source installs, release archives,
+  CI syntax gates, and the Codex image. Public CLI and configuration behavior
+  remain unchanged.
+
 ## 0.26.4 — 2026-07-28
 
 - **Breaking:** `mcp_packs` is now the authoritative allowlist for every Cage

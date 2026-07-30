@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NETGATE = ROOT / "netgate-proxy.py"
 ENTRYPOINT_CODEX = ROOT / "entrypoint-codex.sh"
 ENTRYPOINT_CLAUDE = ROOT / "entrypoint.sh"
+CODEX_CORE = ROOT / "cage_core"
 
 
 def write_executable(path, content):
@@ -430,6 +431,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
                     "--mount",
+                    f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
+                    "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "--mount",
                     f"type=bind,src={host_codex},dst=/host-codex-source,readonly",
@@ -452,6 +455,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "-c",
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
+                    "mkdir -p /home/codex/.npm-global/bin && "
+                    "ln -s /test-bin/codex /home/codex/.npm-global/bin/codex && "
                     "cp -R /host-codex-source /host-codex && "
                     "chown -R 21001:21001 /host-codex && "
                     "mkdir -p /workspace /home/codex && "
@@ -570,6 +575,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
                     "--mount",
+                    f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
+                    "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "-e",
                     "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -586,6 +593,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "-c",
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
+                    "mkdir -p /home/codex/.npm-global/bin && "
+                    "ln -s /test-bin/codex /home/codex/.npm-global/bin/codex && "
                     "mkdir -p /workspace /home/codex/.codex && "
                     "printf '{\\\"test\\\":true}\\n' > /home/codex/.codex/.credentials.json && "
                     "chmod 640 /home/codex/.codex/.credentials.json && "
@@ -634,6 +643,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "SETUID",
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
+                    "--mount",
+                    f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
                     "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "-e",

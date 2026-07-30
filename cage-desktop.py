@@ -664,6 +664,12 @@ def validate_client_key(
 def resolved_preset_assignments(
     setup: dict[str, Any], args: argparse.Namespace, repo: Path, preset: str
 ) -> dict[str, str]:
+    """Resolve a preset through the versioned JSON contract.
+
+    The compatibility-shaped return value keeps fingerprint callers small
+    while eliminating parsing of executable shell assignments.
+    """
+
     config_helper = Path(str(setup["helper"])).with_name("cage-config.py")
     if not config_helper.is_file() or config_helper.is_symlink():
         raise DesktopError(
@@ -676,7 +682,7 @@ def resolved_preset_assignments(
             str(config_helper),
             "--config",
             str(config_root(args) / "config.toml"),
-            "resolve",
+            "resolve-json",
             "--repo",
             str(repo),
             "--preset",
@@ -694,16 +700,51 @@ def resolved_preset_assignments(
         raise DesktopError(
             f"cannot resolve desktop preset fingerprint: {result.stderr.strip()}"
         )
-    assignments: dict[str, str] = {}
     try:
-        tokens = shlex.split(result.stdout, comments=False, posix=True)
-    except ValueError as exc:
-        raise DesktopError("invalid output from installed Cage config helper") from exc
-    for token in tokens:
-        name, separator, value = token.partition("=")
-        if separator and re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
-            assignments[name] = value
-    return assignments
+        contract = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise DesktopError("invalid JSON from installed Cage config helper") from exc
+    if not isinstance(contract, dict):
+        raise DesktopError("invalid output from installed Cage config helper")
+    if set(contract) != {
+        "schema",
+        "schema_version",
+        "cage_version",
+        "resolved_config",
+    }:
+        raise DesktopError("unexpected fields in installed Cage config contract")
+    if (
+        contract.get("schema") != "cage.resolved-config"
+        or contract.get("schema_version") != 1
+    ):
+        raise DesktopError("unsupported installed Cage config contract")
+    resolved = contract.get("resolved_config")
+    if not isinstance(resolved, dict):
+        raise DesktopError("installed Cage config contract is missing resolved_config")
+    auth = resolved.get("auth")
+    mcp = resolved.get("mcp")
+    skills = resolved.get("skills")
+    if not isinstance(auth, dict) or not isinstance(mcp, dict) or not isinstance(skills, dict):
+        raise DesktopError("invalid installed Cage config contract payload")
+    payload = {
+        "profile": resolved.get("codex_profile", ""),
+        "stdio": mcp.get("stdio", []),
+        "remote": mcp.get("remote", []),
+        "skills": skills.get("mounts", []),
+        "env_names": resolved.get("environment_names", []),
+        "disable_mcp": mcp.get("suppressed", []),
+        "disable_mcp_overrides": mcp.get("disable_overrides", []),
+    }
+    return {
+        "CAGE_NET_MODE": str(resolved.get("network", "")),
+        "CAGE_YOLO": "1" if resolved.get("yolo") is True else "",
+        "CAGE_CODEX_PROFILE": str(resolved.get("codex_profile", "")),
+        "HOST_CODEX_DIR": str(auth.get("host_codex_dir", "")),
+        "HOST_AGENTS_DIR": str(auth.get("host_agents_dir", "")),
+        "CAGE_HOST_CODEX_PAYLOAD": json.dumps(
+            payload, ensure_ascii=True, separators=(",", ":")
+        ),
+    }
 
 
 def update_tree_metadata(digest: Any, root: Path) -> None:

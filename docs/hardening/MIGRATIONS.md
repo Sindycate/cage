@@ -8,6 +8,17 @@ when that version is committed and tagged.
 
 No user-visible migrations yet.
 
+## 0.26.5 — 2026-07-30
+
+### Host launcher modularization
+
+No public CLI, configuration, state-location, or isolation behavior changes.
+The installed payload now includes `cage-main.py` and the `cage_core` package
+and still requires Python 3.11 or newer. Custom packaging or mirrors must retain
+that directory as regular files; symlink and special-file package entries are
+rejected. Normal source and release installer users need no configuration
+change.
+
 ## 0.26.4 — 2026-07-28
 
 ### Authoritative MCP pack selection

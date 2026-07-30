@@ -142,7 +142,9 @@ class HostBoundaryTests(unittest.TestCase):
         launcher_dir = root / "launcher"
         launcher_dir.mkdir()
         shutil.copy2(CAGE, launcher_dir / "cage")
+        shutil.copy2(ROOT / "cage-main.py", launcher_dir / "cage-main.py")
         shutil.copy2(ROOT / "cage-config.py", launcher_dir / "cage-config.py")
+        shutil.copytree(ROOT / "cage_core", launcher_dir / "cage_core")
         write_fake_mcp_bridge(launcher_dir / "mcp-bridge.py")
 
         env = os.environ.copy()

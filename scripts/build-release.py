@@ -16,6 +16,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD_FILES = (
     "cage",
+    "cage-main.py",
     "cage-config.py",
     "cage-desktop.py",
     "cage-tui.py",
@@ -38,7 +39,7 @@ PAYLOAD_FILES = (
     "SECURITY.md",
     "CHANGELOG.md",
 )
-PAYLOAD_DIRS = ("docs", "netgate")
+PAYLOAD_DIRS = ("cage_core", "docs", "netgate")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?$")
 
 

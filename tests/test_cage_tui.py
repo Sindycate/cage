@@ -690,7 +690,9 @@ extra_mounts = [{ path = "/tmp/output", mode = "rw" }]
             claude_session.parent.mkdir(parents=True)
             claude_session.write_bytes(b'{"sentinel":"session"}\n')
             shutil.copy2(ROOT / "cage", launcher / "cage")
+            shutil.copy2(ROOT / "cage-main.py", launcher / "cage-main.py")
             shutil.copy2(ROOT / "cage-config.py", launcher / "cage-config.py")
+            shutil.copytree(ROOT / "cage_core", launcher / "cage_core")
             executable(launcher / "cage-tui.py", "import sys\nsys.exit(1)\n")
             markers = {
                 "docker": root / "docker-called",
