@@ -56,10 +56,19 @@ jobs:
           if [ "$VERSION" != "$SCRIPT_VER" ]; then
             echo "ERROR: tag v${VERSION} does not match CAGE_VERSION=${SCRIPT_VER}"; exit 1
           fi
-          if [ "$(git cat-file -t "refs/tags/${TAG}")" != "tag" ]; then
+          # actions/checkout may materialize the triggering tag as a lightweight
+          # local ref even when the remote tag is annotated. Verify the remote
+          # direct + peeled refs instead of trusting the checkout's local ref.
+          REMOTE_TAGS="$(git ls-remote --tags origin \
+            "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          TAG_OBJECT="$(printf '%s\n' "$REMOTE_TAGS" | \
+            awk -v ref="refs/tags/${TAG}" '$2 == ref { print $1; exit }')"
+          TAG_COMMIT="$(printf '%s\n' "$REMOTE_TAGS" | \
+            awk -v ref="refs/tags/${TAG}^{}" '$2 == ref { print $1; exit }')"
+          if [ -z "$TAG_OBJECT" ] || [ -z "$TAG_COMMIT" ]; then
             echo "ERROR: ${TAG} must be an annotated tag"; exit 1
           fi
-          if [ "$(git rev-list -n1 "refs/tags/${TAG}")" != "$GITHUB_SHA" ]; then
+          if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
             echo "ERROR: ${TAG} does not dereference to $GITHUB_SHA"; exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

@@ -3,6 +3,12 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.26.8 — 2026-07-31
+
+- verify annotated release tags from the remote direct and peeled refs instead
+  of the checkout-local tag ref, which GitHub Actions can materialize as a
+  lightweight ref for a tag-triggered workflow.
+
 ## 0.26.7 — 2026-07-31
 
 - add maintainer-only, deterministic, resumable release automation

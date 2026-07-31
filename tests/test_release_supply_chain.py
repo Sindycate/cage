@@ -229,7 +229,9 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             '--signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml"',
             '--source-digest "$GITHUB_SHA"',
             "--source-ref refs/heads/main",
-            'git cat-file -t "refs/tags/${TAG}"',
+            'git ls-remote --tags origin',
+            '"refs/tags/${TAG}^{}"',
+            'if [ -z "$TAG_OBJECT" ] || [ -z "$TAG_COMMIT" ]; then',
         ):
             self.assertIn(fragment, text)
         # The gate refuses a conflicting existing version tag.
@@ -700,6 +702,90 @@ def _extract_run_block(workflow_path, step_name_substr):
     nonempty = [b for b in body if b.strip()]
     pad = min(len(b) - len(b.lstrip()) for b in nonempty)
     return "\n".join(b[pad:] if len(b) >= pad else "" for b in body)
+
+
+class ReleaseTagGateTests(unittest.TestCase):
+    """Execute the real release metadata gate with remote tag-ref stubs.
+
+    GitHub Actions may check out an annotated trigger tag as a lightweight local
+    ref. The gate must therefore prove annotation and commit identity from the
+    remote direct + peeled refs, not from ``refs/tags/*`` in the checkout.
+    """
+
+    SHA = "a" * 40
+    TAG_OBJECT = "b" * 40
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(
+            RELEASE_WORKFLOW, "Verify tag, version, and commit agree"
+        )
+        assert "git ls-remote --tags origin" in cls.script
+        assert '"refs/tags/${TAG}^{}"' in cls.script
+        assert "git cat-file -t" not in cls.script
+
+    def _run_gate(self, mode):
+        base = Path(tempfile.mkdtemp(prefix="release-tag-gate-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        github_output = base / "github_output.txt"
+        github_output.write_text("", encoding="utf-8")
+        git_stub = r'''
+git() {
+  if [ "$1" = "ls-remote" ]; then
+    case "${TAG_STUB_MODE}" in
+      annotated)
+        printf '%s\trefs/tags/v0.26.8\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.26.8^{}\n' "${GITHUB_SHA}"
+        ;;
+      lightweight)
+        printf '%s\trefs/tags/v0.26.8\n' "${GITHUB_SHA}"
+        ;;
+      mismatch)
+        printf '%s\trefs/tags/v0.26.8\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.26.8^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        ;;
+    esac
+    return 0
+  fi
+  return 127
+}
+'''
+        script_file = base / "gate.sh"
+        script_file.write_text(git_stub + "\n" + self.script, encoding="utf-8")
+        env = dict(os.environ)
+        env.update(
+            {
+                "GITHUB_REF": "refs/tags/v0.26.8",
+                "GITHUB_SHA": self.SHA,
+                "GITHUB_OUTPUT": str(github_output),
+                "TAG_STUB_MODE": mode,
+                "TAG_OBJECT": self.TAG_OBJECT,
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(script_file)],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return result, github_output.read_text(encoding="utf-8")
+
+    def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
+        result, output = self._run_gate("annotated")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("version=0.26.8", output)
+        self.assertIn("tag=v0.26.8", output)
+
+    def test_remote_lightweight_tag_fails_closed(self):
+        result, _ = self._run_gate("lightweight")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must be an annotated tag", result.stdout)
+
+    def test_remote_annotated_tag_for_other_commit_fails_closed(self):
+        result, _ = self._run_gate("mismatch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not dereference", result.stdout)
 
 
 class CandidateResolveFailClosedTests(unittest.TestCase):
