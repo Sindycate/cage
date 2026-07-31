@@ -603,6 +603,81 @@ identity = "work"
 - Git push over SSH bypasses `--net gate` (raw TCP, not HTTP)
 - With `--net off`, push is blocked entirely (no network)
 
+## Maintainer release process
+
+Releases are published with one maintainer-only command:
+
+```bash
+python3 scripts/publish_release.py            # run / resume a release
+python3 scripts/publish_release.py --dry-run  # read-only discovery + planned mutations
+python3 scripts/publish_release.py --json     # one JSON result object on stdout
+```
+
+`scripts/publish_release.py` is maintainer tooling. It is not part of the
+end-user `cage` CLI and is excluded from the release archive. It uses only the
+Python 3.11 standard library and requires `git`, `gh`, `docker`, `curl`, and
+`/bin/bash`.
+
+What it does, in order:
+
+1. Validates the prepared release commit (clean tree, on `main`, `origin`
+   resolves to `Sindycate/cage`, local `main` ahead by at most one commit,
+   `CAGE_VERSION`/`CHANGELOG.md`/tag agree, existing tags/releases/digests
+   absent or matching, plus local test/compile/shell/compose/archive gates).
+2. Detects the current release phase and resumes automatically. Phases are
+   `local_ready`, `main_pushed`, `ci_passed`, `tag_pushed`,
+   `release_workflow_passed`, and `public_verified`. Remote state (Git refs,
+   workflow results, GHCR digests, the GitHub Release) is authoritative; the
+   private state file under the per-worktree Git dir is only a resume hint.
+3. Shows the repository, full commit SHA, version, tag, resumed phase, and the
+   exact remaining remote mutations, then requires the maintainer to type
+   exactly:
+
+   ```text
+   release v<VERSION> from <12-character-SHA>
+   ```
+
+   `--dry-run` displays the same plan and changes nothing. If only public
+   verification remains, no confirmation is required.
+4. Pushes `main` (explicit refspec from the recorded SHA), waits for the exact
+   commit's `ci.yml` push run, creates and pushes the immutable annotated tag
+   `v<VERSION>`, waits for the tag-triggered release workflow, and then
+   independently verifies the public release.
+
+### Candidate images
+
+To reduce release time safely, a successful `ci.yml` run on `main` publishes
+immutable `candidate-<full-commit-sha>` images for `base`, `claude-code`, and
+`codex`, each with BuildKit SBOM, max-level provenance, and a signed GitHub
+provenance attestation, plus a small `release-candidate-<SHA>` manifest
+artifact. Candidate tags are public and write-once, but they are not stable
+releases and are never referenced by Cage's image-pull logic. The
+tag-triggered release workflow verifies the exact candidate digests and
+attestations and *promotes* them to the version and `latest` tags — it never
+rebuilds images or resolves mutable package sources. There is intentionally no
+cross-version BuildKit cache: Cage resolves current packages on each release.
+
+### Public verification
+
+After the release workflow succeeds, the command independently verifies that
+the GitHub Release is public (non-draft, non-prerelease) with exactly the
+archive, checksum, and SPDX assets; that the assets download anonymously and
+the checksum passes; that the SPDX parses and identifies the archive; that
+rebuilding the archive from the recorded commit is byte-identical; that source
+and image attestations verify against the exact SHA and release workflow; that
+the version and `latest` image tags resolve to the candidate digests with
+`amd64`+`arm64` platforms; that a fresh anonymous Docker credential dir can
+pull the images (exercising native-platform layer downloads); and that the
+public installer — fetched anonymously from the published tag with curl
+configuration disabled and all credentials stripped, not from the local
+checkout — installs into temporary directories and reports the right version.
+It never touches the maintainer's real Cage installation, configuration, Docker
+volumes, SSH config, or Codex state.
+
+Manual `git push` / `git tag` / `gh release create` remain available only as
+emergency recovery; the release workflow's exact-commit gate protects manual
+tag pushes too.
+
 ## Updating
 
 Check your current version:

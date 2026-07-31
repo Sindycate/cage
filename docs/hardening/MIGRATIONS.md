@@ -6,7 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
-No user-visible migrations yet.
+### Deterministic release automation (issue #6)
+
+No user configuration migration. `scripts/publish_release.py` and the
+`ci.yml`/`release.yml` candidate-and-promotion changes are maintainer-only
+release tooling. There is no change to the `cage` CLI, central `config.toml`
+schema, state locations, image names, or install/update behavior. The published
+image names (`base`, `claude-code`, `codex`) and the `version`/`latest` tag
+semantics are unchanged; release images are now promoted from immutable
+`candidate-<full-SHA>` digests instead of being rebuilt by the tag workflow.
+`scripts/publish_release.py` is excluded from the release archive.
 
 ## 0.26.5 — 2026-07-30
 

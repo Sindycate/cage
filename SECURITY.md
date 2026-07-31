@@ -201,6 +201,42 @@ upstream package repositories. Consumers that require immutable deployment
 identity should retain and use the verified image digest rather than relying on
 a registry tag alone.
 
+### SHA candidates, exact-digest promotion, and attestation identities
+
+A successful `ci.yml` run on `main` publishes immutable
+`candidate-<full-commit-sha>` images for `base`, `claude-code`, and `codex`.
+Candidate tags are **public and write-once**: anyone can inspect them, a
+conflicting or unverifiable candidate fails closed and is never overwritten,
+and they are not stable releases — Cage's image-pull logic never references
+them. They share content-addressed blobs with the eventual version tags and
+serve as audit and resume evidence. On a CI rerun for the same SHA, an existing
+candidate is verified (amd64/arm64 platforms and a `ci.yml` provenance
+attestation tied to the exact source SHA and `refs/heads/main`) and reused; its
+build and attest steps are skipped. A candidate that exists but cannot be
+verified fails closed rather than being rebuilt, so freshly resolved mutable
+dependencies can never replace an immutable candidate.
+
+The tag-triggered release workflow **promotes** the exact verified candidate
+digests to the version and `latest` tags with `docker buildx imagetools
+create`; it never rebuilds images, never uses QEMU, and never resolves mutable
+package sources. Version tags are immutable (an existing version tag with a
+different digest fails closed), and `latest` moves only after all three version
+tags and their attestations succeed. Promotion is idempotent so a workflow
+rerun can finish after a partial registry interruption.
+
+Attestation identities are pinned. Candidate images carry a signed GitHub
+provenance attestation from the pinned `ci.yml` signer with source ref
+`refs/heads/main` and source digest equal to the commit SHA. The release
+workflow re-attests each promoted digest from the pinned `release.yml` signer.
+The release workflow's exact-commit gate verifies the candidate digests,
+amd64/arm64 platforms, and CI attestations (expected repository, exact source
+digest, `refs/heads/main`, pinned `ci.yml` signer workflow) before any release
+work, using the `oci://` image reference form that `gh attestation verify`
+requires, and it enforces this for **manual tag pushes too** — the maintainer
+command `scripts/publish_release.py` is convenience, not a security boundary.
+There is intentionally no cross-version BuildKit cache, so a warm cache cannot
+silently reuse stale dependencies.
+
 ## Reporting a vulnerability
 
 Please use the repository's GitHub private vulnerability-reporting or security

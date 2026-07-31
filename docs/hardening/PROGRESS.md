@@ -3,6 +3,179 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-07-31 — issue #6 review hardening (round 4)
+
+Fixed the last P1 from the fourth review pass. The focused suite is now 55
+publish-command tests + 42 supply-chain tests (97 total); the full-suite failure
+set is still byte-identical to a pristine `dddc15d` baseline (zero regressions).
+
+- P1: `curl --no-config` is not a valid curl option (curl rejects the `--no-`
+  negation of the non-boolean `--config`), so every registry probe and anonymous
+  download failed: `ghcr_status` always returned 000 (failing candidate creation
+  and version promotion closed) and the public-release asset/installer downloads
+  could not complete. Replaced all occurrences with first-position `-q`
+  (a.k.a. `--disable`) in `.github/scripts/ghcr-status.sh` (token + manifest
+  calls) and `scripts/publish_release.py` (`curl_download` and the public
+  installer fetch).
+- Added regression tests that exercise the REAL curl argument parser (a fake
+  runner accepts any argv): one captures the actual curl commands built by
+  `curl_download` and the public-installer fetch; one executes the real
+  `ghcr_status` helper and probes each captured curl invocation. Both include a
+  control asserting real curl rejects `--no-config`, and both were verified to
+  fail when the bug is reintroduced.
+
+## 2026-07-31 — issue #6 review hardening (round 3)
+
+Closed the two remaining fail-closed gaps from the third review pass (both P1).
+The focused suite is now 54 publish-command tests + 41 supply-chain tests (95
+total), and the full-suite failure set is still byte-identical to a pristine
+`dddc15d` baseline (zero regressions).
+
+- P1: candidate not-found detection no longer matches bare substrings (`404`,
+  `not found`) in Docker's free-form error output, which a commit SHA containing
+  "404" or a credential-helper/network message could spoof. A new shared helper
+  `.github/scripts/ghcr-status.sh` queries the GHCR registry HTTP API and
+  branches on the structured status code: 200 = present, 404 = authoritatively
+  absent (the only result that authorizes creating a write-once tag), and
+  anything else (401/403/timeout/5xx/000) = ambiguous and fails closed.
+- P1: the same authoritative absence check now guards immutable version tags in
+  both the release gate and the promotion step. Previously a failed
+  `imagetools inspect` (e.g. a registry 503) was treated as "tag absent" and
+  reached `imagetools create`, risking replacement of an existing immutable
+  version tag. Now only an authoritative 404 creates; a matching digest is
+  resumable success; a conflicting digest or any ambiguous failure fails closed.
+- Covered by executing the real candidate resolve and promotion blocks against
+  stubbed curl/docker/gh (bash functions) for genuine absence (404 -> create),
+  401/403/timeout/5xx (-> fail closed, never reaching `imagetools create`),
+  matching digest (-> resume), and conflicting digest (-> fail closed), plus
+  false-positive regressions: a SHA containing "404" with a simulated 401, and a
+  credential-helper error containing "not found".
+
+## 2026-07-31 — issue #6 review hardening (round 2)
+
+Addressed the second review pass (2 P1, 1 P2). The focused suite is now 54
+publish-command tests + 30 supply-chain tests (84 total), and the full-suite
+failure set remains byte-identical to a pristine `dddc15d` baseline (zero
+regressions; the sandbox's noexec/reserved-path failures are environmental).
+
+- P1: `safe_extract_tar` now restores canonical permission bits (directories
+  0755, executables 0755, other files 0644, special bits stripped). `git
+  archive` writes tar modes as `(0666|0777) & ~umask` rather than the tracked
+  index mode, so preserving `member.mode` verbatim would make commit
+  reconstruction depend on the maintainer's umask; canonicalizing from the
+  executable bit is umask-independent and matches the release workflow's
+  checkout. Covered by a focused mode test and a real-git, real-packager
+  byte-for-byte reconstruction test (the canned fake packager cannot catch
+  this).
+- P1: the candidate resolve step now fails closed on ambiguous registry errors.
+  It captures the inspect result and only an authoritative not-found
+  (`not found` / `manifest unknown` / `404`) authorizes candidate creation;
+  authentication (401/403), timeout, network, and registry 5xx failures stop
+  the job so a CI rerun can never overwrite an immutable candidate tag whose
+  existence could not be confirmed. Covered by executing the real resolve script
+  against stubbed `docker`/`gh` (bash functions) for not-found, 401, 403,
+  timeout, 5xx, verified-reuse, and unverifiable-attestation scenarios.
+- P2: the idempotent GitHub Release rerun path now validates release metadata
+  (non-draft, non-prerelease, matching tag) and downloads each existing asset to
+  compare its size and SHA-256 against the freshly generated artifact; empty,
+  truncated, or different files under the right names are rejected rather than
+  accepted as recovered.
+
+## 2026-07-31 — issue #6 review hardening
+
+Addressed the issue #6 implementation review (1 P0, 3 P1, 3 P2). Every fix is
+covered by new adversarial tests; the focused suite is now 52 publish-command
+tests + 23 supply-chain tests (75 total), and a pristine `dddc15d` baseline run
+from the same location produced a byte-identical pre-existing failure set
+(zero regressions).
+
+- P0: image attestation verification now passes the required `oci://` image
+  reference to `gh attestation verify` in both `release.yml` and
+  `scripts/publish_release.py` (a bare `ghcr.io/...` argument is interpreted as
+  a local file path and would block every release).
+- P1: candidate publication is truly write-once — a new resolve step verifies an
+  existing candidate (amd64/arm64 platforms plus a `ci.yml` provenance
+  attestation for the exact source SHA and `refs/heads/main`) and reuses its
+  digest, or fails closed; the base/leaf build and attest steps are
+  conditionally skipped for reused images, so a CI rerun can never overwrite an
+  immutable candidate with freshly resolved mutable dependencies.
+- P1: the public-installer check fetches `install.sh` anonymously from the
+  published tag (not the local checkout) with `curl -q` (curlrc disabled) and runs it with
+  all GitHub credential variables and `gh` configuration stripped, so it cannot
+  fall back to a maintainer token.
+- P1: verification converts any uncontrolled exception (malformed JSON, tar
+  errors, I/O) into a structured, redacted failed check and skips checks whose
+  prerequisite did not pass, instead of emitting a traceback; the unsafe
+  unfiltered `extractall` fallback was replaced by explicit per-member safe
+  extraction.
+- P2: anonymous GHCR verification performs a real `docker pull` (native-platform
+  layer downloads) under a fresh credential dir, not merely a manifest inspect.
+- P2: GitHub Release creation is idempotent — a rerun verifies an existing
+  release carries exactly the expected assets and resumes, failing closed on a
+  conflicting asset set.
+- P2: the reproducibility check rebuilds the archive from the recorded commit
+  materialized via read-only `git archive`, not the live checkout, so a changing
+  worktree during the long workflow wait cannot invalidate the reconstruction.
+
+## 2026-07-31 — issue #6 deterministic, resumable release automation
+
+Implemented the maintainer-only release command `python3
+scripts/publish_release.py` (`--dry-run`, `--json`; Python 3.11 standard
+library only). It validates the prepared release commit, asks for one explicit
+confirmation (`release v<VERSION> from <12-char-SHA>`), pushes `main` if
+needed, waits for the exact commit's CI run, pushes an immutable annotated tag,
+waits for the release workflow, and independently verifies the public release.
+Phases (`local_ready` → `main_pushed` → `ci_passed` → `tag_pushed` →
+`release_workflow_passed` → `public_verified`) resume automatically; remote
+state is authoritative and the per-worktree Git-dir state file is only a hint,
+guarded by an exclusive `fcntl.flock` lock with `0700`/`0600` modes and atomic
+updates. Subprocesses run without a shell; logs are bounded and secret-redacted.
+
+CI now publishes immutable `candidate-<full-SHA>` images (base, claude-code,
+codex) on a successful `main` push after every existing gate passes, with
+BuildKit SBOM, `provenance: mode=max`, signed GitHub provenance attestations,
+and a `release-candidate-<SHA>` manifest artifact; candidate tags are public,
+write-once, serialized per SHA, and never referenced by Cage's pull logic.
+`release.yml` was refactored into four stages (exact-commit gate, source
+package, image promotion, GitHub Release): the gate verifies the exact CI run
+and candidate digests/platforms/attestations and protects manual tag pushes;
+promotion moves exact candidate digests to the version and `latest` tags
+without rebuilding; the release is created last. The duplicated
+Python/macOS/Docker/history-scan jobs were replaced by the verified CI run; the
+archive-content secret scan was retained. No cross-version BuildKit cache was
+introduced.
+
+Validation evidence (sandbox; Docker not installed here):
+
+- `tests/test_publish_release.py`: 44 tests passed (preflight/validation,
+  dirty tree / wrong branch / divergence / multiple unpublished commits,
+  annotated/lightweight/mismatched tags, confirmation mismatch, dry-run issues
+  no mutating commands, exact-SHA workflow selection rejecting branch-latest
+  evidence, all six resume phases, ambiguous-push recovery, CI failure
+  preventing tags, post-tag failure never moving/deleting tags, candidate and
+  version digest conflicts, exclusive locking and atomic private journal,
+  bounded/redacted logs, deterministic secret-free JSON, and an end-to-end
+  command-ordering test against a temporary bare Git remote with fake gh/docker
+  /curl that reaches `public_verified`);
+- `tests/test_release_supply_chain.py`: 21 tests passed, extended to assert
+  candidate gating/full-SHA tags/exact base digest/SBOM+provenance+
+  attestations, gate exact-CI and candidate-attestation verification, promotion
+  rather than rebuild, version-before-latest ordering, release created last,
+  SHA-pinned actions, and that the archive excludes maintainer-only `scripts/`;
+- `python3 -m compileall` and `bash -n` passed across the listed targets;
+- a pristine checkout of the same commit run from the same location produced an
+  identical pre-existing failure set, confirming no regressions (the sandbox's
+  Docker-dependent and reserved-path/noexec failures are environmental and are
+  covered by CI).
+
+This is maintainer tooling only: it is not added to the `cage` CLI and is
+excluded from the release archive. There is no user configuration migration.
+No push, tag, release, issue edit, or GHCR mutation was performed; the work is
+delivered as an uncommitted working tree on branch
+`codex/issue-6-release-automation` for review. The first authorized real
+release using this mechanism is the end-to-end acceptance test and must record
+phase timings against the v0.26.2 baseline before claiming any speedup.
+
 ## 2026-07-30 — v0.26.6 ADR-001 release timing evidence
 
 Replaced unverified ADR-001 build-time estimates with step-level evidence from

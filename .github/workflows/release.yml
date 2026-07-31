@@ -7,94 +7,150 @@ on:
 permissions:
   contents: read
 
+# Release publication is serialized per tag and never cancelled mid-flight, so a
+# rerun can resume after a partial GitHub or registry interruption.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  secret-scan:
+  # --------------------------------------------------------------------------
+  # Stage 1: exact-commit gate.
+  #
+  # Protects manual tag pushes too. Requires an annotated tag whose commit has a
+  # successful ci.yml push run on main, then verifies the exact-SHA candidate
+  # images, their digests, platforms, and CI attestations before any release
+  # work happens. Fails closed if a version tag already exists with a different
+  # digest.
+  # --------------------------------------------------------------------------
+  gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      base_digest: ${{ steps.candidates.outputs.base_digest }}
+      claude_digest: ${{ steps.candidates.outputs.claude_digest }}
+      codex_digest: ${{ steps.candidates.outputs.codex_digest }}
+      ci_run_id: ${{ steps.ci-run.outputs.run_id }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Install checksum-verified Gitleaks
-        run: .github/scripts/install-gitleaks.sh "$RUNNER_TEMP/gitleaks-bin"
-
-      - name: Scan complete Git history
+      - name: Verify tag, version, and commit agree
+        id: meta
         run: |
-          "$RUNNER_TEMP/gitleaks-bin/gitleaks" git . \
-            --config .gitleaks.toml \
-            --gitleaks-ignore-path . \
-            --log-opts="--all" \
-            --redact=100 \
-            --no-banner
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "ERROR: ref is not a version tag: $TAG"; exit 1 ;;
+          esac
+          VERSION="${TAG#v}"
+          SCRIPT_VER="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
+          if [ "$VERSION" != "$SCRIPT_VER" ]; then
+            echo "ERROR: tag v${VERSION} does not match CAGE_VERSION=${SCRIPT_VER}"; exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/${TAG}")" != "tag" ]; then
+            echo "ERROR: ${TAG} must be an annotated tag"; exit 1
+          fi
+          if [ "$(git rev-list -n1 "refs/tags/${TAG}")" != "$GITHUB_SHA" ]; then
+            echo "ERROR: ${TAG} does not dereference to $GITHUB_SHA"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  installer-macos-bash32:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      - name: Install test dependencies
-        run: python -m pip install --requirement requirements-dev.txt
-
-      - name: Verify macOS system Bash installer path
-        run: |
-          /bin/bash --version | head -1
-          python -m pytest -q tests/test_install_safety.py
-
-  validate:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11', '3.12']
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-
-      - name: Install test dependencies
-        run: python -m pip install --requirement requirements-dev.txt
-
-      - name: Run validation
-        run: |
-          python -m pytest -q
-          python -m compileall -q cage-main.py cage-config.py cage_core cage-desktop.py cage-tui.py codex-remote.py netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay scripts/build-release.py
-          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh install.sh .github/scripts/install-gitleaks.sh
-          docker compose config
-
-      - name: Run Docker integration smoke tests
+      - name: Locate exact successful CI run and download candidate manifest
+        id: ci-run
         env:
-          CAGE_RUN_DOCKER_SMOKE: '1'
-        run: python -m pytest -q tests/test_docker_smoke.py
-
-      - name: Build base and Desktop Codex smoke image
-        if: matrix.python-version == '3.12'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          docker build -t cage-base:latest -f Dockerfile.base .
-          docker build --build-arg CAGE_BASE=cage-base:latest -t codex:desktop-smoke -f Dockerfile.codex .
+          set -euo pipefail
+          RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event push \
+            --branch main --json databaseId,headSha,conclusion --limit 50 \
+            --jq ".[] | select(.headSha==\"${GITHUB_SHA}\") | select(.conclusion==\"success\") | .databaseId" \
+            | head -1)"
+          if [ -z "$RUN_ID" ]; then
+            echo "ERROR: no successful ci.yml push run for ${GITHUB_SHA} on main"; exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "release-candidate-${GITHUB_SHA}" --dir candidate-manifest
+          test -f "candidate-manifest/release-candidate-${GITHUB_SHA}.json"
 
-      - name: Run Desktop SSH integration smoke test
-        if: matrix.python-version == '3.12'
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify candidate digests, platforms, attestations, and version-tag absence
+        id: candidates
         env:
-          CAGE_RUN_DOCKER_SMOKE: '1'
-          CAGE_DESKTOP_SMOKE_IMAGE: codex:desktop-smoke
-        run: python -m pytest -q tests/test_docker_smoke.py -k desktop_remote
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          . .github/scripts/ghcr-status.sh
+          MANIFEST="candidate-manifest/release-candidate-${GITHUB_SHA}.json"
+          for image in base claude-code codex; do
+            case "$image" in
+              base) key=base ;;
+              claude-code) key=claude ;;
+              codex) key=codex ;;
+            esac
+            expected="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["images"][sys.argv[2]]["digest"])' "$MANIFEST" "$image")"
+            candidate="ghcr.io/sindycate/cage/${image}:candidate-${GITHUB_SHA}"
+            actual="$(docker buildx imagetools inspect "$candidate" --format '{{.Manifest.Digest}}')"
+            if [ "$actual" != "$expected" ]; then
+              echo "ERROR: candidate ${image} digest ${actual} != manifest ${expected}"; exit 1
+            fi
+            arches="$(docker buildx imagetools inspect "$candidate" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
+            case "$arches" in
+              *amd64*arm64*) ;;
+              *) echo "ERROR: candidate ${image} missing amd64/arm64 (${arches})"; exit 1 ;;
+            esac
+            gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${expected}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --source-ref refs/heads/main
+            versioned="ghcr.io/sindycate/cage/${image}:${VERSION}"
+            versioned_status="$(ghcr_status "sindycate/cage/${image}" "${VERSION}")"
+            case "$versioned_status" in
+              200)
+                existing="$(docker buildx imagetools inspect "$versioned" --format '{{.Manifest.Digest}}')"
+                if [ "$existing" != "$expected" ]; then
+                  echo "ERROR: version tag ${versioned} exists with digest ${existing} != ${expected}"; exit 1
+                fi
+                ;;
+              404)
+                ;;  # absent: promotion will create it
+              *)
+                echo "ERROR: ambiguous registry status (${versioned_status}) for ${versioned}; refusing to proceed" >&2
+                exit 1
+                ;;
+            esac
+            echo "${key}_digest=$expected" >> "$GITHUB_OUTPUT"
+          done
 
+  # --------------------------------------------------------------------------
+  # Stage 2: source package.
+  #
+  # The exact successful CI run replaces the duplicated Python/macOS/Docker/
+  # history-scan jobs. The archive-content secret scan stays because it
+  # validates the generated deliverable rather than repository source.
+  # --------------------------------------------------------------------------
   package:
-    needs: [validate, installer-macos-bash32, secret-scan]
+    needs: [gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -109,8 +165,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Verify version matches tag
+      - name: Derive version and source timestamp
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/v}"
           SCRIPT_VER="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
           if [ "$TAG" != "$SCRIPT_VER" ]; then
@@ -167,64 +224,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  docker-base:
-    needs: package
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - name: Extract version from tag
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          SCRIPT_VER="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
-          if [ "$TAG" != "$SCRIPT_VER" ]; then
-            echo "ERROR: Tag v${TAG} != CAGE_VERSION=${SCRIPT_VER}"
-            exit 1
-          fi
-          echo "VERSION=$TAG" >> "$GITHUB_ENV"
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push base image
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile.base
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          tags: |
-            ghcr.io/sindycate/cage/base:${{ env.VERSION }}
-            ghcr.io/sindycate/cage/base:latest
-
-      - name: Attest base image provenance
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-name: ghcr.io/sindycate/cage/base
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-  docker:
-    needs: [package, docker-base]
+  # --------------------------------------------------------------------------
+  # Stage 3a: image promotion (immutable version tags from exact digests).
+  #
+  # Promotes the verified candidate digests to version tags and re-attests them
+  # from this release workflow. Never rebuilds, never uses QEMU, never resolves
+  # mutable package sources. Idempotent: an existing version tag with the same
+  # digest is resumable success; a different digest fails closed.
+  # --------------------------------------------------------------------------
+  promote:
+    needs: [gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -232,28 +241,19 @@ jobs:
       id-token: write
       attestations: write
     strategy:
+      fail-fast: true
       matrix:
         include:
+          - image: base
+            digest: ${{ needs.gate.outputs.base_digest }}
           - image: claude-code
-            dockerfile: Dockerfile
+            digest: ${{ needs.gate.outputs.claude_digest }}
           - image: codex
-            dockerfile: Dockerfile.codex
+            digest: ${{ needs.gate.outputs.codex_digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-
-      - name: Extract version from tag
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          SCRIPT_VER="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
-          if [ "$TAG" != "$SCRIPT_VER" ]; then
-            echo "ERROR: Tag v${TAG} != CAGE_VERSION=${SCRIPT_VER}"
-            exit 1
-          fi
-          echo "VERSION=$TAG" >> "$GITHUB_ENV"
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -264,32 +264,89 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          build-args: |
-            CAGE_BASE=ghcr.io/sindycate/cage/base:${{ env.VERSION }}
-          tags: |
-            ghcr.io/sindycate/cage/${{ matrix.image }}:${{ env.VERSION }}
-            ghcr.io/sindycate/cage/${{ matrix.image }}:latest
+      - name: Create immutable version tag from exact candidate digest
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          DIGEST: ${{ matrix.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          . .github/scripts/ghcr-status.sh
+          repo="ghcr.io/sindycate/cage/${{ matrix.image }}"
+          repo_path="sindycate/cage/${{ matrix.image }}"
+          # Authoritative existence check on the registry status code. Only an
+          # authoritative 404 authorizes creating the immutable version tag; a
+          # matching digest is resumable success; a conflicting digest or any
+          # ambiguous failure (401/403, timeout, 5xx) fails closed so a registry
+          # outage can never attempt to replace an existing immutable version tag.
+          versioned_status="$(ghcr_status "$repo_path" "${VERSION}")"
+          case "$versioned_status" in
+            200)
+              existing="$(docker buildx imagetools inspect "${repo}:${VERSION}" --format '{{.Manifest.Digest}}')"
+              if [ "$existing" != "$DIGEST" ]; then
+                echo "ERROR: version tag ${repo}:${VERSION} exists with digest ${existing} != ${DIGEST}" >&2; exit 1
+              fi
+              echo "version tag ${repo}:${VERSION} already points to ${DIGEST}"
+              ;;
+            404)
+              docker buildx imagetools create -t "${repo}:${VERSION}" "${repo}@${DIGEST}"
+              ;;
+            *)
+              echo "ERROR: ambiguous registry status (${versioned_status}) for ${repo}:${VERSION}; refusing to create/overwrite immutable version tag" >&2
+              exit 1
+              ;;
+          esac
 
-      - name: Attest container image provenance
+      - name: Re-attest promoted digest from release workflow
         uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
         with:
           subject-name: ghcr.io/sindycate/cage/${{ matrix.image }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ matrix.digest }}
           push-to-registry: true
           create-storage-record: false
 
+  # --------------------------------------------------------------------------
+  # Stage 3b: move latest only after ALL version tags and attestations succeed.
+  # --------------------------------------------------------------------------
+  latest:
+    needs: [gate, promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: base
+            digest: ${{ needs.gate.outputs.base_digest }}
+          - image: claude-code
+            digest: ${{ needs.gate.outputs.claude_digest }}
+          - image: codex
+            digest: ${{ needs.gate.outputs.codex_digest }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move latest to the promoted digest
+        env:
+          DIGEST: ${{ matrix.digest }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/sindycate/cage/${{ matrix.image }}"
+          docker buildx imagetools create -t "${repo}:latest" "${repo}@${DIGEST}"
+
+  # --------------------------------------------------------------------------
+  # Stage 4: GitHub Release, created last.
+  # --------------------------------------------------------------------------
   release:
-    needs: [package, docker]
+    needs: [package, promote, latest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -309,8 +366,56 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
           DIST="cage-${VERSION}"
+          ASSETS=("${DIST}.tar.gz" "${DIST}.tar.gz.sha256" "${DIST}.spdx.json")
+          # Idempotent: if a previous run created the release but then reported
+          # failure, a rerun verifies the existing release — metadata AND asset
+          # contents — and treats an exact match as resumed success instead of
+          # failing on "release already exists". Any difference (metadata, asset
+          # set, size, or SHA-256) fails closed; never silently overwritten.
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
+            is_draft="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+            is_pre="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')"
+            tag_name="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')"
+            if [ "$is_draft" != "false" ] || [ "$is_pre" != "false" ] || [ "$tag_name" != "v${VERSION}" ]; then
+              echo "ERROR: existing release v${VERSION} has unexpected metadata (draft=${is_draft} prerelease=${is_pre} tag=${tag_name}); refusing." >&2
+              exit 1
+            fi
+            existing="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
+              --json assets --jq '.assets[].name' | sort)"
+            expected="$(printf '%s\n' "${ASSETS[@]}" | sort)"
+            if [ "$existing" != "$expected" ]; then
+              echo "ERROR: release v${VERSION} exists but its asset set differs; refusing to overwrite." >&2
+              echo "existing assets:" >&2; printf '%s\n' "$existing" >&2
+              echo "expected assets:" >&2; printf '%s\n' "$expected" >&2
+              exit 1
+            fi
+            # Compare each existing asset's content (size + SHA-256) against the
+            # freshly generated artifact, not just its name. Empty, truncated, or
+            # different files under the right names are rejected.
+            verify_dir="$(mktemp -d)"
+            for asset in "${ASSETS[@]}"; do
+              gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$asset" --dir "$verify_dir" --clobber
+              if [ ! -s "${verify_dir}/${asset}" ]; then
+                echo "ERROR: existing release asset ${asset} is missing or empty; refusing to treat as recovered." >&2
+                exit 1
+              fi
+              existing_sum="$(sha256sum "${verify_dir}/${asset}" | awk '{print $1}')"
+              local_sum="$(sha256sum "dist/${asset}" | awk '{print $1}')"
+              existing_size="$(wc -c < "${verify_dir}/${asset}" | tr -d ' ')"
+              local_size="$(wc -c < "dist/${asset}" | tr -d ' ')"
+              if [ "$existing_sum" != "$local_sum" ] || [ "$existing_size" != "$local_size" ]; then
+                echo "ERROR: existing release asset ${asset} differs from the generated artifact (sha256/size mismatch); refusing to overwrite." >&2
+                exit 1
+              fi
+            done
+            rm -rf "$verify_dir"
+            echo "Release v${VERSION} already exists with identical metadata and assets; resuming."
+            exit 0
+          fi
           gh release create "v${VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

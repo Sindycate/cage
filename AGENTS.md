@@ -320,14 +320,50 @@ with a fixed file allowlist, normalized ownership and timestamps, deterministic
 ordering, and a timestamp-free gzip header. `SOURCE_DATE_EPOCH` is set from the
 tagged source commit by the release workflow.
 
-**`.github/workflows/release.yml`**: Creates a GitHub Release with a reproducible
-tarball, SHA-256 checksum, and SPDX SBOM when a `v*` tag is pushed. It signs
-GitHub provenance and SBOM attestations for the source archive, then builds and
-pushes multi-arch (amd64/arm64) Docker images to `ghcr.io/sindycate/cage/` with
-BuildKit SBOM/max-level provenance metadata and signed GitHub provenance. All
-workflow actions use immutable commit pins maintained by Dependabot. The
-workflow verifies that the tag matches `CAGE_VERSION` and creates the GitHub
-Release only after validation and both images succeed.
+**`scripts/publish_release.py`**: Maintainer-only, deterministic, resumable
+release automation (`python3 scripts/publish_release.py`, with `--dry-run` and
+`--json`). Standard library only. It validates the prepared release commit,
+asks for one explicit confirmation, pushes `main` if needed, waits for the
+exact commit's CI run, pushes an immutable annotated tag, waits for
+publication, and independently verifies the public release. State and a private
+log live under the per-worktree Git dir (`git rev-parse --git-path
+cage-release`), guarded by an `fcntl.flock` exclusive lock; remote state is
+authoritative and the state file is only a resume hint. It is not part of the
+`cage` CLI and is excluded from the release archive.
+
+**`.github/workflows/ci.yml`**: In addition to the secret-scan, macOS Bash 3.2
+installer, and Python 3.11/3.12 test/Docker/Desktop gates, a `candidate` job
+runs only on a `push` to `main` after every gate passes. It builds the shared
+base for `linux/amd64`+`linux/arm64`, publishes it as
+`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds both leaves from that
+exact base digest, publishes `claude-code`/`codex` candidate tags, retains
+BuildKit SBOM and `provenance: mode=max`, signs GitHub provenance attestations
+for all three digests, and uploads a small `release-candidate-<SHA>` manifest
+artifact. Candidate tags are public, write-once, serialized per SHA
+(`cancel-in-progress: false`), and never referenced by Cage's pull logic. On a
+rerun for the same SHA, an existing candidate is verified (amd64/arm64 platforms
+and its `ci.yml` provenance attestation for the exact source SHA) and reused —
+its build/attest steps are skipped — while an unverifiable candidate fails
+closed rather than being rebuilt. No cross-version BuildKit cache is used.
+
+**`.github/workflows/release.yml`**: Four logical stages, all actions pinned to
+immutable commit SHAs (maintained by Dependabot), serialized per tag with
+cancellation disabled. (1) **Exact-commit gate**: requires an annotated
+`v<VERSION>` tag whose commit matches `CAGE_VERSION` and `GITHUB_SHA`, finds a
+successful `ci.yml` push run for exactly that SHA on `main`, downloads its
+candidate manifest, and verifies the three candidate digests, their
+amd64/arm64 platforms, and their CI attestations (expected repo, exact source
+digest, `refs/heads/main`, pinned `ci.yml` signer); fails closed if a version
+tag already exists with a different digest. This gate protects manual tag
+pushes too. (2) **Source package**: reproducible tarball, archive-content
+secret scan, checksum, SPDX SBOM, and source provenance/SBOM attestations. (3)
+**Image promotion**: creates immutable version tags from the exact candidate
+digests (`docker buildx imagetools create`, never rebuild/QEMU), re-attests
+each digest from the release workflow, and only then moves `latest`; idempotent
+for resume. (4) **GitHub Release**: reverifies the downloaded assets and
+creates the release last. The exact successful CI run replaces the duplicated
+Python/macOS/Docker/history-scan jobs; the archive-content scan stays because
+it validates the generated deliverable.
 
 ## Versioning & Release Flow
 
@@ -338,7 +374,20 @@ Release only after validation and both images succeed.
 - On first run, cage pulls the pre-built image from ghcr.io; falls back to local build if pull fails
 - `--rebuild` forces a local `docker build --no-cache` to get the latest tool version
 - Releases are automated via GitHub Actions on tag push
-- **Release flow:** bump `CAGE_VERSION` → commit → push → `git tag v{version}` → `git push origin v{version}`. Never skip tagging — releases only trigger on `v*` tag push
+- **Canonical release flow (maintainer-only):** bump `CAGE_VERSION`, update
+  `CHANGELOG.md`, commit on `main`, then run `python3 scripts/publish_release.py`.
+  It validates the commit, asks for one confirmation
+  (`release v<VERSION> from <12-char-SHA>`), pushes `main` if needed, waits for
+  the exact CI run (which publishes immutable `candidate-<SHA>` images), pushes
+  the immutable annotated tag, waits for the release workflow (which promotes
+  the exact candidate digests), and independently verifies the public release.
+  It resumes automatically from the current phase; `--dry-run` shows the plan
+  without mutating anything and `--json` emits one result object. Do not add it
+  to the `cage` CLI or the release archive.
+- **Emergency recovery only:** manual `git push` → `git tag v{version}` →
+  `git push origin v{version}` → `gh release create`. The release workflow's
+  exact-commit gate still protects manual tag pushes. Never skip tagging —
+  releases only trigger on `v*` tag push.
 - **Every pushed commit gets its own version.** Never push multiple commits under the same version — if a follow-up fix is needed, bump again
 
 ## Netgate Management

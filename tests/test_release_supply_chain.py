@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import re
 import subprocess
@@ -43,24 +44,228 @@ class ReleaseSupplyChainTests(unittest.TestCase):
                     f"{workflow}: {action}@{revision} is not an immutable commit pin",
                 )
 
-    def test_release_workflow_attests_source_and_container_artifacts(self):
+    def test_release_workflow_attests_source_archive(self):
         text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        required_fragments = (
+        for fragment in (
             "id-token: write",
             "attestations: write",
             "anchore/sbom-action@",
             "syft-version: v1.44.0",
             "subject-path: cage-${{ env.VERSION }}.tar.gz",
             "sbom-path: cage-${{ env.VERSION }}.spdx.json",
-            "sbom: true",
-            "provenance: mode=max",
-            "subject-digest: ${{ steps.build.outputs.digest }}",
-            "push-to-registry: true",
-            "create-storage-record: false",
             '"dist/${DIST}.spdx.json"',
-        )
-        for fragment in required_fragments:
+        ):
             self.assertIn(fragment, text)
+
+    def test_ci_candidate_runs_only_after_all_main_gates(self):
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("candidate:", text)
+        self.assertIn("needs: [secret-scan, installer-macos-bash32, test]", text)
+        self.assertIn(
+            "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            text,
+        )
+        # Serialized per-SHA, never cancelled mid-flight.
+        self.assertIn("group: candidate-${{ github.sha }}", text)
+        self.assertIn("cancel-in-progress: false", text)
+        # Candidate publication follows every gate in file order.
+        self.assertLess(text.index("  test:"), text.index("  candidate:"))
+
+    def test_ci_candidate_tags_use_full_sha_and_exact_base_digest(self):
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn('echo "SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"', text)
+        for fragment in (
+            "ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}",
+            "ghcr.io/sindycate/cage/claude-code:candidate-${{ env.SHA }}",
+            "ghcr.io/sindycate/cage/codex:candidate-${{ env.SHA }}",
+        ):
+            self.assertIn(fragment, text)
+        # Leaves build from the exact (effective) base digest, never a mutable
+        # tag. The effective digest resolves to the verified existing candidate
+        # digest on reuse, or the freshly built digest otherwise.
+        leaf_base = (
+            "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}"
+        )
+        self.assertEqual(text.count(leaf_base), 2)
+        # Candidate images retain SBOM + max provenance and per-image attestations.
+        self.assertIn("sbom: true", text)
+        self.assertIn("provenance: mode=max", text)
+        for subject in (
+            "subject-name: ghcr.io/sindycate/cage/base",
+            "subject-name: ghcr.io/sindycate/cage/claude-code",
+            "subject-name: ghcr.io/sindycate/cage/codex",
+        ):
+            self.assertIn(subject, text)
+        # Manifest artifact is SHA-named, schema-typed, and uploaded.
+        self.assertIn("name: release-candidate-${{ env.SHA }}", text)
+        self.assertIn('"schema": "cage.release-candidate"', text)
+
+    def test_ci_candidates_are_write_once_verify_reuse_or_fail_closed(self):
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+        # A resolve step verifies an existing candidate before reuse and fails
+        # closed; it never merely prints a message and then overwrites the tag.
+        self.assertIn(
+            "Resolve existing candidates (verify and reuse) or fail closed", text
+        )
+        self.assertIn("id: resolve", text)
+        # Existing candidates are verified by attestation (OCI reference form),
+        # signer workflow, source SHA and ref before reuse.
+        self.assertIn(
+            'gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${digest}"',
+            text,
+        )
+        self.assertIn(
+            '--signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml"', text
+        )
+        self.assertIn('--source-digest "${SHA}"', text)
+        self.assertIn("--source-ref refs/heads/main", text)
+        # An existing candidate missing amd64/arm64 fails closed.
+        self.assertIn(
+            'echo "ERROR: existing candidate ${image} missing amd64/arm64 (${arches})"; exit 1',
+            text,
+        )
+        # Build and attest steps are conditionally skipped for reused images, so a
+        # CI rerun can never replace an immutable candidate with freshly resolved
+        # mutable dependencies.
+        for image_key in ("base", "claude", "codex"):
+            self.assertIn(
+                f"if: steps.resolve.outputs.{image_key}_exists != 'true'", text
+            )
+        # The ineffective no-op guard that printed then overwrote is removed.
+        self.assertNotIn(
+            'echo "Candidate $ref already exists; the release workflow will verify it."',
+            text,
+        )
+        # Effective digests are validated before the manifest is written.
+        self.assertIn("Resolve effective candidate digests", text)
+        self.assertIn(
+            '*) echo "ERROR: invalid candidate digest: ${value}"; exit 1 ;;', text
+        )
+        # Existence is decided by an authoritative registry status code (via the
+        # shared ghcr-status helper), never by free-form error text. Only a 404
+        # authorizes creation; 200 reuses; anything else fails closed.
+        self.assertIn(". .github/scripts/ghcr-status.sh", text)
+        self.assertIn('status="$(ghcr_status "$repo_path" "candidate-${SHA}")"', text)
+        self.assertIn("ambiguous registry status", text)
+        # The unsafe bare-substring not-found matching is gone.
+        self.assertNotIn('*"not found"*|*"manifest unknown"*|*"404"*)', text)
+        self.assertNotIn("inspect_ok=true", text)
+
+    def test_release_version_tag_checks_use_authoritative_status(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        # Both the gate and the promotion step source the shared helper and decide
+        # version-tag existence by the registry status code, not a failed inspect.
+        self.assertGreaterEqual(text.count(". .github/scripts/ghcr-status.sh"), 2)
+        self.assertIn('ghcr_status "sindycate/cage/${image}" "${VERSION}"', text)  # gate
+        self.assertIn('versioned_status="$(ghcr_status "$repo_path" "${VERSION}")"', text)  # promote
+        self.assertIn("ambiguous registry status", text)
+        # Promotion creates the immutable tag only on an authoritative 404.
+        self.assertIn("404)", text)
+        self.assertIn(
+            'docker buildx imagetools create -t "${repo}:${VERSION}" "${repo}@${DIGEST}"',
+            text,
+        )
+        # The ambiguous "any failed inspect means absent" pattern is gone: the
+        # version-tag checks no longer swallow inspect errors to infer absence.
+        self.assertNotIn('2>/dev/null)"; then', text)
+
+    def test_ghcr_status_helper_is_present_and_valid_bash(self):
+        helper = ROOT / ".github" / "scripts" / "ghcr-status.sh"
+        self.assertTrue(helper.is_file(), "shared ghcr-status.sh helper missing")
+        body = helper.read_text(encoding="utf-8")
+        self.assertIn("ghcr_status()", body)
+        self.assertIn("ghcr.io/token", body)
+        self.assertIn("'%{http_code}'", body)
+        result = subprocess.run(
+            ["bash", "-n", str(helper)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_creation_is_idempotent(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        # A rerun verifies an existing release's metadata AND asset contents and
+        # resumes only on an exact match; any difference fails closed instead of
+        # failing on "release already exists" or silently overwriting.
+        self.assertIn(
+            'if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then',
+            text,
+        )
+        # Release metadata is validated (not draft/prerelease, tag matches).
+        self.assertIn("--json isDraft --jq '.isDraft'", text)
+        self.assertIn("--json isPrerelease --jq '.isPrerelease'", text)
+        self.assertIn("unexpected metadata", text)
+        # Asset contents (not just names) are downloaded and digested; empty,
+        # truncated, or different files under the right names are rejected.
+        self.assertIn('gh release download "v${VERSION}"', text)
+        self.assertIn('sha256sum "${verify_dir}/${asset}"', text)
+        self.assertIn('sha256sum "dist/${asset}"', text)
+        self.assertIn("is missing or empty; refusing to treat as recovered", text)
+        self.assertIn("sha256/size mismatch", text)
+        self.assertIn(
+            "Release v${VERSION} already exists with identical metadata and assets; resuming.",
+            text,
+        )
+        self.assertIn(
+            "exists but its asset set differs; refusing to overwrite.",
+            text,
+        )
+        # Release creation still happens last and preserves generated notes.
+        self.assertIn("--generate-notes", text)
+
+    def test_release_gate_verifies_exact_ci_and_candidate_attestations(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        for fragment in (
+            "gate:",
+            "--workflow ci.yml --event push",
+            "--branch main",
+            "select(.headSha==",
+            "select(.conclusion==",
+            'gh run download "$RUN_ID"',
+            '--name "release-candidate-${GITHUB_SHA}"',
+            "gh attestation verify",
+            # gh attestation verify requires an oci:// image URI; a bare
+            # ghcr.io/... argument is interpreted as a local file path.
+            'gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${expected}"',
+            '--signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml"',
+            '--source-digest "$GITHUB_SHA"',
+            "--source-ref refs/heads/main",
+            'git cat-file -t "refs/tags/${TAG}"',
+        ):
+            self.assertIn(fragment, text)
+        # The gate refuses a conflicting existing version tag.
+        self.assertIn(
+            "version tag ${versioned} exists with digest ${existing} != ${expected}",
+            text,
+        )
+
+    def test_release_workflow_promotes_candidates_not_rebuilds(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        # Promotion retags exact digests; no rebuild, no QEMU.
+        self.assertIn("docker buildx imagetools create", text)
+        self.assertNotIn("docker/build-push-action@", text)
+        self.assertNotIn("setup-qemu-action@", text)
+        # Re-attest promoted digests from the release workflow.
+        self.assertIn("subject-digest: ${{ matrix.digest }}", text)
+        self.assertIn("push-to-registry: true", text)
+        self.assertIn("create-storage-record: false", text)
+
+    def test_release_workflow_orders_version_before_latest_and_release_last(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("promote:", text)
+        self.assertIn("latest:", text)
+        self.assertIn("release:", text)
+        # latest depends on all promote legs; release depends on package+promote+latest.
+        self.assertIn("needs: [gate, promote]", text)
+        self.assertIn("needs: [package, promote, latest]", text)
+        # Version-tag creation precedes the latest move, which precedes the release.
+        self.assertLess(
+            text.index("Create immutable version tag from exact candidate digest"),
+            text.index("Move latest to the promoted digest"),
+        )
+        self.assertLess(
+            text.index("Move latest to the promoted digest"),
+            text.index("Create GitHub Release"),
+        )
 
     def test_secret_scanning_is_pinned_narrow_and_release_blocking(self):
         installer = GITLEAKS_INSTALLER.read_text(encoding="utf-8")
@@ -78,21 +283,28 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         for fragment in required_installer_fragments:
             self.assertIn(fragment, installer)
 
-        for workflow in (CI_WORKFLOW, RELEASE_WORKFLOW):
-            text = workflow.read_text(encoding="utf-8")
-            for fragment in (
-                "secret-scan:",
-                "fetch-depth: 0",
-                ".github/scripts/install-gitleaks.sh",
-                '--log-opts="--all"',
-                "--redact=100",
-            ):
-                self.assertIn(fragment, text)
+        ci = CI_WORKFLOW.read_text(encoding="utf-8")
+        for fragment in (
+            "secret-scan:",
+            "fetch-depth: 0",
+            ".github/scripts/install-gitleaks.sh",
+            '--log-opts="--all"',
+            "--redact=100",
+        ):
+            self.assertIn(fragment, ci)
 
+        # The tag workflow no longer duplicates the full-history scan; its exact
+        # commit gate verifies the successful CI run that performed it. The
+        # archive-content scan stays because it validates the generated deliverable.
         release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("needs: [validate, installer-macos-bash32, secret-scan]", release)
+        self.assertIn("gate:", release)
+        self.assertIn("--workflow ci.yml --event push", release)
+        self.assertIn("needs: [gate]", release)
         self.assertIn("Scan source archive contents", release)
+        self.assertIn(".github/scripts/install-gitleaks.sh", release)
+        self.assertIn("--redact=100", release)
         self.assertIn('gitleaks" dir "$RUNNER_TEMP/release-scan"', release)
+        self.assertNotIn('--log-opts="--all"', release)
         self.assertLess(
             release.index("Scan source archive contents"),
             release.index("Generate source archive SBOM"),
@@ -248,6 +460,12 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             self.assertIn("cage-9.9.9/netgate/defaults.json", names)
             self.assertIn("cage-9.9.9/docs/hardening/WORKFLOW.md", names)
             self.assertNotIn("cage-9.9.9/.git", names)
+            # Maintainer-only release automation is excluded from the payload.
+            self.assertNotIn("cage-9.9.9/scripts/publish_release.py", names)
+            self.assertFalse(
+                any(name.startswith("cage-9.9.9/scripts") for name in names),
+                "release archive must not ship maintainer-only scripts/",
+            )
             modes = {member.name: member.mode for member in members}
             self.assertEqual(modes["cage-9.9.9/cage"], 0o755)
             self.assertEqual(modes["cage-9.9.9/cage-tui.py"], 0o755)
@@ -332,11 +550,15 @@ class SharedBaseImageTests(unittest.TestCase):
         self.assertIn("Dockerfile.base", container_target)
         self.assertIn('base_image = f"cage-base:', container_target)
 
-    def test_release_workflow_builds_base_image(self):
-        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertIn("docker-base:", workflow)
-        self.assertIn("Dockerfile.base", workflow)
-        self.assertIn("CAGE_BASE=ghcr.io/sindycate/cage/base:", workflow)
+    def test_candidate_base_built_in_ci_and_promoted_in_release(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("Dockerfile.base", ci)
+        self.assertIn("ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}", ci)
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        # Release promotes the exact base digest; it never rebuilds the base image.
+        self.assertNotIn("Dockerfile.base", release)
+        self.assertIn("docker buildx imagetools create", release)
+        self.assertIn("base_digest: ${{ steps.candidates.outputs.base_digest }}", release)
 
     def test_ci_builds_base_before_desktop_codex_smoke_image(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -348,6 +570,392 @@ class SharedBaseImageTests(unittest.TestCase):
         self.assertIn(base_build, workflow)
         self.assertIn(leaf_build, workflow)
         self.assertLess(workflow.index(base_build), workflow.index(leaf_build))
+
+
+
+def _resolve_run_block():
+    """Extract the candidate resolve step's ``run: |`` block as plain bash."""
+    lines = CI_WORKFLOW.read_text(encoding="utf-8").splitlines()
+    name_idx = next(
+        i for i, line in enumerate(lines) if "Resolve existing candidates" in line
+    )
+    run_idx = next(
+        i for i in range(name_idx, len(lines))
+        if re.match(r"^\s*run:\s*\|\s*$", lines[i])
+    )
+    indent = len(lines[run_idx]) - len(lines[run_idx].lstrip())
+    body = []
+    for line in lines[run_idx + 1:]:
+        if line.strip() == "":
+            body.append("")
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        body.append(line)
+    nonempty = [b for b in body if b.strip()]
+    pad = min(len(b) - len(b.lstrip()) for b in nonempty)
+    return "\n".join(b[pad:] if len(b) >= pad else "" for b in body)
+
+
+# Stub curl/docker/gh as bash *functions* prepended to the real workflow run
+# blocks. Functions are internal to the shell, so the test needs no executable
+# files and works even where the temp dir is mounted noexec. The workflow blocks
+# source .github/scripts/ghcr-status.sh, so these tests exercise the real
+# ghcr_status helper and the real status-code branching.
+
+CURL_FUNC = '''
+curl() {
+  local url="${@: -1}"
+  case "$url" in
+    *ghcr.io/token*)
+      case "${STUB_MODE:-}" in
+        token_notfound)
+          echo "curl: (22) The requested URL returned error: 404, not found in credential helper" >&2
+          return 22 ;;
+        *)
+          echo '{"token":"stub-token"}'
+          return 0 ;;
+      esac ;;
+    *"/v2/"*"/manifests/"*)
+      case "${STUB_MODE:-}" in
+        absent) printf '404'; return 0 ;;
+        present|present_match|present_conflict) printf '200'; return 0 ;;
+        unauthorized|unauthorized_sha404) printf '401'; return 0 ;;
+        denied) printf '403'; return 0 ;;
+        server) printf '503'; return 0 ;;
+        timeout) printf '000'; return 0 ;;
+        *) printf '200'; return 0 ;;
+      esac ;;
+  esac
+  return 0
+}
+'''
+
+# docker stub for the candidate resolve step (digest + platform inspection).
+DOCKER_FUNC_CANDIDATE = '''
+docker() {
+  if [ "$1" = "buildx" ] && [ "$2" = "imagetools" ] && [ "$3" = "inspect" ]; then
+    for a in "$@"; do
+      case "$a" in
+        *Manifest.Digest*) printf 'sha256:1111111111111111111111111111111111111111111111111111111111111111'; return 0 ;;
+        *Platform.Architecture*) printf 'amd64 arm64 '; return 0 ;;
+      esac
+    done
+    return 1
+  fi
+  return 0
+}
+'''
+
+# docker stub for the promotion step (inspect returns a controllable existing
+# digest; create records that it was invoked).
+DOCKER_FUNC_PROMOTE = '''
+docker() {
+  if [ "$1" = "buildx" ] && [ "$2" = "imagetools" ]; then
+    if [ "$3" = "inspect" ]; then
+      printf '%s' "${STUB_EXISTING_DIGEST:-}"
+      return 0
+    fi
+    if [ "$3" = "create" ]; then
+      echo "CREATE_CALLED $*" >> "${CREATE_MARKER}"
+      return 0
+    fi
+  fi
+  return 0
+}
+'''
+
+GH_FUNC = '''
+gh() {
+  if [ "$1" = "attestation" ] && [ "$2" = "verify" ]; then
+    if [ "${STUB_ATTEST:-}" = "fail" ]; then
+      echo "attestation verification failed" >&2
+      return 1
+    fi
+    echo "verified"
+    return 0
+  fi
+  return 0
+}
+'''
+
+
+def _extract_run_block(workflow_path, step_name_substr):
+    """Extract a step's ``run: |`` block from a workflow as plain bash."""
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    name_idx = next(i for i, l in enumerate(lines) if step_name_substr in l)
+    run_idx = next(
+        i for i in range(name_idx, len(lines))
+        if re.match(r"^\s*run:\s*\|\s*$", lines[i])
+    )
+    indent = len(lines[run_idx]) - len(lines[run_idx].lstrip())
+    body = []
+    for line in lines[run_idx + 1:]:
+        if line.strip() == "":
+            body.append("")
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        body.append(line)
+    nonempty = [b for b in body if b.strip()]
+    pad = min(len(b) - len(b.lstrip()) for b in nonempty)
+    return "\n".join(b[pad:] if len(b) >= pad else "" for b in body)
+
+
+class CandidateResolveFailClosedTests(unittest.TestCase):
+    """Execute the real candidate resolve block against stubbed curl/docker/gh.
+
+    Existence is decided by the registry HTTP status code (via ghcr_status), so
+    only an authoritative 404 authorizes candidate creation; 401/403, timeout,
+    and 5xx fail closed. Regression cases cover a SHA containing "404" and a
+    credential-helper error containing "not found".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(CI_WORKFLOW, "Resolve existing candidates")
+        assert ". .github/scripts/ghcr-status.sh" in cls.script
+        assert "ghcr_status" in cls.script
+
+    def _run_resolve(self, mode, attest="ok", sha=None):
+        base = Path(tempfile.mkdtemp(prefix="resolve-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        github_output = base / "github_output.txt"
+        github_output.write_text("", encoding="utf-8")
+        script_file = base / "resolve.sh"
+        script_file.write_text(
+            CURL_FUNC + DOCKER_FUNC_CANDIDATE + GH_FUNC + "\n" + self.script,
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["SHA"] = sha or ("a" * 40)
+        env["GITHUB_REPOSITORY"] = "Sindycate/cage"
+        env["GITHUB_OUTPUT"] = str(github_output)
+        env["GITHUB_ACTOR"] = "stub-actor"
+        env["GH_TOKEN"] = "dummy-token"
+        env["STUB_MODE"] = mode
+        env["STUB_ATTEST"] = attest
+        result = subprocess.run(
+            ["bash", str(script_file)], env=env, capture_output=True, text=True,
+            cwd=str(ROOT),
+        )
+        outputs = {}
+        for line in github_output.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        return result, outputs
+
+    def test_authoritative_404_authorizes_creation(self):
+        result, outputs = self._run_resolve("absent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key in ("base", "claude", "codex"):
+            self.assertEqual(outputs.get(f"{key}_exists"), "false", outputs)
+
+    def test_200_verified_candidate_is_reused(self):
+        result, outputs = self._run_resolve("present")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key in ("base", "claude", "codex"):
+            self.assertEqual(outputs.get(f"{key}_exists"), "true", outputs)
+            self.assertTrue(outputs.get(f"{key}_digest", "").startswith("sha256:"))
+
+    def test_401_unauthorized_fails_closed(self):
+        result, outputs = self._run_resolve("unauthorized")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (401)", result.stderr)
+        self.assertNotEqual(outputs.get("base_exists"), "false")
+
+    def test_403_denied_fails_closed(self):
+        result, _ = self._run_resolve("denied")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (403)", result.stderr)
+
+    def test_registry_5xx_fails_closed(self):
+        result, _ = self._run_resolve("server")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (503)", result.stderr)
+
+    def test_timeout_fails_closed(self):
+        result, _ = self._run_resolve("timeout")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (000)", result.stderr)
+
+    def test_401_with_sha_containing_404_still_fails_closed(self):
+        # False-positive regression: a bare "404" substring match would treat the
+        # "404" inside this SHA as a not-found and authorize creation. The
+        # status-code mechanism must fail closed on the 401 regardless.
+        sha = "404" + "a" * 37
+        result, outputs = self._run_resolve("unauthorized_sha404", sha=sha)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (401)", result.stderr)
+        self.assertNotEqual(outputs.get("base_exists"), "false")
+
+    def test_credential_helper_not_found_fails_closed(self):
+        # A credential-helper/network error containing "not found" must not be
+        # mistaken for an absent candidate; ghcr_status reports 000 -> fail closed.
+        result, outputs = self._run_resolve("token_notfound")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (000)", result.stderr)
+        self.assertNotEqual(outputs.get("base_exists"), "false")
+
+    def test_existing_but_unverifiable_candidate_fails_closed(self):
+        result, _ = self._run_resolve("present", attest="fail")
+        self.assertEqual(result.returncode, 1)
+
+
+class VersionTagFailClosedTests(unittest.TestCase):
+    """Execute the real promotion block against stubbed curl/docker.
+
+    An immutable version tag is created only on an authoritative 404; a matching
+    digest is resumable success; a conflicting digest or any ambiguous registry
+    failure (401/403/timeout/5xx) fails closed and never reaches imagetools create.
+    """
+
+    DIGEST = "sha256:" + "1" * 64
+    OTHER = "sha256:" + "9" * 64
+
+    @classmethod
+    def setUpClass(cls):
+        block = _extract_run_block(RELEASE_WORKFLOW, "Create immutable version tag")
+        assert ". .github/scripts/ghcr-status.sh" in block
+        # Concrete matrix values so the extracted block is runnable.
+        cls.script = block.replace("${{ matrix.image }}", "base")
+
+    def _run_promote(self, mode, existing_digest):
+        base = Path(tempfile.mkdtemp(prefix="promote-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        marker = base / "create_marker.txt"
+        marker.write_text("", encoding="utf-8")
+        script_file = base / "promote.sh"
+        script_file.write_text(
+            CURL_FUNC + DOCKER_FUNC_PROMOTE + "\n" + self.script,
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["VERSION"] = "0.26.7"
+        env["DIGEST"] = self.DIGEST
+        env["GITHUB_ACTOR"] = "stub-actor"
+        env["GH_TOKEN"] = "dummy-token"
+        env["STUB_MODE"] = mode
+        env["STUB_EXISTING_DIGEST"] = existing_digest
+        env["CREATE_MARKER"] = str(marker)
+        result = subprocess.run(
+            ["bash", str(script_file)], env=env, capture_output=True, text=True,
+            cwd=str(ROOT),
+        )
+        create_called = "CREATE_CALLED" in marker.read_text(encoding="utf-8")
+        return result, create_called
+
+    def test_authoritative_404_creates_version_tag(self):
+        result, created = self._run_promote("absent", "")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(created, "imagetools create must run on authoritative 404")
+
+    def test_matching_digest_is_resumable_and_does_not_create(self):
+        result, created = self._run_promote("present_match", self.DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created, "must not recreate an identical version tag")
+        self.assertIn("already points to", result.stdout)
+
+    def test_conflicting_digest_fails_closed_without_create(self):
+        result, created = self._run_promote("present_conflict", self.OTHER)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created)
+        self.assertIn("exists with digest", result.stderr)
+
+    def test_401_fails_closed_without_create(self):
+        result, created = self._run_promote("unauthorized", "")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created, "a 401 must never reach imagetools create")
+        self.assertIn("ambiguous registry status (401)", result.stderr)
+
+    def test_403_fails_closed_without_create(self):
+        result, created = self._run_promote("denied", "")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created)
+
+    def test_5xx_fails_closed_without_create(self):
+        result, created = self._run_promote("server", "")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created, "a registry outage must never reach imagetools create")
+        self.assertIn("ambiguous registry status (503)", result.stderr)
+
+    def test_timeout_fails_closed_without_create(self):
+        result, created = self._run_promote("timeout", "")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created)
+
+
+
+class GhcrStatusCurlOptionsTests(unittest.TestCase):
+    """Validate the real ghcr_status helper's curl invocations against the real
+    curl argument parser. A fake runner would accept the invalid `--no-config`;
+    this executes the helper and probes each captured curl command for real."""
+
+    def test_ghcr_status_curl_options_are_accepted_by_real_curl(self):
+        if shutil.which("curl") is None:
+            self.skipTest("curl not installed")
+        helper = (ROOT / ".github" / "scripts" / "ghcr-status.sh").read_text(encoding="utf-8")
+        base = Path(tempfile.mkdtemp(prefix="ghcr-curl-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        args_file = base / "curl_args.txt"
+        args_file.write_text("", encoding="utf-8")
+        # Recording curl stub: logs each call's args (one per line, --END-- between
+        # calls) and returns values so ghcr_status reaches both curl invocations.
+        recording_curl = r"""
+curl() {
+  { for a in "$@"; do printf '%s\n' "$a"; done; printf -- '--END--\n'; } >> "ARGS_FILE_PLACEHOLDER"
+  local url="${@: -1}"
+  case "$url" in
+    *ghcr.io/token*) echo '{"token":"stub-token"}'; return 0 ;;
+    *) printf '200'; return 0 ;;
+  esac
+}
+""".replace("ARGS_FILE_PLACEHOLDER", str(args_file))
+        script = recording_curl + helper + "\nghcr_status sindycate/cage/base candidate-abc\n"
+        script_file = base / "probe.sh"
+        script_file.write_text(script, encoding="utf-8")
+        env = dict(os.environ)
+        env["GITHUB_ACTOR"] = "stub-actor"
+        env["GH_TOKEN"] = "dummy-token"
+        result = subprocess.run(
+            ["bash", str(script_file)], env=env, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "200")
+
+        # Parse the recorded curl calls.
+        calls = []
+        current = []
+        for line in args_file.read_text(encoding="utf-8").splitlines():
+            if line == "--END--":
+                if current:
+                    calls.append(current)
+                current = []
+            else:
+                current.append(line)
+        if current:
+            calls.append(current)
+        self.assertGreaterEqual(len(calls), 2, "expected token + manifest curl calls")
+
+        # Control: real curl must reject the invalid option.
+        control = subprocess.run(
+            ["curl", "--no-config", "-fsS", "http://127.0.0.1:1/"],
+            capture_output=True, text=True,
+        )
+        self.assertIn("curl: option", control.stderr)
+
+        # Each recorded curl invocation's options must be accepted by real curl.
+        # The recording function captures curl's arguments (the command name is
+        # stripped), so argv[0] is the first option and argv[-1] is the URL.
+        for argv in calls:
+            self.assertEqual(argv[0], "-q", f"-q must be the first option: {argv}")
+            probe = ["curl"] + argv[:-1] + ["http://127.0.0.1:1/"]
+            r = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+            self.assertNotIn(
+                "curl: option", r.stderr,
+                f"curl rejected options in {argv}: {r.stderr}",
+            )
 
 
 if __name__ == "__main__":

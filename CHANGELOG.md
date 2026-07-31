@@ -3,9 +3,59 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
-## Unreleased
+## 0.26.7 — 2026-07-31
 
-No changes yet.
+- add maintainer-only, deterministic, resumable release automation
+  (`python3 scripts/publish_release.py`, with `--dry-run` and `--json`):
+  preflight validation, one explicit confirmation, automatic phase resume,
+  exact-SHA workflow selection, immutable annotated tagging, and independent
+  public-release verification; private state and logs live under the
+  per-worktree Git dir behind an exclusive `fcntl.flock` lock;
+- publish immutable `candidate-<full-commit-sha>` images (base, claude-code,
+  codex) from `ci.yml` on a successful `main` push after every existing gate
+  passes, with BuildKit SBOM, `provenance: mode=max`, signed GitHub
+  provenance attestations, and a `release-candidate-<SHA>` manifest artifact;
+  candidate tags are public, write-once, serialized per SHA, and never
+  referenced by Cage's pull logic;
+- refactor `release.yml` into four stages — exact-commit gate, source package,
+  image promotion, and GitHub Release — so the tag workflow verifies the exact
+  CI run and candidate attestations and promotes exact candidate digests to the
+  version and `latest` tags instead of rebuilding; the duplicated
+  Python/macOS/Docker/history-scan jobs are replaced by the verified CI run
+  while the archive-content secret scan is retained;
+- fix the release automation's curl usage: `curl --no-config` is not a valid
+  option and made every GHCR registry probe and anonymous release-asset download
+  fail; use first-position `-q` (`--disable`) in the shared `ghcr-status.sh`
+  helper and the publish command's anonymous downloads, with regression tests
+  that drive the real curl argument parser;
+- close the remaining fail-closed gaps: candidate and immutable-version-tag
+  existence is now decided by an authoritative GHCR registry status code (new
+  shared `.github/scripts/ghcr-status.sh`: 200 present, 404 absent, anything
+  else fails closed) instead of parsing `imagetools inspect` error text or exit
+  codes, so a commit SHA containing "404", a credential-helper/network "not
+  found", or a registry 401/403/timeout/5xx can never be mistaken for an absent
+  tag and authorize overwriting an immutable candidate or version tag;
+- further harden after a second review: commit reconstruction restores
+  canonical, umask-independent permission bits (executables stay executable);
+  the candidate resolve step fails closed on ambiguous registry errors
+  (401/403, timeout, 5xx) so only an authoritative not-found authorizes
+  candidate creation; and the idempotent release rerun validates release
+  metadata and compares each existing asset's size and SHA-256 against the
+  generated artifact instead of trusting filenames alone;
+- harden that automation and those workflows after review: candidate
+  publication is now truly write-once (an existing candidate is verified by
+  platform and `ci.yml` attestation for the exact SHA and reused, or fails
+  closed, with builds conditionally skipped so a rerun never overwrites an
+  immutable candidate); image attestation verification uses the required
+  `oci://` reference form; public verification performs an anonymous
+  `docker pull` (native-platform layers) and runs the publicly fetched installer
+  with curl configuration disabled and all credentials stripped; GitHub Release
+  creation is idempotent; the reproducibility check rebuilds from the recorded
+  commit via read-only `git archive`; and malformed public artifacts become
+  structured failed checks (with dependent checks skipped) instead of
+  tracebacks;
+- this is maintainer tooling only: it is not added to the `cage` CLI and is
+  excluded from the release archive. There is no user configuration migration.
 
 ## 0.26.6 — 2026-07-30
 
