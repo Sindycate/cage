@@ -28,6 +28,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -71,6 +74,15 @@ MAX_LOG_TAIL_CHARS = 4000
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?$")
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+GHCR_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
+MAX_REGISTRY_RESPONSE_BYTES = 4 * 1024 * 1024
 
 _SECRET_PATTERNS = (
     re.compile(r"gho_[A-Za-z0-9]{20,}"),
@@ -86,6 +98,13 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)token\s*[:=]\s*['\"]?[A-Za-z0-9._\-]{16,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
+
+
+class _RejectRegistryRedirects(urllib.request.HTTPRedirectHandler):
+    """Fail closed instead of forwarding the short-lived bearer token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise VerificationError(f"GHCR registry request redirected with HTTP {code}")
 
 
 def redact(text: str) -> str:
@@ -152,6 +171,82 @@ def anonymous_env(base_env: dict, **overrides: str) -> dict:
     env = {key: value for key, value in base_env.items() if key not in CREDENTIAL_ENV_VARS}
     env.update(overrides)
     return env
+
+
+def inspect_public_ghcr_manifest(ref: str, *, opener=None) -> dict:
+    """Fetch a public GHCR manifest index without Docker or ambient credentials.
+
+    GHCR's response header is the authoritative digest of the requested tag; the
+    response body supplies the platform descriptors. The registry token is
+    requested anonymously and retained only in memory for this call.
+    """
+    prefix = "ghcr.io/"
+    if not ref.startswith(prefix):
+        raise VerificationError(f"unsupported registry reference: {ref}")
+    remainder = ref[len(prefix) :]
+    if "@" in remainder:
+        repository, reference = remainder.rsplit("@", 1)
+    else:
+        repository, separator, reference = remainder.rpartition(":")
+        if not separator:
+            raise VerificationError(f"registry reference has no tag or digest: {ref}")
+    if (
+        not repository
+        or not reference
+        or any(part in ("", ".", "..") for part in repository.split("/"))
+    ):
+        raise VerificationError(f"invalid registry reference: {ref}")
+
+    client = opener or urllib.request.build_opener(_RejectRegistryRedirects())
+
+    def read_json(request: urllib.request.Request, label: str) -> tuple[dict, object]:
+        try:
+            response = client.open(request, timeout=30)
+            with response:
+                payload = response.read(MAX_REGISTRY_RESPONSE_BYTES + 1)
+                if len(payload) > MAX_REGISTRY_RESPONSE_BYTES:
+                    raise VerificationError(f"{label} response exceeds size limit")
+                try:
+                    value = json.loads(payload)
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise VerificationError(f"could not parse {label} JSON") from exc
+                if not isinstance(value, dict):
+                    raise VerificationError(f"invalid {label} JSON object")
+                return value, response.headers
+        except VerificationError:
+            raise
+        except urllib.error.HTTPError as exc:
+            raise VerificationError(f"{label} returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise VerificationError(f"{label} request failed: {bounded(str(reason))}") from exc
+
+    token_query = urllib.parse.urlencode(
+        {"service": "ghcr.io", "scope": f"repository:{repository}:pull"}
+    )
+    token_request = urllib.request.Request(
+        f"https://ghcr.io/token?{token_query}",
+        headers={"Accept": "application/json"},
+    )
+    token_document, _ = read_json(token_request, "GHCR token")
+    token = token_document.get("token") or token_document.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise VerificationError("GHCR token response did not contain a token")
+
+    encoded_reference = urllib.parse.quote(reference, safe=":")
+    manifest_request = urllib.request.Request(
+        f"https://ghcr.io/v2/{repository}/manifests/{encoded_reference}",
+        headers={
+            "Accept": GHCR_MANIFEST_ACCEPT,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    manifest, headers = read_json(manifest_request, f"GHCR manifest for {ref}")
+    digest = headers.get("Docker-Content-Digest")
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+        raise VerificationError(f"GHCR manifest for {ref} omitted a valid content digest")
+    manifest["digest"] = digest
+    return manifest
 
 
 def safe_extract_tar(archive_path: Path, dest: Path) -> None:
@@ -389,6 +484,7 @@ class Orchestrator:
         clock=None,
         sleeper=None,
         prompter=None,
+        image_inspector: Optional[Callable[[str], dict]] = None,
         out: Optional[Callable[[str], None]] = None,
         err: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -397,6 +493,7 @@ class Orchestrator:
         self.clock = clock or RealClock()
         self.sleeper = sleeper or RealSleeper()
         self.prompter = prompter or StdinPrompter()
+        self.image_inspector = image_inspector or inspect_public_ghcr_manifest
         self._out = out or (lambda line: sys.stdout.write(line + "\n"))
         self._err = err or (lambda line: sys.stderr.write(line + "\n"))
         self.repo_root = Path(options.repo_root).resolve() if options.repo_root else Path.cwd()
@@ -1240,24 +1337,18 @@ class Orchestrator:
         return f"cage-{self.context.version}.spdx.json"
 
     def _inspect_image(self, ref: str, env: Optional[dict] = None) -> dict:
-        result = self.docker(
-            "buildx",
-            "imagetools",
-            "inspect",
-            ref,
-            "--format",
-            "{{json .Manifest}}",
-            env=env,
-            check=False,
-        )
-        if not result.ok:
-            raise VerificationError(f"could not inspect {ref}: {bounded(result.stderr)}")
+        # The Registry API provides the top-level digest and platform index
+        # portably. Do not require the optional Docker Buildx CLI plugin here.
+        del env  # retained in the private signature for compatibility
         try:
-            return json.loads(result.stdout)
-        except ValueError as exc:
-            raise VerificationError(
-                f"could not parse manifest for {ref}: {bounded(result.stdout)}"
-            ) from exc
+            manifest = self.image_inspector(ref)
+        except VerificationError:
+            raise
+        except Exception as exc:
+            raise VerificationError(f"could not inspect {ref}: {bounded(str(exc))}") from exc
+        if not isinstance(manifest, dict):
+            raise VerificationError(f"could not inspect {ref}: invalid manifest object")
+        return manifest
 
     def _release_json(self) -> dict:
         return self.gh_json(
@@ -1538,7 +1629,10 @@ class Orchestrator:
             bin_dir = root / "bin"
             curl_home = root / "curlhome"
             gh_config = root / "ghconfig"
-            for path in (home, install_dir, bin_dir, curl_home, gh_config):
+            # A first-time install requires CAGE_INSTALL_DIR not to exist. The
+            # installer creates it transactionally and correctly refuses an
+            # existing unrecognized directory.
+            for path in (home, bin_dir, curl_home, gh_config):
                 path.mkdir()
             installer_url = (
                 f"https://raw.githubusercontent.com/{REPOSITORY}/"
@@ -1568,8 +1662,11 @@ class Orchestrator:
                 [REQUIRED_BASH, str(installer)], cwd=root, env=env
             )
             if not result.ok:
+                diagnostic = "\n".join(
+                    part for part in (result.stdout.strip(), result.stderr.strip()) if part
+                )
                 raise VerificationError(
-                    f"public installer failed:\n{bounded(result.stdout or result.stderr)}"
+                    f"public installer failed:\n{bounded(diagnostic)}"
                 )
             version_result = self.runner.run(
                 [str(install_dir / "cage"), "--version"], env=env

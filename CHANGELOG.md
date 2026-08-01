@@ -3,6 +3,16 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.26.9 — 2026-08-01
+
+- make the maintainer release verifier portable across Docker installations by
+  reading public GHCR index digests and platforms from the Registry API instead
+  of requiring the optional Docker Buildx plugin;
+- exercise the public installer with a genuinely absent destination directory,
+  matching a first-time install while retaining the installer's refusal to
+  replace an unrecognized directory, and preserve both stdout and stderr in
+  bounded failure diagnostics.
+
 ## 0.26.8 — 2026-07-31
 
 - verify annotated release tags from the remote direct and peeled refs instead

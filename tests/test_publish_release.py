@@ -70,6 +70,33 @@ class FakePrompter:
         return self.answer
 
 
+class FakeHttpResponse:
+    def __init__(self, document, headers=None):
+        self.payload = json.dumps(document).encode("utf-8")
+        self.headers = headers or {}
+
+    def read(self, size=-1):
+        return self.payload[:size] if size >= 0 else self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakeHttpOpener:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append((request, timeout))
+        if not self.responses:
+            raise AssertionError("unexpected registry request")
+        return self.responses.pop(0)
+
+
 class FakeRunner:
     """Scripted command runner. First matching handler wins."""
 
@@ -268,6 +295,8 @@ class Scenario:
         }
         self.archive_bytes = make_archive_bytes(version)
         self.archive_digest = __import__("hashlib").sha256(self.archive_bytes).hexdigest()
+        self.image_inspect_calls = []
+        self.install_dir_preexisted = None
 
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
@@ -319,6 +348,10 @@ class Scenario:
                     }
                 )
         return json.dumps({"digest": "sha256:" + "0" * 64, "manifests": []})
+
+    def inspect_image(self, ref):
+        self.image_inspect_calls.append(ref)
+        return json.loads(self.image_manifest_json(ref))
 
     def _remote_tag_listing(self):
         if self.remote_tag is None:
@@ -517,6 +550,9 @@ class Scenario:
             env = r.last_env or {}
             install_dir = env.get("CAGE_INSTALL_DIR")
             if install_dir:
+                self.install_dir_preexisted = Path(install_dir).exists()
+                if self.install_dir_preexisted:
+                    return R("", code=1, err="refusing existing install directory")
                 import io
                 import tarfile
 
@@ -561,6 +597,7 @@ def make_orch(scenario, *, dry_run=False, json_output=False, answer="", run_loca
         clock=clock,
         sleeper=sleeper,
         prompter=prompter,
+        image_inspector=scenario.inspect_image,
         out=out_lines.append,
         err=err_lines.append,
     )
@@ -579,6 +616,53 @@ class PublishReleaseTestCase(unittest.TestCase):
 
     def tearDown(self):
         pr.shutil.which = self._real_which
+
+
+class PublicGhcrManifestTests(unittest.TestCase):
+    def test_anonymous_registry_probe_returns_authoritative_digest_and_platforms(self):
+        digest = "sha256:" + "a" * 64
+        opener = FakeHttpOpener(
+            FakeHttpResponse({"token": "short-lived-public-token"}),
+            FakeHttpResponse(
+                {
+                    "schemaVersion": 2,
+                    "manifests": [
+                        {"platform": {"os": "linux", "architecture": "amd64"}},
+                        {"platform": {"os": "linux", "architecture": "arm64"}},
+                    ],
+                },
+                {"Docker-Content-Digest": digest},
+            ),
+        )
+
+        manifest = pr.inspect_public_ghcr_manifest(
+            "ghcr.io/sindycate/cage/base:0.26.9", opener=opener
+        )
+
+        self.assertEqual(manifest["digest"], digest)
+        self.assertEqual(len(opener.requests), 2)
+        token_request = opener.requests[0][0]
+        manifest_request = opener.requests[1][0]
+        self.assertIn("scope=repository%3Asindycate%2Fcage%2Fbase%3Apull", token_request.full_url)
+        self.assertIsNone(token_request.get_header("Authorization"))
+        self.assertEqual(
+            manifest_request.get_header("Authorization"),
+            "Bearer short-lived-public-token",
+        )
+        self.assertEqual(manifest_request.get_header("Accept"), pr.GHCR_MANIFEST_ACCEPT)
+        self.assertEqual(opener.requests[0][1], 30)
+        self.assertEqual(opener.requests[1][1], 30)
+
+    def test_registry_probe_fails_closed_without_authoritative_digest(self):
+        opener = FakeHttpOpener(
+            FakeHttpResponse({"token": "short-lived-public-token"}),
+            FakeHttpResponse({"schemaVersion": 2, "manifests": []}),
+        )
+        with self.assertRaises(pr.VerificationError) as ctx:
+            pr.inspect_public_ghcr_manifest(
+                "ghcr.io/sindycate/cage/base:0.26.9", opener=opener
+            )
+        self.assertIn("content digest", str(ctx.exception))
 
 
 
@@ -1126,6 +1210,10 @@ class ReviewFindingTests(PublishReleaseTestCase):
             (Path(td) / orch._archive_name()).write_bytes(scenario.archive_bytes)
             detail = orch._verify_public_installer()
         self.assertIn("public installer", detail)
+        self.assertFalse(
+            scenario.install_dir_preexisted,
+            "public installer destination must not be pre-created",
+        )
 
         fetch_calls = [
             c for c in scenario.runner.commands("curl")
@@ -1162,6 +1250,37 @@ class ReviewFindingTests(PublishReleaseTestCase):
         self.assertIn("GH_CONFIG_DIR", env)
         self.assertIn("CURL_HOME", env)
         self.assertEqual(env.get("CAGE_VERSION"), scenario.version)
+
+    def test_image_verification_does_not_require_docker_buildx(self):
+        scenario = Scenario(pushed=True)
+        orch = self._prepared_orch(scenario)
+        orch._verify_image_version_digests()
+        orch._verify_image_latest_digests()
+        orch._verify_image_platforms()
+
+        self.assertEqual(len(scenario.image_inspect_calls), len(pr.IMAGE_NAMES) * 3)
+        self.assertFalse(
+            any(call[:2] == ["docker", "buildx"] for call in scenario.runner.calls),
+            "public image verification must not require the optional buildx plugin",
+        )
+
+    def test_public_installer_failure_preserves_stdout_and_stderr(self):
+        scenario = Scenario(pushed=True)
+        scenario.runner.handlers.insert(
+            0,
+            (
+                lambda c: c and c[0] == "/bin/bash" and any("install.sh" in p for p in c),
+                R("installer stdout", code=1, err="installer stderr"),
+            ),
+        )
+        orch = self._prepared_orch(scenario)
+        with tempfile.TemporaryDirectory() as td:
+            orch._verify_dir = Path(td)
+            (Path(td) / orch._archive_name()).write_bytes(scenario.archive_bytes)
+            with self.assertRaises(pr.VerificationError) as ctx:
+                orch._verify_public_installer()
+        self.assertIn("installer stdout", str(ctx.exception))
+        self.assertIn("installer stderr", str(ctx.exception))
 
     # [P1] malformed public artifacts must become structured failed checks, not
     # tracebacks. A malformed SPDX delivered through an otherwise successful
