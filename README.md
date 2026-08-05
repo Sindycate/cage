@@ -623,7 +623,13 @@ python3 scripts/publish_release.py --json     # one JSON result object on stdout
 `scripts/publish_release.py` is maintainer tooling. It is not part of the
 end-user `cage` CLI and is excluded from the release archive. It uses only the
 Python 3.11 standard library and requires `git`, `gh`, `docker`, `curl`, and
-`/bin/bash`.
+`/bin/bash`. The script owns the only terminal read (the explicit confirmation):
+all child commands receive closed stdin in a new session with no controlling
+TTY, so a pseudo-TTY cannot open a nested Cage, credential, or editor prompt.
+External commands and public checks have fixed timeouts that terminate their
+detached process groups; safe public reads retry with bounded, visible backoff,
+and interrupted or failed attempts retain redacted diagnostics and cumulative
+phase timings in the private resume journal.
 
 What it does, in order:
 
@@ -664,6 +670,27 @@ attestations and *promotes* them to the version and `latest` tags — it never
 rebuilds images or resolves mutable package sources. There is intentionally no
 cross-version BuildKit cache: Cage resolves current packages on each release.
 
+The first live run of this design was `v0.26.9` (commit
+`a5e6cbb196d1a0a09f67a3aaea23a3250b07649d`). The measurements distinguish
+the cold candidate build from the authorization-time tag path:
+
+| Measurement | `v0.26.2` baseline | `v0.26.9` candidate flow |
+|---|---:|---:|
+| Cold multi-arch build/publish stage | about 12m30s tag path | 9m58s candidate job (12m14s complete CI) |
+| Exact-SHA reuse authorization path | none; tag path rebuilt | 1m48s tag to public |
+| Cross-run warm BuildKit cache | not configured (N/A) | not configured (N/A) |
+| Branch CI start to public release | preceding CI not recorded | 14m15s |
+
+The comparable tag-to-public path fell from about 750 seconds to 108 seconds
+(about 86%, or 6.9x faster). This is not a warm BuildKit-cache result: the
+multi-architecture images are still built cold once in exact-commit branch CI,
+then the release workflow promotes those immutable, attested digests. The
+trade-off is that authorization-time publication is short and deterministic,
+while the expensive build moves earlier rather than disappearing. Evidence:
+[`v0.26.9` CI](https://github.com/Sindycate/cage/actions/runs/30712870965),
+[`v0.26.9` release](https://github.com/Sindycate/cage/actions/runs/30713346455),
+and [issue #6](https://github.com/Sindycate/cage/issues/6).
+
 ### Public verification
 
 After the release workflow succeeds, the command independently verifies that
@@ -671,15 +698,17 @@ the GitHub Release is public (non-draft, non-prerelease) with exactly the
 archive, checksum, and SPDX assets; that the assets download anonymously and
 the checksum passes; that the SPDX parses and identifies the archive; that
 rebuilding the archive from the recorded commit is byte-identical; that source
-and image attestations verify against the exact SHA and release workflow; that
+provenance, source SPDX SBOM, and image attestations verify against the exact
+SHA and release workflow; that
 the version and `latest` image tags resolve to the candidate digests with
 `amd64`+`arm64` platforms; that a fresh anonymous Docker credential dir can
 pull the images (exercising native-platform layer downloads); and that the
 public installer — fetched anonymously from the published tag with curl
 configuration disabled and all credentials stripped, not from the local
 checkout — installs into temporary directories and reports the right version.
-It never touches the maintainer's real Cage installation, configuration, Docker
-volumes, SSH config, or Codex state.
+It records full SHA-256 digests and sizes for all downloaded release assets in
+the human and JSON summaries. It never touches the maintainer's real Cage
+installation, configuration, Docker volumes, SSH config, or Codex state.
 
 Manual `git push` / `git tag` / `gh release create` remain available only as
 emergency recovery; the release workflow's exact-commit gate protects manual

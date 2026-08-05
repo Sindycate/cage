@@ -3,6 +3,70 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-05 — issue #6 acceptance hardening and live timing evidence
+
+Checkpoint: remaining locally actionable issue #6 gaps implemented for the
+0.27.2 release candidate; publication and issue closure remain separate gates
+
+The first live candidate-promotion release (`v0.26.9`, commit `a5e6cbb`) proved
+the intended authorization-time speedup but also exposed three unattended-run
+defects: a child command inherited the publisher's pseudo-TTY and opened Cage's
+interactive launcher, public GHCR reads observed transient `latest`/platform
+state, and an anonymous Docker pull could stall without a deadline. The
+publisher now gives every child closed stdin, bounds external commands, retries
+only idempotent public reads with fixed visible backoff, and gives anonymous
+pulls two attempts inside both per-attempt and whole-check deadlines.
+
+Resume evidence is now durable rather than best-effort display state. Matching
+schema-v1/v2 journals restore only cumulative phase durations, prior redacted
+checks, and observed asset digests; Git refs, workflow conclusions, phases, and
+candidate digests are still reconstructed from authoritative remote state.
+Failed attempts add their duration in a `finally` path. Each check is persisted
+as it completes, and schema-v2 success/error JSON includes bounded redacted
+details, per-phase timing, full SHA-256 plus size for all three public assets,
+workflow URLs, and image digests. Public verification now separately proves the
+source provenance and SPDX v2.3 SBOM attestations.
+
+Live timing evidence (UTC, from GitHub run/release metadata):
+
+- issue #6 baseline: `v0.26.2` tag to public release was approximately 12m30s;
+- `v0.26.9` exact-commit CI run 30712870965: 18:35:26–18:47:40, 12m14s,
+  including the 9m58s cold multi-architecture candidate job;
+- annotated tag creation to public release: 18:47:53–18:49:41, 1m48s;
+- complete main-CI-start to public release: 18:35:26–18:49:41, 14m15s;
+- the comparable tag path improved from about 750s to 108s: an 85.6% reduction
+  (approximately 6.9x faster).
+
+This is exact-SHA build-result reuse, not a cross-version warm BuildKit cache.
+The expensive build moved into protected branch CI and the tag workflow became
+promotion-only; total cold push-to-public time did not become shorter. That
+trade-off preserves fresh dependency resolution, immutable candidate digests,
+SBOM/provenance generation, exact-workflow attestations, and all existing
+security/reproducibility gates.
+
+Local regression evidence currently covers real pseudo-TTY isolation, timeout
+diagnostics with partial output, transient and persistent registry faults,
+`latest`/platform propagation, bounded anonymous-pull retry, v1 journal
+compatibility, identity-mismatched journal rejection, cumulative failed-phase
+timing, redacted JSON diagnostics, full asset digests, and both source
+attestation types. No commit, push, tag, release, issue edit, or GHCR mutation
+has occurred in this checkpoint.
+
+Validation evidence:
+
+- focused publisher/supply-chain suite: `127 passed`;
+- complete Python 3.12 suite: `475 passed, 8 skipped`;
+- complete Python 3.11 suite: `475 passed, 8 skipped` (isolated reuse of the
+  installed pure-Python pytest stack with third-party plugin autoload disabled);
+- opt-in real-Docker suite: `7 passed, 1 skipped`;
+- a clean temporary release commit ran the real publisher under a controlling
+  pseudo-TTY with `--dry-run --json`, completed all local gates in 61.5s,
+  remained at `local_ready`, emitted the exact four planned actions, and opened
+  no nested prompt or remote mutation;
+- shell syntax, recursive compilation, Compose validation, two fixed-epoch
+  byte-identical release archives, maintainer-script exclusion, and
+  `git diff --check` passed.
+
 ## 2026-08-05 — Docker storage guardrails slice implemented locally
 
 Checkpoint: bounded P1-C/P2-B storage slice implemented without claiming either

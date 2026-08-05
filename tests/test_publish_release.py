@@ -8,6 +8,7 @@ bare Git remote for git while faking gh/docker/curl.
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
 import os
 import shutil
@@ -15,6 +16,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 import unittest
 
 
@@ -102,6 +105,7 @@ class FakeRunner:
 
     def __init__(self, real_git: bool = False):
         self.calls = []
+        self.call_records = []
         self.handlers = []
         self.last_env = None
         self._real = pr.SubprocessRunner()
@@ -113,6 +117,15 @@ class FakeRunner:
     def run(self, argv, *, cwd=None, env=None, input_text=None, timeout=None):
         argv = [str(item) for item in argv]
         self.calls.append(argv)
+        self.call_records.append(
+            {
+                "argv": argv,
+                "cwd": str(cwd) if cwd is not None else None,
+                "env": env,
+                "input_text": input_text,
+                "timeout": timeout,
+            }
+        )
         self.last_env = env
         if argv and argv[0] == "git" and self.real_git:
             return self._real.run(argv, cwd=cwd, env=env, input_text=input_text, timeout=timeout)
@@ -665,6 +678,116 @@ class PublicGhcrManifestTests(unittest.TestCase):
         self.assertIn("content digest", str(ctx.exception))
 
 
+class SubprocessRunnerTests(unittest.TestCase):
+    def test_children_never_inherit_the_publishers_tty(self):
+        if not hasattr(os, "openpty"):
+            self.skipTest("PTY support unavailable")
+        child_code = """\
+import os
+import sys
+print("tty=" + str(sys.stdin.isatty()))
+print("eof=" + str(sys.stdin.read() == ""))
+try:
+    os.open("/dev/tty", os.O_RDONLY)
+    print("devtty=True")
+except OSError:
+    print("devtty=False")
+"""
+        helper = f"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('publish_release_tty', {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+sys.modules['publish_release_tty'] = module
+spec.loader.exec_module(module)
+result = module.SubprocessRunner().run([
+    sys.executable,
+    '-c',
+    {child_code!r},
+], timeout=2)
+print(json.dumps({{'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}}))
+"""
+        master, slave = os.openpty()
+
+        def make_controlling_tty():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-c", helper],
+                stdin=slave,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                preexec_fn=make_controlling_tty,
+            )
+            os.close(slave)
+            slave = -1
+            stdout, stderr = process.communicate(timeout=10)
+        finally:
+            if slave >= 0:
+                os.close(slave)
+            os.close(master)
+        self.assertEqual(process.returncode, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["returncode"], 0, payload)
+        self.assertIn("tty=False", payload["stdout"])
+        self.assertIn("eof=True", payload["stdout"])
+        self.assertIn("devtty=False", payload["stdout"])
+
+    def test_explicit_input_is_still_delivered(self):
+        result = pr.SubprocessRunner().run(
+            [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+            input_text="expected-input",
+            timeout=5,
+        )
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual(result.stdout.strip(), "expected-input")
+
+    def test_timeout_diagnostic_is_unambiguous_with_partial_stderr(self):
+        result = pr.SubprocessRunner().run(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; print('partial', file=sys.stderr, flush=True); time.sleep(5)",
+            ],
+            timeout=0.1,
+        )
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("partial", result.stderr)
+        self.assertIn("timed out after 0.1s", result.stderr)
+
+    def test_timeout_terminates_descendant_process_group(self):
+        if shutil.which("ps") is None:
+            self.skipTest("ps not installed")
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "descendant.pid"
+            child_code = (
+                "import pathlib,subprocess,sys,time; "
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)); "
+                "time.sleep(30)"
+            )
+            result = pr.SubprocessRunner().run(
+                [sys.executable, "-c", child_code], timeout=0.3
+            )
+            self.assertEqual(result.returncode, 124)
+            self.assertTrue(pid_file.is_file())
+            descendant_pid = pid_file.read_text(encoding="utf-8")
+            alive = True
+            for _ in range(20):
+                probe = subprocess.run(
+                    ["ps", "-p", descendant_pid, "-o", "stat="],
+                    capture_output=True,
+                    text=True,
+                )
+                alive = probe.returncode == 0 and bool(probe.stdout.strip())
+                if not alive:
+                    break
+                time.sleep(0.05)
+            self.assertFalse(alive, f"descendant {descendant_pid} survived timeout")
+
+
 
 class PreflightTests(PublishReleaseTestCase):
     def test_baseline_preflight_passes_and_detects_local_ready(self):
@@ -886,6 +1009,23 @@ class ConfirmationTests(PublishReleaseTestCase):
         orch, *_ = make_orch(scenario, dry_run=True)
         orch.run()
         self.assertEqual(scenario.runner.mutating_commands(), [])
+        forbidden_prefixes = (
+            ["docker", "pull"],
+            ["docker", "rmi"],
+            ["docker", "build"],
+            ["gh", "run", "rerun"],
+            ["gh", "attestation"],
+            ["curl"],
+        )
+        for call in scenario.runner.calls:
+            self.assertFalse(
+                any(call[: len(prefix)] == prefix for prefix in forbidden_prefixes),
+                f"dry-run reached a publication/installation command: {call}",
+            )
+            self.assertFalse(
+                call[:1] == ["/bin/bash"] and "-n" not in call,
+                f"dry-run executed an installer: {call}",
+            )
         self.assertEqual(orch.state.phase, "local_ready")
         self.assertTrue(any("push main" in m for m in orch.planned_mutations))
         self.assertTrue(any("tag" in m for m in orch.planned_mutations))
@@ -1013,6 +1153,36 @@ class WorkflowFailureTests(PublishReleaseTestCase):
             orch.run()
         self.assertIn("timed out", str(ctx.exception))
 
+    def test_workflow_discovery_retries_transient_gh_failure(self):
+        scenario = Scenario(pushed=True, ci_runs=[make_run("a" * 40)])
+        predicate = lambda c: c[:2] == ["gh", "run"] and "list" in c and "ci.yml" in c
+        scenario.runner.handlers.insert(
+            0,
+            (
+                predicate,
+                Sequence(R(code=1, err="temporary API failure"), R(json.dumps(scenario.ci_runs))),
+            ),
+        )
+        orch, _, sleeper, *_ = make_orch(scenario)
+        orch._preflight()
+        self.assertEqual(orch._detect_phase(), "ci_passed")
+        self.assertEqual(sleeper.sleeps, 1)
+
+    def test_workflow_discovery_persistent_failure_is_bounded(self):
+        scenario = Scenario(pushed=True)
+        predicate = lambda c: c[:2] == ["gh", "run"] and "list" in c and "ci.yml" in c
+        scenario.runner.handlers.insert(
+            0, (predicate, R(code=1, err="persistent API failure"))
+        )
+        orch, _, sleeper, *_ = make_orch(scenario)
+        orch._preflight()
+        with self.assertRaises(pr.VerificationError) as ctx:
+            orch._detect_phase()
+        self.assertIn("after 3 attempts", str(ctx.exception))
+        calls = [c for c in scenario.runner.calls if predicate(c)]
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeper.sleeps, 2)
+
 
 # --- Tests: digest conflicts -----------------------------------------------
 
@@ -1056,6 +1226,127 @@ class DigestConflictTests(PublishReleaseTestCase):
             orch._verify_dir = Path(td)
             with self.assertRaises(pr.VerificationError):
                 orch._verify_image_version_digests()
+        self.assertEqual(
+            len(scenario.image_inspect_calls),
+            1,
+            "a successful immutable-tag read with a conflicting digest must fail immediately",
+        )
+
+
+class PublicVerificationResilienceTests(PublishReleaseTestCase):
+    def _prepared(self, scenario):
+        orch, clock, sleeper, *_ = make_orch(scenario)
+        orch._preflight()
+        orch.state.images = dict(scenario.digests)
+        return orch, clock, sleeper
+
+    def test_registry_reads_retry_transient_failures_then_succeed(self):
+        scenario = Scenario(pushed=True)
+        orch, _, sleeper = self._prepared(scenario)
+        calls = 0
+
+        def inspect(ref):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise pr.VerificationError("temporary GHCR 503")
+            return json.loads(scenario.image_manifest_json(ref))
+
+        orch.image_inspector = inspect
+        self.assertIn("version tags match", orch._verify_image_version_digests())
+        self.assertEqual(calls, 5)  # three base attempts, then one per leaf
+        self.assertEqual(sleeper.sleeps, 2)
+
+    def test_latest_digest_propagation_is_retried_but_bounded(self):
+        scenario = Scenario(pushed=True)
+        orch, _, sleeper = self._prepared(scenario)
+        base_ref = f"{pr.GHCR_ROOT}/base:latest"
+        attempts = 0
+
+        def inspect(ref):
+            nonlocal attempts
+            manifest = json.loads(scenario.image_manifest_json(ref))
+            if ref == base_ref:
+                attempts += 1
+                if attempts < 3:
+                    manifest["digest"] = "sha256:" + "f" * 64
+            return manifest
+
+        orch.image_inspector = inspect
+        self.assertIn("latest tags match", orch._verify_image_latest_digests())
+        self.assertEqual(attempts, 3)
+        self.assertEqual(sleeper.sleeps, 2)
+
+    def test_platform_index_propagation_is_retried(self):
+        scenario = Scenario(pushed=True)
+        orch, _, sleeper = self._prepared(scenario)
+        base_ref = f"{pr.GHCR_ROOT}/base:{scenario.version}"
+        attempts = 0
+
+        def inspect(ref):
+            nonlocal attempts
+            manifest = json.loads(scenario.image_manifest_json(ref))
+            if ref == base_ref:
+                attempts += 1
+                if attempts == 1:
+                    manifest["manifests"] = manifest["manifests"][:1]
+            return manifest
+
+        orch.image_inspector = inspect
+        self.assertIn("amd64+arm64", orch._verify_image_platforms())
+        self.assertEqual(attempts, 2)
+        self.assertEqual(sleeper.sleeps, 1)
+
+    def test_persistent_registry_failure_stops_after_fixed_attempt_count(self):
+        scenario = Scenario(pushed=True)
+        orch, _, sleeper = self._prepared(scenario)
+        calls = 0
+
+        def inspect(ref):
+            nonlocal calls
+            calls += 1
+            raise pr.VerificationError("temporary GHCR 503")
+
+        orch.image_inspector = inspect
+        with self.assertRaises(pr.VerificationError) as ctx:
+            orch._verify_image_version_digests()
+        self.assertIn(f"after {pr.PUBLIC_RETRY_ATTEMPTS} attempts", str(ctx.exception))
+        self.assertEqual(calls, pr.PUBLIC_RETRY_ATTEMPTS)
+        self.assertEqual(sleeper.sleeps, pr.PUBLIC_RETRY_ATTEMPTS - 1)
+
+    def test_anonymous_pull_timeout_retries_with_fixed_timeouts(self):
+        scenario = Scenario(pushed=True)
+        orch, _, sleeper = self._prepared(scenario)
+        base_ref = f"{pr.GHCR_ROOT}/base:{scenario.version}"
+        scenario.runner.handlers.insert(
+            0,
+            (
+                eq("docker", "pull", base_ref),
+                Sequence(R(code=124, err="command timed out"), R("pulled\n")),
+            ),
+        )
+
+        self.assertIn("anonymous pull ok", orch._verify_anonymous_docker())
+        records = [
+            record
+            for record in scenario.runner.call_records
+            if record["argv"] == ["docker", "pull", base_ref]
+        ]
+        self.assertEqual(len(records), 2)
+        self.assertTrue(
+            all(0 < record["timeout"] <= pr.ANONYMOUS_PULL_ATTEMPT_TIMEOUT for record in records)
+        )
+        self.assertEqual(sleeper.sleeps, 1)
+
+    def test_anonymous_pull_persistent_failure_is_bounded(self):
+        scenario = Scenario(pushed=True, anonymous_pull_ok=False)
+        orch, _, sleeper = self._prepared(scenario)
+        with self.assertRaises(pr.VerificationError) as ctx:
+            orch._verify_anonymous_docker()
+        self.assertIn(f"after {pr.ANONYMOUS_PULL_ATTEMPTS} attempts", str(ctx.exception))
+        pulls = [c for c in scenario.runner.calls if c[:2] == ["docker", "pull"]]
+        self.assertEqual(len(pulls), pr.ANONYMOUS_PULL_ATTEMPTS)
+        self.assertEqual(sleeper.sleeps, pr.ANONYMOUS_PULL_ATTEMPTS - 1)
 
 
 # --- Tests: locking & state journal ----------------------------------------
@@ -1092,6 +1383,105 @@ class LockingTests(PublishReleaseTestCase):
         dir_mode = scenario.state_dir.stat().st_mode & 0o777
         self.assertEqual(dir_mode, 0o700)
 
+    def test_matching_resume_hint_restores_only_observability_evidence(self):
+        scenario = Scenario(pushed=True)
+        orch, *_ = make_orch(scenario)
+        orch._preflight()
+        hint = pr.ReleaseState(
+            version=scenario.version,
+            commit_sha=scenario.sha,
+            tag=scenario.tag,
+            phase="public_verified",
+            ci_run_id=999,
+            images={"base": "sha256:" + "f" * 64},
+            phase_durations={"ci_passed": 12.5, "public_verified": 7.25},
+            checks=[
+                {
+                    "name": "anonymous-docker",
+                    "status": "failed",
+                    "duration_seconds": 7.0,
+                    "detail": "temporary failure",
+                }
+            ],
+        )
+
+        orch._restore_observability_hint(hint)
+
+        self.assertEqual(orch.state.phase_durations["ci_passed"], 12.5)
+        self.assertEqual(orch.state.checks[0]["detail"], "temporary failure")
+        self.assertIsNone(orch.state.ci_run_id)
+        self.assertEqual(orch.state.images, {})
+        self.assertEqual(orch.state.phase, "local_ready")
+
+    def test_mismatched_resume_hint_is_ignored(self):
+        scenario = Scenario(pushed=True)
+        orch, *_ = make_orch(scenario)
+        orch._preflight()
+        hint = pr.ReleaseState(
+            version=scenario.version,
+            commit_sha="f" * 40,
+            tag=scenario.tag,
+            phase_durations={"ci_passed": 99},
+        )
+        orch._restore_observability_hint(hint)
+        self.assertEqual(orch.state.phase_durations, {})
+
+    def test_failed_phase_time_is_accumulated_for_the_next_resume(self):
+        scenario = Scenario(pushed=True)
+        orch, clock, *_ = make_orch(scenario)
+        orch._preflight()
+        orch.state.phase_durations["public_verified"] = 2.5
+
+        def fail_verification():
+            clock.advance(3.0)
+            raise pr.VerificationError("temporary public failure")
+
+        orch._public_verify = fail_verification
+        with self.assertRaises(pr.VerificationError):
+            orch._execute("release_workflow_passed")
+        self.assertEqual(orch.state.phase_durations["public_verified"], 5.5)
+
+    def test_version_one_state_hint_remains_readable(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        orch._acquire_lock()
+        try:
+            orch.state.version = scenario.version
+            orch.state.commit_sha = scenario.sha
+            orch.state.tag = scenario.tag
+            state_file = scenario.state_dir / f"{scenario.tag}.json"
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "schema": pr.STATE_SCHEMA,
+                        "schema_version": 1,
+                        "version": scenario.version,
+                        "commit_sha": scenario.sha,
+                        "tag": scenario.tag,
+                        "phase": "release_workflow_passed",
+                        "phase_durations": {"ci_passed": 4.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hint = orch._load_state_hint()
+        finally:
+            orch._release_lock()
+        self.assertIsNotNone(hint)
+        self.assertEqual(hint.phase_durations["ci_passed"], 4.0)
+
+    def test_non_object_state_hint_is_ignored(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        orch._acquire_lock()
+        try:
+            orch.state.tag = scenario.tag
+            state_file = scenario.state_dir / f"{scenario.tag}.json"
+            state_file.write_text("[]", encoding="utf-8")
+            self.assertIsNone(orch._load_state_hint())
+        finally:
+            orch._release_lock()
+
 
 # --- Tests: redaction & logs -----------------------------------------------
 
@@ -1126,6 +1516,19 @@ class RedactionTests(unittest.TestCase):
             content = orch._log_path.read_text()
             self.assertNotIn("gho_ABCDEF", content)
             self.assertIn("[REDACTED]", content)
+
+    def test_check_json_includes_bounded_redacted_detail(self):
+        secret = "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+        payload = pr.CheckResult(
+            "anonymous-docker",
+            "failed",
+            1.25,
+            f"pull failed with {secret} " + "x" * 2000,
+        ).to_json()
+        self.assertIn("detail", payload)
+        self.assertIn("[REDACTED]", payload["detail"])
+        self.assertNotIn(secret, payload["detail"])
+        self.assertIn("truncated", payload["detail"])
 
 
 # --- Tests: structured JSON output -----------------------------------------
@@ -1167,6 +1570,39 @@ class JsonOutputTests(PublishReleaseTestCase):
         self.assertNotIn("gho_", captured[0])
         self.assertNotIn("Authorization", captured[0])
 
+    def test_error_json_contains_phase_timing_and_verification_diagnostics(self):
+        scenario = Scenario(pushed=True)
+        orch, *_ = make_orch(scenario, json_output=True)
+        orch.context = pr.ReleaseContext(
+            repository=pr.REPOSITORY,
+            commit_sha=scenario.sha,
+            version=scenario.version,
+            tag=scenario.tag,
+        )
+        orch.state.version = scenario.version
+        orch.state.commit_sha = scenario.sha
+        orch.state.tag = scenario.tag
+        orch.state.phase = "release_workflow_passed"
+        orch.state.phase_durations = {"public_verified": 12.5}
+        orch.verification_checks = [
+            pr.CheckResult(
+                "anonymous-docker",
+                "failed",
+                12.5,
+                "pull timed out with gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234",
+            )
+        ]
+        captured = []
+        orch._out = captured.append
+
+        orch.render_error_json("public verification failed")
+
+        payload = json.loads(captured[0])
+        self.assertEqual(payload["phase_durations"]["public_verified"], 12.5)
+        self.assertEqual(payload["checks"][0]["status"], "failed")
+        self.assertIn("timed out", payload["checks"][0]["detail"])
+        self.assertNotIn("gho_", captured[0])
+
 
 # --- Tests: review findings (adversarial) ----------------------------------
 
@@ -1199,6 +1635,36 @@ class ReviewFindingTests(PublishReleaseTestCase):
                 ref.startswith("ghcr.io/"),
                 f"image attestation reference missing oci:// prefix: {ref}",
             )
+
+    def test_source_provenance_and_spdx_sbom_attestations_are_both_verified(self):
+        scenario = Scenario(pushed=True)
+        orch = self._prepared_orch(scenario)
+        with tempfile.TemporaryDirectory() as td:
+            orch._verify_dir = Path(td)
+            archive = Path(td) / orch._archive_name()
+            archive.write_bytes(scenario.archive_bytes)
+            orch._verify_source_attestation()
+            orch._verify_source_sbom_attestation()
+
+        calls = [
+            c
+            for c in scenario.runner.commands("gh")
+            if c[:3] == ["gh", "attestation", "verify"]
+        ]
+        self.assertEqual(len(calls), 2)
+        provenance = next(c for c in calls if "--predicate-type" not in c)
+        sbom = next(c for c in calls if "--predicate-type" in c)
+        self.assertIn(str(archive), provenance)
+        self.assertIn(str(archive), sbom)
+        self.assertEqual(
+            sbom[sbom.index("--predicate-type") + 1],
+            "https://spdx.dev/Document/v2.3",
+        )
+        for call in calls:
+            self.assertIn("--source-digest", call)
+            self.assertIn(scenario.sha, call)
+            self.assertIn("--source-ref", call)
+            self.assertIn(f"refs/tags/{scenario.tag}", call)
 
     # [P1] the public installer must be fetched anonymously, not run from the
     # local checkout, and without any ambient credentials.
@@ -1250,6 +1716,26 @@ class ReviewFindingTests(PublishReleaseTestCase):
         self.assertIn("GH_CONFIG_DIR", env)
         self.assertIn("CURL_HOME", env)
         self.assertEqual(env.get("CAGE_VERSION"), scenario.version)
+
+    def test_anonymous_asset_download_records_full_machine_readable_digests(self):
+        scenario = Scenario(pushed=True)
+        orch = self._prepared_orch(scenario)
+        with tempfile.TemporaryDirectory() as td:
+            orch._verify_dir = Path(td)
+            orch._verify_anonymous_download()
+        self.assertEqual(
+            set(orch.state.assets),
+            {orch._archive_name(), orch._checksum_name(), orch._spdx_name()},
+        )
+        for entry in orch.state.assets.values():
+            self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(entry["size"], 0)
+
+        captured = []
+        orch._out = captured.append
+        orch.render_json()
+        payload = json.loads(captured[0])
+        self.assertEqual(payload["assets"], orch.state.assets)
 
     def test_image_verification_does_not_require_docker_buildx(self):
         scenario = Scenario(pushed=True)
@@ -1336,7 +1822,8 @@ class ReviewFindingTests(PublishReleaseTestCase):
         statuses = {c.name: c.status for c in orch.verification_checks}
         self.assertEqual(statuses["anonymous-download"], "failed")
         for dependent in ("archive-checksum", "spdx-parses", "archive-reproducible",
-                          "source-attestation", "public-installer"):
+                          "source-attestation", "source-sbom-attestation",
+                          "public-installer"):
             self.assertEqual(statuses[dependent], "skipped", dependent)
         self.assertIn("anonymous-download", str(ctx.exception))
 

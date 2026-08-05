@@ -62,14 +62,21 @@ RELEASE_SIGNER_WORKFLOW = f"{REPOSITORY}/{RELEASE_WORKFLOW_PATH}"
 CANDIDATE_ARTIFACT_PREFIX = "release-candidate-"
 CANDIDATE_SCHEMA = "cage.release-candidate"
 RESULT_SCHEMA = "cage.release-result"
-RESULT_SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 STATE_SCHEMA = "cage.release-state"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 REQUIRED_EXECUTABLES = ("git", "gh", "docker", "curl")
 REQUIRED_BASH = "/bin/bash"
 CONFIRMATION_HINT = "release v{version} from {short_sha}"
 DEFAULT_POLL_INTERVAL = 15.0
 DEFAULT_WORKFLOW_TIMEOUT = 3600.0  # 60 minutes, accommodates cold CI
+DEFAULT_EXTERNAL_COMMAND_TIMEOUT = 120.0
+PUBLIC_RETRY_ATTEMPTS = 5
+PUBLIC_RETRY_DELAY_SECONDS = 5.0
+ANONYMOUS_PULL_ATTEMPTS = 2
+ANONYMOUS_PULL_ATTEMPT_TIMEOUT = 300.0
+ANONYMOUS_PULL_TOTAL_TIMEOUT = 600.0
+ANONYMOUS_PULL_CLEANUP_TIMEOUT = 60.0
 MAX_LOG_TAIL_CHARS = 4000
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?$")
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -327,6 +334,7 @@ VERIFICATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "spdx-parses": ("anonymous-download",),
     "archive-reproducible": ("archive-checksum",),
     "source-attestation": ("anonymous-download",),
+    "source-sbom-attestation": ("spdx-parses",),
     "public-installer": ("archive-checksum",),
 }
 
@@ -358,6 +366,7 @@ class CheckResult:
             "name": self.name,
             "status": self.status,
             "duration_seconds": round(self.duration_seconds, 3),
+            "detail": bounded(self.detail, 1000),
         }
 
 
@@ -372,6 +381,7 @@ class ReleaseState:
     ci_url: Optional[str] = None
     release_run_id: Optional[int] = None
     release_url: Optional[str] = None
+    assets: dict = field(default_factory=dict)
     images: dict = field(default_factory=dict)
     phase_durations: dict = field(default_factory=dict)
     checks: list = field(default_factory=list)
@@ -405,7 +415,25 @@ class Options:
 
 
 class SubprocessRunner:
-    """Runs commands without a shell and captures output."""
+    """Runs non-interactive commands without a shell and captures output."""
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen) -> tuple[str, str]:
+        """Stop a detached command and its descendants, then drain diagnostics."""
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+        return stdout or "", stderr or ""
 
     def run(
         self,
@@ -417,23 +445,53 @@ class SubprocessRunner:
         timeout: Optional[float] = None,
     ) -> CommandResult:
         argv = [str(item) for item in argv]
+        # A closed stdin alone is insufficient: Cage and some credential tools
+        # deliberately fall back to /dev/tty. A fresh session removes the
+        # controlling terminal, and process-group ownership lets timeout or
+        # interruption clean up every descendant rather than orphaning it.
+        stdin = subprocess.DEVNULL if input_text is None else subprocess.PIPE
+        process = None
         try:
-            proc = subprocess.run(
+            process = subprocess.Popen(
                 argv,
                 cwd=str(cwd) if cwd else None,
                 env=env,
-                input=input_text,
+                stdin=stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                capture_output=True,
-                timeout=timeout,
+                start_new_session=True,
             )
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout)
         except FileNotFoundError as exc:
             return CommandResult(argv, 127, "", f"command not found: {exc.filename}")
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            return CommandResult(argv, 124, stdout, stderr or "command timed out")
-        return CommandResult(argv, proc.returncode, proc.stdout or "", proc.stderr or "")
+            assert process is not None
+            stdout, stderr = self._terminate_process_group(process)
+
+            def decode_timeout_output(value) -> str:
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                return ""
+
+            stdout = stdout or decode_timeout_output(exc.stdout)
+            stderr = stderr or decode_timeout_output(exc.stderr)
+            timeout_diagnostic = (
+                f"command timed out after {timeout:g}s"
+                if isinstance(timeout, (int, float))
+                else "command timed out"
+            )
+            diagnostic = "\n".join(
+                part for part in (stderr.strip(), timeout_diagnostic) if part
+            )
+            return CommandResult(argv, 124, stdout, diagnostic)
+        except BaseException:
+            if process is not None:
+                self._terminate_process_group(process)
+            raise
+        return CommandResult(argv, process.returncode, stdout or "", stderr or "")
 
 
 class RealClock:
@@ -630,14 +688,104 @@ class Orchestrator:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            if data.get("schema") != STATE_SCHEMA:
+                return None
+            if data.get("schema_version") not in (1, STATE_SCHEMA_VERSION):
+                return None
             return ReleaseState.from_json(data)
-        except (ValueError, OSError):
+        except (TypeError, ValueError, OSError):
             return None
+
+    def _restore_observability_hint(self, hint: Optional[ReleaseState]) -> None:
+        """Restore only local evidence; remote state still determines the phase.
+
+        A matching private journal carries cumulative phase timings and the most
+        recent verification results across retries. It never restores refs,
+        workflow conclusions, image digests, or a claimed phase.
+        """
+        if hint is None or (
+            hint.version,
+            hint.commit_sha,
+            hint.tag,
+        ) != (
+            self.state.version,
+            self.state.commit_sha,
+            self.state.tag,
+        ):
+            return
+        durations = {}
+        hint_durations = (
+            hint.phase_durations if isinstance(hint.phase_durations, dict) else {}
+        )
+        for phase, value in hint_durations.items():
+            if phase not in PHASES or isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and 0 <= value < float("inf"):
+                durations[phase] = round(float(value), 3)
+        checks = []
+        if isinstance(hint.checks, list):
+            for entry in hint.checks:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                status = entry.get("status")
+                duration = entry.get("duration_seconds", 0.0)
+                if (
+                    not isinstance(name, str)
+                    or not re.fullmatch(r"[a-z0-9-]{1,80}", name)
+                    or status not in ("passed", "failed", "skipped")
+                ):
+                    continue
+                if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                    duration = 0.0
+                if duration != duration or duration < 0 or duration == float("inf"):
+                    duration = 0.0
+                checks.append(
+                    CheckResult(
+                        name=name,
+                        status=status,
+                        duration_seconds=max(0.0, float(duration)),
+                        detail=str(entry.get("detail") or ""),
+                    ).to_json()
+                )
+        self.state.phase_durations = durations
+        self.state.checks = checks
+        assets = {}
+        if isinstance(hint.assets, dict):
+            expected_names = {
+                self._archive_name(),
+                self._checksum_name(),
+                self._spdx_name(),
+            }
+            for name, entry in hint.assets.items():
+                if name not in expected_names or not isinstance(entry, dict):
+                    continue
+                digest = entry.get("sha256")
+                size = entry.get("size")
+                if (
+                    isinstance(digest, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", digest)
+                    and isinstance(size, int)
+                    and not isinstance(size, bool)
+                    and size >= 0
+                ):
+                    assets[name] = {"sha256": digest, "size": size}
+        self.state.assets = assets
 
     # -- command helpers ----------------------------------------------------
 
-    def git(self, *args: str, check: bool = True, cwd: Optional[Path] = None) -> CommandResult:
-        result = self.runner.run(["git", *args], cwd=cwd or self.repo_root)
+    def git(
+        self,
+        *args: str,
+        check: bool = True,
+        cwd: Optional[Path] = None,
+        timeout: Optional[float] = DEFAULT_EXTERNAL_COMMAND_TIMEOUT,
+    ) -> CommandResult:
+        result = self.runner.run(
+            ["git", *args], cwd=cwd or self.repo_root, timeout=timeout
+        )
         if check and not result.ok:
             raise ReleaseError(f"git {args[0]} failed: {bounded(result.stderr or result.stdout)}")
         return result
@@ -645,22 +793,41 @@ class Orchestrator:
     def git_out(self, *args: str, cwd: Optional[Path] = None) -> str:
         return self.git(*args, cwd=cwd).stdout.strip()
 
-    def gh(self, *args: str, check: bool = True) -> CommandResult:
-        result = self.runner.run(["gh", *args], cwd=self.repo_root)
+    def gh(
+        self,
+        *args: str,
+        check: bool = True,
+        timeout: Optional[float] = DEFAULT_EXTERNAL_COMMAND_TIMEOUT,
+    ) -> CommandResult:
+        result = self.runner.run(
+            ["gh", *args], cwd=self.repo_root, timeout=timeout
+        )
         if check and not result.ok:
             label = " ".join(args[:2]) if len(args) >= 2 else (args[0] if args else "")
             raise ReleaseError(f"gh {label} failed: {bounded(result.stderr or result.stdout)}")
         return result
 
-    def gh_json(self, *args: str):
-        result = self.gh(*args)
+    def gh_json(
+        self,
+        *args: str,
+        timeout: Optional[float] = DEFAULT_EXTERNAL_COMMAND_TIMEOUT,
+    ):
+        result = self.gh(*args, timeout=timeout)
         try:
             return json.loads(result.stdout)
         except ValueError as exc:
             raise ReleaseError(f"could not parse gh output: {bounded(result.stdout)}") from exc
 
-    def docker(self, *args: str, env: Optional[dict] = None, check: bool = True) -> CommandResult:
-        result = self.runner.run(["docker", *args], cwd=self.repo_root, env=env)
+    def docker(
+        self,
+        *args: str,
+        env: Optional[dict] = None,
+        check: bool = True,
+        timeout: Optional[float] = DEFAULT_EXTERNAL_COMMAND_TIMEOUT,
+    ) -> CommandResult:
+        result = self.runner.run(
+            ["docker", *args], cwd=self.repo_root, env=env, timeout=timeout
+        )
         if check and not result.ok:
             raise ReleaseError(f"docker {args[0]} failed: {bounded(result.stderr or result.stdout)}")
         return result
@@ -670,8 +837,24 @@ class Orchestrator:
         # asset downloads are genuinely anonymous (no injected credentials/proxy).
         # It must be the first option; ``curl --no-config`` is not a valid option.
         result = self.runner.run(
-            ["curl", "-q", "-fsSL", "--retry", "3", "-o", str(dest), url],
+            [
+                "curl",
+                "-q",
+                "-fsSL",
+                "--retry",
+                "3",
+                "--retry-delay",
+                "2",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "120",
+                "-o",
+                str(dest),
+                url,
+            ],
             cwd=self.repo_root,
+            timeout=150,
         )
         if not result.ok:
             raise VerificationError(
@@ -1028,21 +1211,25 @@ class Orchestrator:
         self, workflow_file: str, event: str, branch: str, sha: str
     ) -> Optional[dict]:
         fields = "databaseId,headSha,headBranch,event,conclusion,status,url,displayTitle"
-        runs = self.gh_json(
-            "run",
-            "list",
-            "--repo",
-            REPOSITORY,
-            "--workflow",
-            workflow_file,
-            "--event",
-            event,
-            "--branch",
-            branch,
-            "--json",
-            fields,
-            "--limit",
-            "50",
+        runs = self._retry_idempotent_operation(
+            f"{workflow_file} run discovery",
+            lambda: self.gh_json(
+                "run",
+                "list",
+                "--repo",
+                REPOSITORY,
+                "--workflow",
+                workflow_file,
+                "--event",
+                event,
+                "--branch",
+                branch,
+                "--json",
+                fields,
+                "--limit",
+                "50",
+            ),
+            attempts=3,
         )
         matches = [
             run
@@ -1336,7 +1523,37 @@ class Orchestrator:
     def _spdx_name(self) -> str:
         return f"cage-{self.context.version}.spdx.json"
 
-    def _inspect_image(self, ref: str, env: Optional[dict] = None) -> dict:
+    def _retry_idempotent_operation(
+        self,
+        label: str,
+        operation: Callable[[], object],
+        *,
+        attempts: int = PUBLIC_RETRY_ATTEMPTS,
+    ):
+        """Retry an idempotent public read with bounded, visible backoff."""
+        if attempts < 1:
+            raise ValueError("attempts must be positive")
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, attempts + 1):
+            self._check_interrupt()
+            try:
+                return operation()
+            except (ReleaseError, OSError, ValueError) as exc:
+                last_error = exc
+                if attempt == attempts:
+                    break
+                diagnostic = bounded(str(exc), 240).replace("\n", " ")
+                self.progress(
+                    f"retry {label}: attempt {attempt}/{attempts} failed"
+                    f" ({diagnostic}); retrying in {PUBLIC_RETRY_DELAY_SECONDS:g}s"
+                )
+                self.sleeper.sleep(PUBLIC_RETRY_DELAY_SECONDS)
+        raise VerificationError(
+            f"{label} failed after {attempts} attempts: "
+            f"{bounded(str(last_error or 'unknown error'), 800)}"
+        ) from last_error
+
+    def _inspect_image_once(self, ref: str, env: Optional[dict] = None) -> dict:
         # The Registry API provides the top-level digest and platform index
         # portably. Do not require the optional Docker Buildx CLI plugin here.
         del env  # retained in the private signature for compatibility
@@ -1350,15 +1567,24 @@ class Orchestrator:
             raise VerificationError(f"could not inspect {ref}: invalid manifest object")
         return manifest
 
+    def _inspect_image(self, ref: str, env: Optional[dict] = None) -> dict:
+        return self._retry_idempotent_operation(
+            f"registry inspect {ref}",
+            lambda: self._inspect_image_once(ref, env=env),
+        )
+
     def _release_json(self) -> dict:
-        return self.gh_json(
-            "release",
-            "view",
-            self.context.tag,
-            "--repo",
-            REPOSITORY,
-            "--json",
-            "tagName,isDraft,isPrerelease,assets,targetCommitish,url",
+        return self._retry_idempotent_operation(
+            "public release metadata",
+            lambda: self.gh_json(
+                "release",
+                "view",
+                self.context.tag,
+                "--repo",
+                REPOSITORY,
+                "--json",
+                "tagName,isDraft,isPrerelease,assets,targetCommitish,url",
+            ),
         )
 
     def _run_verification_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
@@ -1393,11 +1619,18 @@ class Orchestrator:
                 result = CheckResult(name, "failed", self.clock.now() - start, detail)
         self.verification_checks.append(result)
         self.state.checks.append(result.to_json())
-        self.progress(f"verify {name}: {result.status}")
+        summary = f"verify {name}: {result.status}"
+        if result.status != "passed" and result.detail:
+            summary += ": " + bounded(result.detail, 240).replace("\n", " ")
+        self.progress(summary)
+        self._save_state()
         return result
 
     def _public_verify(self) -> None:
         self.verification_checks = []
+        self.state.checks = []
+        self.state.assets = {}
+        self._save_state()
         if not self.state.images:
             self._load_candidate_manifest()
         temporary = tempfile.TemporaryDirectory()
@@ -1411,6 +1644,7 @@ class Orchestrator:
                 ("spdx-parses", self._verify_spdx),
                 ("archive-reproducible", self._verify_archive_reproducible),
                 ("source-attestation", self._verify_source_attestation),
+                ("source-sbom-attestation", self._verify_source_sbom_attestation),
                 ("image-version-digests", self._verify_image_version_digests),
                 ("image-latest-digests", self._verify_image_latest_digests),
                 ("image-attestations", self._verify_image_attestations),
@@ -1455,7 +1689,12 @@ class Orchestrator:
     def _verify_anonymous_download(self) -> str:
         base = f"https://github.com/{REPOSITORY}/releases/download/{self.context.tag}"
         for name in (self._archive_name(), self._checksum_name(), self._spdx_name()):
-            self.curl_download(f"{base}/{name}", self._verify_dir / name)
+            path = self.curl_download(f"{base}/{name}", self._verify_dir / name)
+            payload = path.read_bytes()
+            self.state.assets[name] = {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
         return "downloaded 3 assets anonymously"
 
     def _verify_archive_checksum(self) -> str:
@@ -1521,24 +1760,60 @@ class Orchestrator:
 
     def _verify_source_attestation(self) -> str:
         archive = self._verify_dir / self._archive_name()
-        result = self.gh(
-            "attestation",
-            "verify",
-            str(archive),
-            "--repo",
-            REPOSITORY,
-            "--signer-workflow",
-            RELEASE_SIGNER_WORKFLOW,
-            "--source-digest",
-            self.context.commit_sha,
-            "--source-ref",
-            f"refs/tags/{self.context.tag}",
-            check=False,
-        )
-        if not result.ok:
-            raise VerificationError(
-                f"source attestation failed: {bounded(result.stderr or result.stdout)}"
+
+        def verify_attestation():
+            result = self.gh(
+                "attestation",
+                "verify",
+                str(archive),
+                "--repo",
+                REPOSITORY,
+                "--signer-workflow",
+                RELEASE_SIGNER_WORKFLOW,
+                "--source-digest",
+                self.context.commit_sha,
+                "--source-ref",
+                f"refs/tags/{self.context.tag}",
+                check=False,
             )
+            if not result.ok:
+                raise VerificationError(
+                    "source attestation failed: "
+                    f"{bounded(result.stderr or result.stdout)}"
+                )
+            return result
+
+        self._retry_idempotent_operation("source attestation", verify_attestation)
+        return "verified"
+
+    def _verify_source_sbom_attestation(self) -> str:
+        archive = self._verify_dir / self._archive_name()
+
+        def verify_attestation():
+            result = self.gh(
+                "attestation",
+                "verify",
+                str(archive),
+                "--repo",
+                REPOSITORY,
+                "--signer-workflow",
+                RELEASE_SIGNER_WORKFLOW,
+                "--source-digest",
+                self.context.commit_sha,
+                "--source-ref",
+                f"refs/tags/{self.context.tag}",
+                "--predicate-type",
+                "https://spdx.dev/Document/v2.3",
+                check=False,
+            )
+            if not result.ok:
+                raise VerificationError(
+                    "source SPDX SBOM attestation failed: "
+                    f"{bounded(result.stderr or result.stdout)}"
+                )
+            return result
+
+        self._retry_idempotent_operation("source SPDX SBOM attestation", verify_attestation)
         return "verified"
 
     def _verify_image_version_digests(self) -> str:
@@ -1555,48 +1830,69 @@ class Orchestrator:
     def _verify_image_latest_digests(self) -> str:
         for name in IMAGE_NAMES:
             ref = f"{GHCR_ROOT}/{name}:latest"
-            manifest = self._inspect_image(ref)
-            digest = manifest.get("digest")
-            if digest != self.state.images.get(name):
-                raise VerificationError(
-                    f"{name} latest digest {digest} != candidate {self.state.images.get(name)}"
-                )
+            expected = self.state.images.get(name)
+
+            def inspect_latest():
+                manifest = self._inspect_image_once(ref)
+                digest = manifest.get("digest")
+                if digest != expected:
+                    raise VerificationError(
+                        f"{name} latest digest {digest} != candidate {expected}"
+                    )
+                return manifest
+
+            # ``latest`` is intentionally mutable and can lag the completed
+            # workflow briefly at registry edges. Retry that propagation read;
+            # immutable version-tag conflicts still fail immediately below.
+            self._retry_idempotent_operation(f"{name} latest propagation", inspect_latest)
         return "latest tags match candidate digests"
 
     def _verify_image_attestations(self) -> str:
         for name in IMAGE_NAMES:
             digest = self.state.images.get(name)
             ref = f"oci://{GHCR_ROOT}/{name}@{digest}"
-            result = self.gh(
-                "attestation",
-                "verify",
-                ref,
-                "--repo",
-                REPOSITORY,
-                "--signer-workflow",
-                RELEASE_SIGNER_WORKFLOW,
-                "--source-digest",
-                self.context.commit_sha,
-                check=False,
-            )
-            if not result.ok:
-                raise VerificationError(
-                    f"{name} image attestation failed: {bounded(result.stderr or result.stdout)}"
+
+            def verify_attestation():
+                result = self.gh(
+                    "attestation",
+                    "verify",
+                    ref,
+                    "--repo",
+                    REPOSITORY,
+                    "--signer-workflow",
+                    RELEASE_SIGNER_WORKFLOW,
+                    "--source-digest",
+                    self.context.commit_sha,
+                    check=False,
                 )
+                if not result.ok:
+                    raise VerificationError(
+                        f"{name} image attestation failed: "
+                        f"{bounded(result.stderr or result.stdout)}"
+                    )
+                return result
+
+            self._retry_idempotent_operation(f"{name} image attestation", verify_attestation)
         return "all image attestations verified"
 
     def _verify_image_platforms(self) -> str:
         for name in IMAGE_NAMES:
             ref = f"{GHCR_ROOT}/{name}:{self.context.version}"
-            manifest = self._inspect_image(ref)
-            arches = {
-                (entry.get("platform") or {}).get("architecture")
-                for entry in manifest.get("manifests", [])
-            }
-            if not {"amd64", "arm64"} <= arches:
-                raise VerificationError(
-                    f"{name} index missing amd64/arm64 (got {sorted(a for a in arches if a)})"
-                )
+
+            def inspect_platforms():
+                manifest = self._inspect_image_once(ref)
+                arches = {
+                    (entry.get("platform") or {}).get("architecture")
+                    for entry in manifest.get("manifests", [])
+                }
+                if not {"amd64", "arm64"} <= arches:
+                    raise VerificationError(
+                        f"{name} index missing amd64/arm64 "
+                        f"(got {sorted(a for a in arches if a)})"
+                    )
+                return manifest
+
+            self._retry_idempotent_operation(f"{name} platform index", inspect_platforms)
         return "amd64+arm64 present"
 
     def _verify_anonymous_docker(self) -> str:
@@ -1605,16 +1901,54 @@ class Orchestrator:
         # plus stripped credential env vars guarantee no maintainer credentials.
         with tempfile.TemporaryDirectory() as credential_dir:
             env = anonymous_env(os.environ, DOCKER_CONFIG=credential_dir)
+            deadline = self.clock.now() + ANONYMOUS_PULL_TOTAL_TIMEOUT
             for name in IMAGE_NAMES:
                 ref = f"{GHCR_ROOT}/{name}:{self.context.version}"
-                result = self.docker("pull", ref, env=env, check=False)
-                if not result.ok:
+                result = None
+                for attempt in range(1, ANONYMOUS_PULL_ATTEMPTS + 1):
+                    self._check_interrupt()
+                    remaining = deadline - self.clock.now()
+                    if remaining <= 0:
+                        raise VerificationError(
+                            "anonymous Docker verification exceeded its "
+                            f"{ANONYMOUS_PULL_TOTAL_TIMEOUT:g}s total budget"
+                        )
+                    attempt_timeout = min(ANONYMOUS_PULL_ATTEMPT_TIMEOUT, remaining)
+                    result = self.docker(
+                        "pull",
+                        ref,
+                        env=env,
+                        check=False,
+                        timeout=attempt_timeout,
+                    )
+                    if result.ok:
+                        break
+                    if attempt < ANONYMOUS_PULL_ATTEMPTS:
+                        diagnostic = bounded(result.stderr or result.stdout, 240).replace(
+                            "\n", " "
+                        )
+                        self.progress(
+                            f"verify retry anonymous pull {name}: attempt "
+                            f"{attempt}/{ANONYMOUS_PULL_ATTEMPTS} failed "
+                            f"({diagnostic}); retrying in "
+                            f"{PUBLIC_RETRY_DELAY_SECONDS:g}s"
+                        )
+                        self.sleeper.sleep(PUBLIC_RETRY_DELAY_SECONDS)
+                if result is None or not result.ok:
                     raise VerificationError(
-                        f"anonymous pull failed for {ref}: {bounded(result.stderr)}"
+                        f"anonymous pull failed for {ref} after "
+                        f"{ANONYMOUS_PULL_ATTEMPTS} attempts: "
+                        f"{bounded((result.stderr or result.stdout) if result else '')}"
                     )
                 # Best-effort cleanup so verification does not fill local disk;
                 # shared base layers mean later pulls reuse present blobs.
-                self.docker("rmi", ref, env=env, check=False)
+                self.docker(
+                    "rmi",
+                    ref,
+                    env=env,
+                    check=False,
+                    timeout=ANONYMOUS_PULL_CLEANUP_TIMEOUT,
+                )
         return "anonymous pull ok (native platform)"
 
     def _verify_public_installer(self) -> str:
@@ -1641,9 +1975,25 @@ class Orchestrator:
             installer = root / "install.sh"
             fetch_env = anonymous_env(os.environ, HOME=str(home), CURL_HOME=str(curl_home))
             fetch = self.runner.run(
-                ["curl", "-q", "-fsSL", "--retry", "3", "-o", str(installer), installer_url],
+                [
+                    "curl",
+                    "-q",
+                    "-fsSL",
+                    "--retry",
+                    "3",
+                    "--retry-delay",
+                    "2",
+                    "--connect-timeout",
+                    "15",
+                    "--max-time",
+                    "120",
+                    "-o",
+                    str(installer),
+                    installer_url,
+                ],
                 cwd=root,
                 env=fetch_env,
+                timeout=150,
             )
             if not fetch.ok or not installer.is_file():
                 raise VerificationError(
@@ -1659,7 +2009,7 @@ class Orchestrator:
                 CAGE_VERSION=self.context.version,
             )
             result = self.runner.run(
-                [REQUIRED_BASH, str(installer)], cwd=root, env=env
+                [REQUIRED_BASH, str(installer)], cwd=root, env=env, timeout=300
             )
             if not result.ok:
                 diagnostic = "\n".join(
@@ -1669,7 +2019,7 @@ class Orchestrator:
                     f"public installer failed:\n{bounded(diagnostic)}"
                 )
             version_result = self.runner.run(
-                [str(install_dir / "cage"), "--version"], env=env
+                [str(install_dir / "cage"), "--version"], env=env, timeout=30
             )
             reported = version_result.stdout.strip()
             if reported != f"cage {self.context.version}":
@@ -1715,8 +2065,17 @@ class Orchestrator:
     def _execute(self, phase: str) -> str:
         def timed(name: str, fn: Callable[[], None]) -> None:
             start = self.clock.now()
-            fn()
-            self.state.phase_durations[name] = round(self.clock.now() - start, 3)
+            try:
+                fn()
+            finally:
+                elapsed = max(0.0, self.clock.now() - start)
+                previous = self.state.phase_durations.get(name, 0.0)
+                if isinstance(previous, bool) or not isinstance(previous, (int, float)):
+                    previous = 0.0
+                self.state.phase_durations[name] = round(previous + elapsed, 3)
+                # Preserve timing evidence even when a phase fails and the next
+                # invocation must resume it.
+                self._save_state()
 
         if phase == "local_ready":
             self._revalidate()
@@ -1789,7 +2148,8 @@ class Orchestrator:
             self.progress("running preflight checks")
             self._preflight()
             self._state_file = self._state_file_path()
-            self._load_state_hint()  # resume hint only; remote state is authoritative
+            hint = self._load_state_hint()
+            self._restore_observability_hint(hint)
             phase = self._detect_phase()
             if phase != "local_ready":
                 self.state.resumed_from = phase
@@ -1843,6 +2203,13 @@ class Orchestrator:
         self._out(
             f"release    : https://github.com/{REPOSITORY}/releases/tag/{self.context.tag}"
         )
+        if self.state.assets:
+            self._out("asset digests:")
+            for name in (self._archive_name(), self._checksum_name(), self._spdx_name()):
+                entry = self.state.assets.get(name) or {}
+                digest = entry.get("sha256", "-")
+                size = entry.get("size", "-")
+                self._out(f"  {name:<34} sha256:{digest} ({size} bytes)")
         if self.state.images:
             self._out("image digests:")
             for name in IMAGE_NAMES:
@@ -1853,6 +2220,8 @@ class Orchestrator:
                 self._out(
                     f"  [{check.status:>7}] {check.name} ({check.duration_seconds:.1f}s)"
                 )
+                if check.status != "passed" and check.detail:
+                    self._out(f"             {bounded(check.detail, 500)}")
         self._out(f"duration   : {self.clock.now() - self._started:.1f}s")
         if self._log_path:
             self._out(f"log        : {self._log_path}")
@@ -1881,10 +2250,16 @@ class Orchestrator:
                 if reached >= PHASES.index("release_workflow_passed")
                 else None,
             },
+            "assets": dict(self.state.assets),
             "images": {
                 name: {"digest": self.state.images.get(name)} for name in IMAGE_NAMES
             },
-            "checks": [check.to_json() for check in self.verification_checks],
+            "phase_durations": dict(self.state.phase_durations),
+            "checks": (
+                [check.to_json() for check in self.verification_checks]
+                if self.verification_checks
+                else list(self.state.checks)
+            ),
             "duration_seconds": round(self.clock.now() - self._started, 3),
             "log_path": str(self._log_path) if self._log_path else None,
         }
@@ -1902,6 +2277,24 @@ class Orchestrator:
             "resumed_from": self.state.resumed_from,
             "phase": self.state.phase,
             "error": bounded(message, 1000),
+            "ci": {
+                "run_id": self.state.ci_run_id,
+                "url": self.state.ci_url,
+            },
+            "release": {
+                "run_id": self.state.release_run_id,
+                "url": self.state.release_url,
+            },
+            "assets": dict(self.state.assets),
+            "images": {
+                name: {"digest": self.state.images.get(name)} for name in IMAGE_NAMES
+            },
+            "phase_durations": dict(self.state.phase_durations),
+            "checks": (
+                [check.to_json() for check in self.verification_checks]
+                if self.verification_checks
+                else list(self.state.checks)
+            ),
             "duration_seconds": round(self.clock.now() - self._started, 3),
             "log_path": str(self._log_path) if self._log_path else None,
         }

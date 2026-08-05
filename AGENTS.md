@@ -347,8 +347,16 @@ exact commit's CI run, pushes an immutable annotated tag, waits for
 publication, and independently verifies the public release. State and a private
 log live under the per-worktree Git dir (`git rev-parse --git-path
 cage-release`), guarded by an `fcntl.flock` exclusive lock; remote state is
-authoritative and the state file is only a resume hint. It is not part of the
-`cage` CLI and is excluded from the release archive.
+authoritative and the state file is only a resume hint. The explicit release
+confirmation is the only terminal read: every child receives closed stdin, no
+controlling TTY, and bounded execution time. Idempotent public reads use fixed retry/backoff,
+anonymous Docker pulls have per-attempt and whole-check deadlines, and matching
+private journals retain cumulative phase timing plus redacted verification
+evidence across resumes. Schema-v2 JSON success and failure results include
+workflow URLs, full public-asset digests/sizes, image digests, per-check details,
+and timings. Public verification proves source provenance and the source SPDX
+SBOM attestation separately. It is not part of the `cage` CLI and is excluded
+from the release archive.
 
 **`.github/workflows/ci.yml`**: In addition to the secret-scan, macOS Bash 3.2
 installer, and Python 3.11/3.12 test/Docker/Desktop gates, a `candidate` job

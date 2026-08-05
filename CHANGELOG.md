@@ -3,6 +3,20 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.27.2 — 2026-08-05
+
+- make the maintainer release command TTY-safe: only its explicit publication
+  confirmation may read the terminal, while every spawned Git, GitHub, Docker,
+  curl, test, and installer process receives closed stdin, no controlling TTY,
+  and a bounded timeout whose cleanup terminates descendants;
+- make public verification tolerate bounded GHCR/GitHub propagation failures,
+  cap and retry anonymous image pulls, persist cumulative phase timings and
+  redacted check diagnostics across resumes, and include full release-asset
+  digests plus failure details in schema-v2 JSON output;
+- verify the source SPDX SBOM attestation separately from source provenance and
+  record the first live candidate-promotion timing evidence and trade-offs for
+  issue #6.
+
 ## 0.27.1 — 2026-08-05
 
 - make the host-native storage-bypass coverage independent of a runner's

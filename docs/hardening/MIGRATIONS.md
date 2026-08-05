@@ -6,6 +6,19 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+### Maintainer release reliability and evidence
+
+No user configuration migration. The maintainer-only publisher now closes stdin
+and removes the controlling TTY for all child processes, applies bounded external-command and anonymous-pull
+deadlines, retries safe public reads, persists cumulative resume timing and
+redacted check details, reports full release-asset digests in schema-v2 JSON,
+and verifies the source SPDX SBOM attestation separately from provenance.
+Schema-v1 private journals remain readable. The script is still excluded from
+the release archive and does not change the Cage CLI, central configuration,
+installed payload, image names, or runtime state.
+
+## 0.27.0 — 2026-08-05
+
 ### Docker storage guardrails and narrow image cleanup
 
 Who is affected: users launching container or Desktop targets, especially on a
@@ -66,6 +79,8 @@ Rollback: install the prior Cage version and remove `[storage]` if its strict
 schema does not recognize the table. OCI labels on already built images are
 harmless metadata. No state or volume migration occurs, and rollback must not
 delete a per-repository Cage volume.
+
+## 0.26.7 — 2026-07-31
 
 ### Deterministic release automation (issue #6)
 
