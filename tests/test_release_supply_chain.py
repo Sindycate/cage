@@ -453,6 +453,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             self.assertIn("cage-9.9.9/cage", names)
             self.assertIn("cage-9.9.9/cage-main.py", names)
             self.assertIn("cage-9.9.9/cage_core/models.py", names)
+            self.assertIn("cage-9.9.9/cage_core/storage.py", names)
             self.assertIn(
                 "cage-9.9.9/cage_core/targets/desktop.py", names
             )
@@ -513,6 +514,28 @@ class SharedBaseImageTests(unittest.TestCase):
             self.assertIn("CAGE_BASE", content, f"{dockerfile_name} must reference CAGE_BASE build arg")
             self.assertIn("FROM ${CAGE_BASE}", content, f"{dockerfile_name} must build FROM the base image")
 
+    def test_all_managed_images_have_role_and_version_labels(self):
+        roles = {
+            "Dockerfile.base": "base",
+            "Dockerfile": "claude",
+            "Dockerfile.codex": "codex",
+        }
+        for dockerfile_name, role in roles.items():
+            content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
+            self.assertIn('io.cage.managed="true"', content)
+            self.assertIn(f'io.cage.role="{role}"', content)
+            self.assertIn('io.cage.version="${CAGE_VERSION}"', content)
+            self.assertIn('org.opencontainers.image.version="${CAGE_VERSION}"', content)
+            instructions = [
+                line.strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            self.assertTrue(
+                any(line.startswith("LABEL org.opencontainers.image.version") for line in instructions[-5:]),
+                f"{dockerfile_name} must end with the managed identity label",
+            )
+
     def test_leaf_dockerfiles_do_not_duplicate_base_packages(self):
         """Leaf images must not reinstall packages already in the base."""
         base_packages = {"bubblewrap", "gosu", "ripgrep", "python3-venv"}
@@ -551,6 +574,7 @@ class SharedBaseImageTests(unittest.TestCase):
         self.assertIn("def _ensure_base_image", container_target)
         self.assertIn("Dockerfile.base", container_target)
         self.assertIn('base_image = f"cage-base:', container_target)
+        self.assertIn('f"CAGE_VERSION={runtime.plan.cage_version}"', container_target)
 
     def test_candidate_base_built_in_ci_and_promoted_in_release(self):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -564,14 +588,22 @@ class SharedBaseImageTests(unittest.TestCase):
 
     def test_ci_builds_base_before_desktop_codex_smoke_image(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        base_build = "docker build -t cage-base:ci -f Dockerfile.base ."
+        base_build = "docker build --build-arg CAGE_VERSION=ci -t cage-base:ci -f Dockerfile.base ."
         leaf_build = (
             "docker build --build-arg CAGE_BASE=cage-base:ci "
+            "--build-arg CAGE_VERSION=ci "
             "-t codex:desktop-smoke -f Dockerfile.codex ."
         )
         self.assertIn(base_build, workflow)
         self.assertIn(leaf_build, workflow)
         self.assertLess(workflow.index(base_build), workflow.index(leaf_build))
+
+    def test_candidate_builds_receive_release_version_for_oci_labels(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            workflow.count("CAGE_VERSION=${{ env.VERSION }}"),
+            3,
+        )
 
 
 
@@ -734,15 +766,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.26.9\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.26.9^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.27.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.27.0^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.26.9\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.27.0\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.26.9\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.26.9^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.27.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.27.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -755,7 +787,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.26.9",
+                "GITHUB_REF": "refs/tags/v0.27.0",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -774,8 +806,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.26.9", output)
-        self.assertIn("tag=v0.26.9", output)
+        self.assertIn("version=0.27.0", output)
+        self.assertIn("tag=v0.27.0", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")

@@ -9,6 +9,8 @@ import time
 import unittest
 from pathlib import Path
 
+from cage_core import storage
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NETGATE = ROOT / "netgate-proxy.py"
@@ -27,6 +29,140 @@ def write_executable(path, content):
     "set CAGE_RUN_DOCKER_SMOKE=1 to run local Docker integration smoke tests",
 )
 class DockerSmokeTests(unittest.TestCase):
+    def test_storage_cleanup_preserves_references_custom_image_and_named_volume(self):
+        major = 900000 + os.getpid()
+        versions = [f"{major}.0.{index}" for index in range(5)]
+        tags = [f"cage-base:{version}" for version in versions]
+        running = f"cage-storage-running-{os.getpid()}"
+        stopped = f"cage-storage-stopped-{os.getpid()}"
+        volume = f"cage-storage-volume-{os.getpid()}"
+        custom = f"cage-storage-custom-{os.getpid()}:latest"
+        created_ids: set[str] = set()
+        try:
+            with tempfile.TemporaryDirectory(dir=ROOT) as raw:
+                context = Path(raw)
+                dockerfile = context / "Dockerfile"
+                dockerfile.write_text(
+                    "FROM busybox:1.36\n"
+                    "ARG VERSION\n"
+                    "CMD [\"sleep\", \"300\"]\n"
+                    "LABEL io.cage.managed=\"true\" "
+                    "io.cage.role=\"base\" io.cage.version=\"${VERSION}\"\n",
+                    encoding="utf-8",
+                )
+                for version, tag in zip(versions, tags):
+                    built = subprocess.run(
+                        [
+                            "docker", "build", "--build-arg", f"VERSION={version}",
+                            "-t", tag, "-f", str(dockerfile), str(context),
+                        ],
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                    self.assertEqual(built.returncode, 0, built.stderr)
+                derived = context / "Dockerfile.derived"
+                derived.write_text(
+                    f"FROM {tags[0]}\nRUN true\n",
+                    encoding="utf-8",
+                )
+                built = subprocess.run(
+                    ["docker", "build", "-t", custom, "-f", str(derived), str(context)],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+
+            subprocess.run(
+                ["docker", "run", "-d", "--name", running, tags[1]],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["docker", "create", "--name", stopped, tags[2], "true"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(["docker", "start", "-a", stopped], check=True)
+            subprocess.run(
+                ["docker", "volume", "create", volume],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "docker", "run", "--rm", "-v", f"{volume}:/data",
+                    "busybox:1.36", "sh", "-c", "printf sentinel >/data/sentinel",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+            for reference in [*tags, custom]:
+                inspected = json.loads(
+                    subprocess.check_output(["docker", "image", "inspect", reference], text=True)
+                )
+                created_ids.add(inspected[0]["Id"])
+            images = tuple(
+                item for item in storage.inventory_images("docker")
+                if item.image_id in created_ids
+            )
+            referenced = storage._referenced_image_ids("docker")
+            candidates, _, _ = storage.cleanup_candidates(
+                images, referenced, storage.StoragePolicy(keep_versions=2)
+            )
+
+            self.assertEqual([item.reference for item in candidates], [tags[0]])
+            removed, failures = storage.delete_candidates("docker", candidates)
+            self.assertEqual((removed, failures), (1, ()))
+            self.assertNotEqual(
+                subprocess.run(["docker", "image", "inspect", tags[0]], check=False).returncode,
+                0,
+            )
+            for reference in (tags[1], tags[2], custom):
+                self.assertEqual(
+                    subprocess.run(
+                        ["docker", "image", "inspect", reference],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    ).returncode,
+                    0,
+                )
+            self.assertEqual(
+                subprocess.check_output(
+                    [
+                        "docker", "run", "--rm", "-v", f"{volume}:/data:ro",
+                        "busybox:1.36", "cat", "/data/sentinel",
+                    ],
+                    text=True,
+                ),
+                "sentinel",
+            )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", running, stopped],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            for reference in [*tags, custom]:
+                subprocess.run(
+                    ["docker", "image", "rm", "-f", reference],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            subprocess.run(
+                ["docker", "volume", "rm", volume],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
     def test_desktop_remote_ssh_injects_profile_provider_and_yolo(self):
         image = os.environ.get("CAGE_DESKTOP_SMOKE_IMAGE")
         if not image:

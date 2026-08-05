@@ -106,6 +106,43 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(resolved.stdio_mcp[0]["name"], "jira")
         self.assertEqual(resolved.remote_mcp[0]["name"], "linear")
         self.assertEqual(resolved.extra_env, ["LINEAR_API_KEY"])
+        self.assertEqual(resolved.storage_policy.warn_free_gib, 20)
+        self.assertEqual(resolved.storage_policy.critical_free_gib, 5)
+
+    def test_storage_policy_is_strict_and_resolved(self):
+        data = self.base_config()
+        data["storage"] = {
+            "warn_free_gib": 30,
+            "critical_free_gib": 8,
+            "min_build_free_gib": 40,
+            "keep_versions": 3,
+            "dangling_min_age_hours": 48,
+        }
+
+        resolved = self.resolve(data)
+
+        self.assertEqual(resolved.storage_policy.warn_free_gib, 30)
+        self.assertEqual(resolved.storage_policy.keep_versions, 3)
+
+    def test_storage_policy_rejects_unknown_noninteger_and_invalid_thresholds(self):
+        cases = [
+            ({"unknown": 1}, "unknown key"),
+            ({"warn_free_gib": True}, "must be an integer"),
+            (
+                {"warn_free_gib": 5, "critical_free_gib": 5},
+                "greater than critical",
+            ),
+            (
+                {"warn_free_gib": 20, "min_build_free_gib": 10},
+                "at least warn",
+            ),
+        ]
+        for policy, message in cases:
+            with self.subTest(policy=policy):
+                data = self.base_config()
+                data["storage"] = policy
+                with self.assertRaisesRegex(cage_config.ConfigError, message):
+                    cage_config.validate_schema(data)
 
     def test_longest_project_prefix_wins(self):
         resolved = self.resolve(self.base_config(), "/tmp/project-a/debug/subdir")
@@ -622,7 +659,9 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(resolved.mcp_pack_names, [])
         self.assertEqual(resolved.skill_pack_names, [])
         self.assertEqual(resolved.host_commands, [])
+        self.assertEqual(resolved.storage_policy.keep_versions, 2)
         self.assertEqual(config_mode, 0o600)
+        self.assertIn("Storage: warn=20GiB critical=5GiB", out.getvalue())
         self.assertNotIn("Claude session sync", out.getvalue())
 
     def test_atomic_write_preserves_config_symlink(self):
@@ -848,6 +887,46 @@ auth = "work"
         self.assertIn("# top comment", rendered)
         self.assertIn(untouched, rendered)
         self.assertEqual(cage_config.tomllib.loads(rendered), after)
+
+    def test_ui_storage_update_is_validated_and_rendered_transactionally(self):
+        original = """# policy comment
+version = 1
+default_preset = "main"
+
+[storage]
+warn_free_gib = 20
+critical_free_gib = 5
+min_build_free_gib = 20
+keep_versions = 2
+dangling_min_age_hours = 24
+
+[presets.main]
+tool = "codex"
+"""
+        before = cage_config.tomllib.loads(original)
+        after = cage_config.apply_ui_operations(before, [{
+            "action": "update_storage",
+            "value": {
+                "warn_free_gib": 30,
+                "critical_free_gib": 8,
+                "min_build_free_gib": 30,
+                "keep_versions": 3,
+                "dangling_min_age_hours": 48,
+            },
+        }])
+
+        rendered = cage_config.render_config_changes(original, before, after)
+
+        self.assertIn("# policy comment", rendered)
+        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+        with self.assertRaisesRegex(cage_config.ConfigError, "greater than critical"):
+            cage_config.apply_ui_operations(before, [{
+                "action": "update_storage",
+                "value": {
+                    "warn_free_gib": 5,
+                    "critical_free_gib": 5,
+                },
+            }])
 
     def test_ui_render_canonicalizes_edited_array_table_object(self):
         original = """version = 1

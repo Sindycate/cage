@@ -134,7 +134,7 @@ than requiring you to remember preset names, and supports three launch paths:
 launch once, remember the selection for this project, or save it as a named
 reusable configuration.
 
-The UI also manages defaults, reusable configurations, auth profiles,
+The UI also manages defaults, Docker storage guardrails, reusable configurations, auth profiles,
 identities, MCP and skill packs, host commands, project mappings, mounts, and
 Claude history sync. Codex OAuth MCP login and logout actions are also available
 from the management screen, so their host browser flow does not require a
@@ -176,6 +176,13 @@ default_preset = "codex-work"
 
 [defaults]
 net = "gate"
+
+[storage]
+warn_free_gib = 20
+critical_free_gib = 5
+min_build_free_gib = 20
+keep_versions = 2
+dangling_min_age_hours = 24
 
 [auth.codex-work]
 tool = "codex"
@@ -710,6 +717,34 @@ To force-rebuild the versioned image Cage actually launches:
 cage --rebuild ~/path/to/repo
 cage codex --rebuild ~/path/to/repo
 ```
+
+### Docker storage guardrails
+
+Cage measures free space in Docker's backing filesystem before container and
+Desktop launches. Host-native Codex execution does not use Docker and bypasses
+this policy. The optional top-level `[storage]` table shown above defaults to a
+20 GiB warning and build floor, a 5 GiB critical floor, two retained semantic
+versions per Cage image role, and a 24-hour minimum age for dangling builds.
+
+Interactive launches below the warning floor can preview cleanup, proceed, or
+abort. Critical launches and image builds must recover enough space or abort;
+noninteractive critical launches and builds fail closed. When the Docker
+backend cannot expose a portable capacity measurement, Cage reports that
+limitation rather than inventing a free-space value.
+
+```bash
+cage storage status
+cage storage clean
+```
+
+`status` lists capacity, retained versions, protected container image IDs, and
+exact cleanup candidates. `clean` repeats that preview and requires typing
+`CLEAN`. It removes only explicitly labeled Cage image tags outside retention
+and old terminal Cage build leftovers. It never uses Docker prune, never uses
+forced removal, and never deletes volumes, containers, images referenced by a
+running or stopped container, unrelated images, legacy unlabeled Cage images,
+or custom derived image tags. Every candidate is rechecked immediately before
+removal so a newly created container makes deletion fail safe.
 
 ### Verify release provenance
 

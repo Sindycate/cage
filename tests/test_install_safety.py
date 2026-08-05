@@ -75,6 +75,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "lifecycle.py",
             "models.py",
             "planning.py",
+            "storage.py",
             "state/__init__.py",
             "state/oauth.py",
             "state/sessions.py",

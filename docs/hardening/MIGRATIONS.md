@@ -6,6 +6,67 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+### Docker storage guardrails and narrow image cleanup
+
+Who is affected: users launching container or Desktop targets, especially on a
+Docker or Colima data disk with less than 20 GiB free, and maintainers of custom
+central configuration or image-build automation. Host-native targets are not
+affected.
+
+Previous behavior: Cage did not measure Docker backing-store capacity, classify
+its images, retain a bounded version history, or offer a product-owned cleanup
+preview. A full Docker disk could surface later as unrelated pull/build errors
+or Codex SQLite `disk I/O error` failures. Cleanup required manual Docker
+commands with no Cage-specific ownership boundary.
+
+New behavior: the optional top-level `[storage]` table has these defaults:
+
+```toml
+[storage]
+warn_free_gib = 20
+critical_free_gib = 5
+min_build_free_gib = 20
+keep_versions = 2
+dangling_min_age_hours = 24
+```
+
+Container and Desktop launches probe Docker capacity before launch effects.
+Interactive low-space launches offer cleanup/proceed/abort; critical launches
+and builds require cleanup or abort. Noninteractive launches may proceed only
+between the warning and critical floors; critical launches and builds fail
+closed. An unavailable portable probe is disclosed and does not fabricate a
+block. `cage storage status` shows the policy, capacity, retention, protected
+container image IDs, and exact candidates. `cage storage clean` requires an
+interactive TTY and the exact word `CLEAN`, rechecks references before each
+ordinary `docker image rm`, and never uses force or prune.
+
+Managed local, Compose, candidate, and promoted release images now carry
+`io.cage.managed`, `io.cage.role`, `io.cage.version`, and OCI version labels.
+Only matching labels plus an exact Cage repository tag authorize version-tag
+cleanup. Old dangling images also require a terminal Cage identity label and
+the configured minimum age. Volumes, containers, images referenced by running
+or stopped containers, unrelated repositories, legacy unlabeled Cage images,
+and custom derived tags are never candidates. Existing unlabeled Cage images
+remain usable and report-only until replaced by a newly labeled build or pull.
+
+Migration and verification:
+
+1. No configuration edit is required; omit `[storage]` to use the defaults.
+2. Run `cage config doctor PATH`, then `cage storage status` and inspect the
+   measured source, retained versions, and exact candidate list.
+3. If cleanup is wanted, run `cage storage clean`, verify the preview, and type
+   `CLEAN`. Do not substitute `docker system prune` or volume-prune commands.
+4. Launch one container or Desktop preset and verify the preflight behavior.
+   Run a host-native preset separately to confirm it does not require Docker.
+5. Custom builders should pass `CAGE_VERSION` to all three Dockerfiles; the
+   shipped launcher, Compose file, CI candidate build, and release promotion
+   already preserve the managed role/version labels.
+
+Rollback: install the prior Cage version and remove `[storage]` if its strict
+schema does not recognize the table. OCI labels on already built images are
+harmless metadata. No state or volume migration occurs, and rollback must not
+delete a per-repository Cage volume.
+
 ### Deterministic release automation (issue #6)
 
 No user configuration migration. `scripts/publish_release.py` and the

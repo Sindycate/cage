@@ -1412,6 +1412,7 @@ class CursesView:
             options = [(name, label) for name, label in COLLECTION_LABELS.items()]
             options += [
                 ("defaults", "Launch defaults"),
+                ("storage", "Docker storage guardrails"),
                 ("project", "Project mappings"),
                 ("oauth", "Codex MCP OAuth login/logout"),
             ]
@@ -1445,6 +1446,44 @@ class CursesView:
                         current["session_sync"] = not bool(current.get("session_sync", True))
                         self.controller.commit([{"action": "update_defaults", "value": current}])
                 except UiError as exc: self.message = str(exc)
+            elif choice == "storage":
+                current = dict(self.controller.snapshot.get("storage", {}))
+                fields = [
+                    ("warn_free_gib", "Warning free space (GiB)"),
+                    ("critical_free_gib", "Critical free space (GiB)"),
+                    ("min_build_free_gib", "Build free-space floor (GiB)"),
+                    ("keep_versions", "Retained versions per role"),
+                    ("dangling_min_age_hours", "Dangling-image minimum age (hours)"),
+                ]
+                action = self.menu(
+                    "Docker storage guardrails",
+                    [
+                        (name, f"{label}: {current.get(name)}")
+                        for name, label in fields
+                    ],
+                    [
+                        "Cleanup is always previewed and confirmation-gated.",
+                        "Volumes, containers, referenced images, unrelated images,",
+                        "and custom derived images are never cleanup candidates.",
+                    ],
+                )
+                if action:
+                    label = dict(fields)[action]
+                    entered = self.prompt(
+                        "Docker storage guardrails",
+                        f"{label}:",
+                        str(current.get(action, "")),
+                    )
+                    if entered is not None:
+                        try:
+                            current[action] = int(entered)
+                            self.controller.commit([
+                                {"action": "update_storage", "value": current}
+                            ])
+                        except ValueError:
+                            self.message = f"{label} must be an integer."
+                        except UiError as exc:
+                            self.message = str(exc)
             elif choice == "project":
                 projects = self.controller.data.get("projects", {})
                 details = [f"{path} → {preset}" for path, preset in sorted(projects.items())] or ["No project mappings."]

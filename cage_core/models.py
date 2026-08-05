@@ -13,6 +13,47 @@ class ContractError(ValueError):
 
 
 @dataclass(frozen=True)
+class StoragePolicy:
+    """Validated global Docker-storage guardrails."""
+
+    warn_free_gib: int = 20
+    critical_free_gib: int = 5
+    min_build_free_gib: int = 20
+    keep_versions: int = 2
+    dangling_min_age_hours: int = 24
+
+    def __post_init__(self) -> None:
+        values = {
+            "warn_free_gib": self.warn_free_gib,
+            "critical_free_gib": self.critical_free_gib,
+            "min_build_free_gib": self.min_build_free_gib,
+            "keep_versions": self.keep_versions,
+            "dangling_min_age_hours": self.dangling_min_age_hours,
+        }
+        if any(type(value) is not int for value in values.values()):
+            raise ContractError("storage policy values must be integers")
+        if not 1 <= self.critical_free_gib <= 1024 * 1024:
+            raise ContractError("critical_free_gib must be between 1 and 1048576")
+        if not self.critical_free_gib < self.warn_free_gib <= 1024 * 1024:
+            raise ContractError("warn_free_gib must be greater than critical_free_gib")
+        if not self.warn_free_gib <= self.min_build_free_gib <= 1024 * 1024:
+            raise ContractError("min_build_free_gib must be at least warn_free_gib")
+        if not 1 <= self.keep_versions <= 100:
+            raise ContractError("keep_versions must be between 1 and 100")
+        if not 0 <= self.dangling_min_age_hours <= 24 * 3650:
+            raise ContractError("dangling_min_age_hours must be between 0 and 87600")
+
+    def public_dict(self) -> dict[str, int]:
+        return {
+            "warn_free_gib": self.warn_free_gib,
+            "critical_free_gib": self.critical_free_gib,
+            "min_build_free_gib": self.min_build_free_gib,
+            "keep_versions": self.keep_versions,
+            "dangling_min_age_hours": self.dangling_min_age_hours,
+        }
+
+
+@dataclass(frozen=True)
 class MountSpec:
     """A normalized same-path host bind mount."""
 
@@ -97,6 +138,7 @@ class ResolvedConfig:
     mcp_inventory_enabled: list[str] = field(default_factory=list)
     mcp_suppressed: list[str] = field(default_factory=list)
     mcp_disable_overrides: list[str] = field(default_factory=list)
+    storage_policy: StoragePolicy = field(default_factory=StoragePolicy)
 
     def public_dict(self) -> dict[str, Any]:
         """Return the non-secret, versioned resolver contract payload."""
@@ -190,6 +232,7 @@ class ResolvedConfig:
                 for item in self.host_commands
             ],
             "extra_mounts": list(self.extra_mounts),
+            "storage": self.storage_policy.public_dict(),
             "warnings": list(self.warnings),
         }
 
@@ -286,7 +329,7 @@ class LaunchPlan:
     """Complete, immutable launch description validated before side effects."""
 
     SCHEMA: ClassVar[str] = "cage.launch-plan"
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     cage_version: str
     repository: str
@@ -314,6 +357,7 @@ class LaunchPlan:
     warnings: tuple[str, ...]
     passthrough_argument_count: int
     runtime_config: RuntimeConfig
+    storage_policy: StoragePolicy = field(default_factory=StoragePolicy)
     codex_profile: str = ""
     session_sync: bool = False
 
@@ -360,6 +404,7 @@ class LaunchPlan:
                 "container_home": self.container_home,
                 "session_sync": self.session_sync,
             },
+            "storage": self.storage_policy.public_dict(),
             "mounts": [item.public_dict() for item in self.mounts],
             "environment_names": list(self.environment_names),
             "selected_capabilities": {
@@ -387,6 +432,7 @@ class LaunchPlan:
             "execution",
             "image",
             "state",
+            "storage",
             "mounts",
             "environment_names",
             "selected_capabilities",
@@ -428,6 +474,13 @@ class LaunchPlan:
                 "container_home",
                 "session_sync",
             },
+            "storage": {
+                "warn_free_gib",
+                "critical_free_gib",
+                "min_build_free_gib",
+                "keep_versions",
+                "dangling_min_age_hours",
+            },
             "selected_capabilities": {
                 "mcp",
                 "skills",
@@ -447,6 +500,13 @@ class LaunchPlan:
                 raise ContractError(
                     f"{kind} launch-plan {name} fields: " + ", ".join(details)
                 )
+        storage = value["storage"]
+        if any(type(storage[name]) is not int for name in nested_shapes["storage"]):
+            raise ContractError("launch-plan storage fields must be integers")
+        try:
+            StoragePolicy(**storage)
+        except ContractError as exc:
+            raise ContractError(f"invalid launch-plan storage policy: {exc}") from exc
         mounts = value.get("mounts")
         if not isinstance(mounts, list):
             raise ContractError("launch-plan field 'mounts' must be a list")

@@ -3,6 +3,65 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-05 — Docker storage guardrails slice implemented locally
+
+Checkpoint: bounded P1-C/P2-B storage slice implemented without claiming either
+parent packet complete
+
+Implemented in the isolated `codex/storage-guardrails` worktree:
+
+- added strict top-level `[storage]` defaults (20 GiB warning/build, 5 GiB
+  critical, two semantic versions per role, 24-hour dangling age) and copied the
+  immutable policy into schema-v2 public launch-plan evidence;
+- added portable host-filesystem/Docker-overlay capacity probes, full image and
+  running/stopped-container inventory, terminal managed-label classification,
+  per-role semantic retention, and exact candidates;
+- added `cage storage status` and TTY plus exact-`CLEAN` confirmed cleanup;
+  removals are non-forced, recheck image identity and container references, and
+  exclude volumes, containers, referenced images, unrelated repositories,
+  legacy unlabeled Cage images, and custom derived tags;
+- enforced warning/cleanup/abort policy before ordinary container and public
+  Desktop effects, plus the 20 GiB floor immediately before local builds and
+  tool-update overlays; host-native execution remains Docker-independent;
+- added terminal managed role/version and OCI version labels to all Dockerfiles
+  and passed the version through launcher, Compose, CI smoke, candidate, update,
+  and digest-promotion paths;
+- added transactional TUI editing, installer/package assertions, README,
+  changelog, migration, and canonical architecture guidance.
+
+Evidence:
+
+- focused storage/config/planning/TUI/CLI/installer/supply-chain suite: `173 passed`;
+- full Python 3.12 suite: `454 passed, 8 skipped`;
+- available real-Docker suite: `7 passed, 1 skipped`; the dedicated cleanup
+  test removed the eligible old managed tag while preserving running/stopped
+  container images, a custom derived image, and a sentinel-bearing named volume;
+- the real command measured 6.7 GiB free through a Docker-overlay probe,
+  protected ten container image IDs, classified 48 legacy Cage images as
+  report-only, and found no product cleanup candidate;
+- DDH `state_5.sqlite` read-only `PRAGMA quick_check` returned `ok` with no WAL;
+  three exact unreferenced 6.14 MB dangling test images were removed across the
+  repeated real-Docker gates, while the
+  1.83 GB dangling image referenced by a created container, the DDH container,
+  and `codex-state-DDH-4c3ad5ff` remained;
+- created a private mode-0600 DDH volume archive (85,203,660 bytes;
+  SHA-256 `23fcd4c9464e862952c51d2f6f3fd642f35295061b0d4441c3d30657c5e979fa`)
+  before maintenance;
+- stopped and restarted the existing Colima instance with `disk: 150`,
+  increasing `/var/lib/docker` to 148 GiB with 58 GiB available; online trim
+  released another 623.4 MiB of guest blocks and the macOS data volume reported
+  127 GiB available;
+- repeated the immutable read-only DDH SQLite check after restart and after the
+  normal launch (`quick_check=ok`, 188,416-byte database, no WAL);
+- completed the final normal TTY Cage smoke against DDH: it pulled
+  `codex:0.26.9`, applied selected-only MCP suppression, started the container
+  path, and Codex printed its help successfully;
+- final `cage storage status` measured 55.9 GiB free, protected eight container
+  image IDs, and reported 49 legacy unlabeled Cage images without cleanup
+  candidates.
+
+No commit, merge, push, tag, release, or packet-status promotion has occurred.
+
 ## 2026-07-31 — issue #6 review hardening (round 4)
 
 Fixed the last P1 from the fourth review pass. The focused suite is now 55

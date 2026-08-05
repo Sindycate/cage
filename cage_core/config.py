@@ -28,7 +28,7 @@ _INSTALL_ROOT = Path(__file__).resolve().parents[1]
 if str(_INSTALL_ROOT) not in sys.path:
     sys.path.insert(0, str(_INSTALL_ROOT))
 
-from cage_core.models import ResolvedConfig
+from cage_core.models import ContractError, ResolvedConfig, StoragePolicy
 from cage_core import codex_policy, codex_runtime
 
 try:
@@ -65,8 +65,16 @@ TOP_LEVEL_KEYS = {
     "host_commands",
     "presets",
     "projects",
+    "storage",
 }
 DEFAULT_KEYS = {"default_preset", "net", "session_sync"}
+STORAGE_KEYS = {
+    "warn_free_gib",
+    "critical_free_gib",
+    "min_build_free_gib",
+    "keep_versions",
+    "dangling_min_age_hours",
+}
 AUTH_KEYS = {
     "tool",
     "env",
@@ -195,6 +203,22 @@ def as_table(data: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def storage_policy_from_config(data: dict[str, Any]) -> StoragePolicy:
+    """Resolve the optional top-level policy using conservative defaults."""
+
+    table = as_table(data, "storage")
+    reject_unknown_keys(table, STORAGE_KEYS, "storage")
+    values = StoragePolicy().public_dict()
+    for name, value in table.items():
+        if type(value) is not int:
+            raise ConfigError(f"storage.{name} must be an integer")
+        values[name] = value
+    try:
+        return StoragePolicy(**values)
+    except ContractError as exc:
+        raise ConfigError(f"invalid [storage] policy: {exc}") from exc
+
+
 def as_list(value: Any, label: str) -> list[Any]:
     if value is None:
         return []
@@ -309,6 +333,7 @@ def validate_schema(data: dict[str, Any]) -> None:
     reject_unknown_keys(data, TOP_LEVEL_KEYS, "top-level config")
     defaults = as_table(data, "defaults")
     reject_unknown_keys(defaults, DEFAULT_KEYS, "defaults")
+    storage_policy_from_config(data)
     validate_named_table(data, "auth", AUTH_KEYS)
     validate_named_table(data, "identities", IDENTITY_KEYS)
     mcp_packs = validate_named_table(data, "mcp_packs", MCP_PACK_KEYS)
@@ -979,6 +1004,7 @@ def resolve_config(
         preset_source=preset_source,
         tool=tool,
         auth_name=auth_name or "",
+        storage_policy=storage_policy_from_config(data),
     )
 
     resolved.net = str(preset.get("net") or defaults.get("net") or "")
@@ -1683,6 +1709,16 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("Target: desktop (persistent Cage container through SSH)")
     if resolved.net:
         print(f"Net:    {resolved.net}")
+    storage = resolved.storage_policy
+    print(
+        "Storage: "
+        f"warn={storage.warn_free_gib}GiB "
+        f"critical={storage.critical_free_gib}GiB "
+        f"build={storage.min_build_free_gib}GiB "
+        f"keep={storage.keep_versions} "
+        f"dangling-age={storage.dangling_min_age_hours}h"
+        + (" (Docker targets only)" if resolved.target == "host" else "")
+    )
     if resolved.yolo:
         print(f"Yolo:   {'enabled' if resolved.yolo == '1' else 'disabled'}")
     if resolved.auth_name:
@@ -2054,6 +2090,13 @@ default_preset = "codex-local"
 net = "gate"
 session_sync = true
 
+[storage]
+warn_free_gib = 20
+critical_free_gib = 5
+min_build_free_gib = 20
+keep_versions = 2
+dangling_min_age_hours = 24
+
 [auth.codex-local]
 tool = "codex"
 host_codex_dir = "~/.codex"
@@ -2424,6 +2467,15 @@ def apply_ui_operations(data: dict[str, Any], operations: list[dict[str, Any]]) 
                 raise ConfigError("update_defaults value must be an object")
             reject_unknown_keys(value, DEFAULT_KEYS, "defaults")
             updated["defaults"] = copy.deepcopy(value)
+        elif action == "update_storage":
+            value = operation.get("value")
+            if not isinstance(value, dict):
+                raise ConfigError("update_storage value must be an object")
+            reject_unknown_keys(value, STORAGE_KEYS, "storage")
+            candidate = copy.deepcopy(updated)
+            candidate["storage"] = copy.deepcopy(value)
+            storage_policy_from_config(candidate)
+            updated["storage"] = copy.deepcopy(value)
         elif action == "set_project":
             path = normalize_project_path(str(operation.get("path", "")))
             name = operation.get("name")
@@ -2520,6 +2572,8 @@ def render_config_changes(text: str, before: dict[str, Any], after: dict[str, An
                 )
     if before.get("defaults", {}) != after.get("defaults", {}):
         rendered = replace_table(rendered, ("defaults",), as_table(after, "defaults"))
+    if before.get("storage", {}) != after.get("storage", {}):
+        rendered = replace_table(rendered, ("storage",), as_table(after, "storage"))
     if before.get("projects", {}) != after.get("projects", {}):
         rendered = replace_projects_section(rendered, as_table(after, "projects"))
     if before.get("default_preset") != after.get("default_preset"):
@@ -2623,7 +2677,11 @@ def ui_summary(data: dict[str, Any], config_path: Path, repo: str) -> dict[str, 
         }
         for collection in EDITABLE_COLLECTIONS
     }
-    return {"effective": effective, "dependencies": dependencies}
+    return {
+        "effective": effective,
+        "dependencies": dependencies,
+        "storage": storage_policy_from_config(data).public_dict(),
+    }
 
 
 def command_ui_export(args: argparse.Namespace) -> int:

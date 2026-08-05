@@ -325,6 +325,7 @@ def build_launch_plan(
         warnings=warnings,
         passthrough_argument_count=len(request.tool_arguments),
         runtime_config=RuntimeConfig.from_resolved(resolved),
+        storage_policy=resolved.storage_policy,
         codex_profile=resolved.codex_profile,
         session_sync=resolved.session_sync == "1",
     )

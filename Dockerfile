@@ -1,5 +1,6 @@
 ARG CAGE_BASE=cage-base:latest
 FROM ${CAGE_BASE}
+ARG CAGE_VERSION=dev
 
 LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
 LABEL org.opencontainers.image.description="cage - Docker isolation for AI coding assistants"
@@ -25,3 +26,8 @@ RUN chmod -R a+rwX /home/claude
 WORKDIR /home/claude
 
 ENTRYPOINT ["/home/claude/entrypoint.sh"]
+
+LABEL org.opencontainers.image.version="${CAGE_VERSION}" \
+      io.cage.managed="true" \
+      io.cage.role="claude" \
+      io.cage.version="${CAGE_VERSION}"

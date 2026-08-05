@@ -38,6 +38,10 @@ cage update          # update the default tool
 cage update claude
 cage update codex
 
+# Inspect capacity/retention and run exact, confirmation-gated image cleanup
+cage storage status
+cage storage clean
+
 # Run Claude Code against a repo (default)
 cage ~/path/to/repo
 cage claude ~/path/to/repo
@@ -152,6 +156,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   execution; state adapters own OAuth/session reconciliation; the lifecycle
   coordinator owns reverse-order cleanup. Pure policy/model modules do not
   execute processes or mutate the filesystem
+- `cage_core.storage` owns portable Docker capacity probing, image/container
+  inventory, managed role/version classification, semantic retention, and exact
+  race-rechecked cleanup candidates. Launch and update paths apply its immutable
+  global policy before container/Desktop effects or builds; host-native execution
+  bypasses it. Cleanup never prunes or deletes volumes, containers, referenced
+  images, unrelated images, legacy unlabeled Cage images, or custom derived tags
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
@@ -171,6 +181,10 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   frontend; Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`,
   `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]`
   mappings. Project mappings use longest-prefix matching
+- The optional top-level `[storage]` policy defaults to a 20 GiB warning/build
+  floor, 5 GiB critical floor, two retained semantic versions per managed image
+  role, and a 24-hour dangling-build minimum age. The TUI edits it through the
+  same concurrency-checked atomic transaction path as other configuration
 - Codex presets may select a native `$CODEX_HOME/<name>.config.toml` layer with
   `codex_profile = "<name>"`; Cage validates the file and forwards
   `--profile <name>` to either execution target
@@ -253,6 +267,11 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 **`Dockerfile.codex`**: Thin leaf image (`FROM cage-base`). Adds `openssh-server` (Codex-only, for Desktop SSH), creates the `codex` user, installs Codex CLI via `npm install -g @openai/codex`, and copies `entrypoint-codex.sh` and `codex-remote.py`. Same root→gosu pattern as Claude.
 
 **`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, and the `mcp-relay`/`host-cmd-relay` bridge scripts. Contains no agent binaries, no entrypoints, no user accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
+
+All three Dockerfiles end with OCI version plus `io.cage.managed`,
+`io.cage.role`, and `io.cage.version` labels. Local launcher, Compose, update
+overlay, CI candidate, and release-promotion paths preserve that identity so
+storage cleanup never infers ownership from repository names alone.
 
 **`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest` and `codex:latest`. Not used for running containers (that's `cage`'s job).
 

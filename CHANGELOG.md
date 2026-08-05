@@ -3,6 +3,23 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.27.0 — 2026-08-05
+
+- add a validated top-level `[storage]` policy and immutable launch-plan
+  evidence with 20 GiB warning/build defaults, a 5 GiB critical default, two
+  retained semantic versions per managed image role, and a 24-hour dangling
+  image age;
+- add portable Docker capacity and image-usage inventory, `cage storage status`,
+  and explicit `CLEAN`-confirmed cleanup whose exact candidates exclude every
+  volume, container, referenced image, unrelated image, legacy unlabeled Cage
+  image, and custom derived tag;
+- enforce storage warning, cleanup, and abort decisions before container and
+  Desktop launch effects, fail closed for critical noninteractive launches and
+  builds, and leave host-native execution unchanged;
+- label local, Compose, update-overlay, candidate, and promoted release images
+  with managed Cage role/version identity, and expose transactional storage
+  policy editing in the TUI.
+
 ## 0.26.9 — 2026-08-01
 
 - make the maintainer release verifier portable across Docker installations by

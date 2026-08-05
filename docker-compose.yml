@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.base
+      args:
+        CAGE_VERSION: ${CAGE_VERSION:-dev}
     image: cage-base:latest
   claude:
     build:
@@ -10,6 +12,7 @@ services:
       dockerfile: Dockerfile
       args:
         CAGE_BASE: cage-base:latest
+        CAGE_VERSION: ${CAGE_VERSION:-dev}
     image: claude-code:latest
     depends_on: [base]
   codex:
@@ -18,5 +21,6 @@ services:
       dockerfile: Dockerfile.codex
       args:
         CAGE_BASE: cage-base:latest
+        CAGE_VERSION: ${CAGE_VERSION:-dev}
     image: codex:latest
     depends_on: [base]

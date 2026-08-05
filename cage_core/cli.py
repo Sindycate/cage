@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from . import config
+from . import config, storage
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
 from .targets.host import HostTargetError, run_host_target
@@ -47,6 +47,8 @@ Commands:
   netgate remove DOMAIN      Remove a decision (re-enables prompting)
   netgate reset [PATH]       Delete all project decisions
   update [claude|codex]      Refresh the tool binary only (fast; no full rebuild)
+  storage status             Show Docker capacity and exact cleanup candidates
+  storage clean              Preview and confirm narrow Cage image cleanup
 
 Options:
   --preset NAME     Use a central config preset (one-shot override)
@@ -367,7 +369,26 @@ def _dispatch_management(
                 cage_version=cage_version,
             )
         )
+    if command == "storage":
+        raise SystemExit(_run_storage(rest, config_root=config_root))
     return False
+
+
+def _run_storage(arguments: list[str], *, config_root: Path) -> int:
+    if len(arguments) != 1 or arguments[0] not in {"status", "clean"}:
+        print("Usage: cage storage status|clean", file=sys.stderr)
+        return 1
+    try:
+        config_path = config_root / "config.toml"
+        policy = (
+            config.storage_policy_from_config(config.load_config(config_path))
+            if config_path.is_file()
+            else storage.StoragePolicy()
+        )
+        return storage.run_storage_command(arguments[0], policy)
+    except (config.ConfigError, storage.StorageError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 def _default_tool(config_path: Path) -> str:
@@ -416,6 +437,7 @@ def _run_update(
             "RUN curl -fsSL https://claude.ai/install.sh | bash\n"
             "USER root\n"
             "RUN chmod -R a+rwX /home/claude\n"
+            f"LABEL io.cage.managed=\"true\" io.cage.role=\"claude\" io.cage.version=\"{cage_version}\"\n"
         )
     elif tool == "codex":
         image = f"codex:{cage_version}"
@@ -429,6 +451,7 @@ def _run_update(
             "USER root\n"
             "RUN chown -R codex:codex /home/codex/.npm-global && "
             "chmod -R a+rwX /home/codex\n"
+            f"LABEL io.cage.managed=\"true\" io.cage.role=\"codex\" io.cage.version=\"{cage_version}\"\n"
         )
     else:
         print(
@@ -439,6 +462,22 @@ def _run_update(
     docker = shutil.which("docker")
     if docker is None:
         print("docker command not found in PATH", file=sys.stderr)
+        return 1
+    try:
+        config_path = config_root / "config.toml"
+        policy = (
+            config.storage_policy_from_config(config.load_config(config_path))
+            if config_path.is_file()
+            else storage.StoragePolicy()
+        )
+        storage.preflight(
+            docker,
+            policy,
+            preferred_image=image,
+            requires_build=True,
+        )
+    except (config.ConfigError, storage.StorageError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     inspect = subprocess.run(
         [docker, "image", "inspect", image],
@@ -478,6 +517,8 @@ def _run_update(
                     [
                         docker,
                         "build",
+                        "--build-arg",
+                        f"CAGE_VERSION={cage_version}",
                         "-t",
                         base,
                         "-f",
@@ -493,6 +534,8 @@ def _run_update(
                     "build",
                     "--build-arg",
                     f"CAGE_BASE={base}",
+                    "--build-arg",
+                    f"CAGE_VERSION={cage_version}",
                     "-t",
                     image,
                     "-f",
@@ -553,10 +596,19 @@ def _delegate_public_desktop(
     if prepared.plan.no_open:
         arguments.append("--no-open")
     arguments.append(prepared.plan.repository)
+    docker = storage.docker_command()
+    storage.preflight(
+        docker,
+        prepared.plan.storage_policy,
+        preferred_image=prepared.plan.image,
+        requires_build=prepared.plan.rebuild,
+    )
+    environment = os.environ.copy()
+    environment["CAGE_STORAGE_PREFLIGHT_DONE"] = "1"
     _exec_python(
         install_root / "cage-desktop.py",
         arguments,
-        os.environ.copy(),
+        environment,
     )
     return 127
 
@@ -665,6 +717,12 @@ def main(
             install_root=root,
             config_root=config_root,
         )
-    except (CliError, HostTargetError, config.ConfigError, OSError) as exc:
+    except (
+        CliError,
+        HostTargetError,
+        config.ConfigError,
+        storage.StorageError,
+        OSError,
+    ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -1,4 +1,5 @@
 FROM ubuntu:24.04
+ARG CAGE_VERSION=dev
 
 RUN set -eux; \
     attempt=1; \
@@ -52,3 +53,10 @@ COPY host-cmd-relay /usr/local/bin/host-cmd-relay
 RUN chmod 755 /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
 
 ENV HISTFILE=/dev/null
+
+# Keep this identity label as the terminal image instruction. Storage cleanup
+# treats only terminal-labeled dangling images as Cage-owned build leftovers.
+LABEL org.opencontainers.image.version="${CAGE_VERSION}" \
+      io.cage.managed="true" \
+      io.cage.role="base" \
+      io.cage.version="${CAGE_VERSION}"

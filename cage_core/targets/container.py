@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .. import config
+from .. import config, storage
 from ..lifecycle import (
     LifecycleCoordinator,
     Resource,
@@ -61,6 +61,7 @@ class ContainerRuntime:
     mcp_label: str = ""
     host_command_label: str = ""
     container_name_override: str = ""
+    build_preflight_done: bool = False
 
     @property
     def plan(self):
@@ -364,10 +365,13 @@ def _ensure_base_image(runtime: ContainerRuntime) -> None:
     )
     if inspect.returncode == 0:
         return
+    _ensure_build_capacity(runtime)
     print(f"Building shared base image {base_image}...")
     result = runtime.run(
         [
             "build",
+            "--build-arg",
+            f"CAGE_VERSION={runtime.plan.cage_version}",
             "-t",
             base_image,
             "-f",
@@ -385,11 +389,14 @@ def _acquire_image(runtime: ContainerRuntime) -> None:
     base_image = f"cage-base:{plan.cage_version}"
     latest = plan.image.partition(":")[0] + ":latest"
     if plan.rebuild:
+        _ensure_build_capacity(runtime)
         print(f"Rebuilding {plan.image} from local Dockerfile...")
         result = runtime.run(
             [
                 "build",
                 "--no-cache",
+                "--build-arg",
+                f"CAGE_VERSION={plan.cage_version}",
                 "-t",
                 base_image,
                 "-f",
@@ -406,6 +413,8 @@ def _acquire_image(runtime: ContainerRuntime) -> None:
                 "--no-cache",
                 "--build-arg",
                 f"CAGE_BASE={base_image}",
+                "--build-arg",
+                f"CAGE_VERSION={plan.cage_version}",
                 "-t",
                 plan.image,
                 "-t",
@@ -450,6 +459,8 @@ def _acquire_image(runtime: ContainerRuntime) -> None:
             "build",
             "--build-arg",
             f"CAGE_BASE={base_image}",
+            "--build-arg",
+            f"CAGE_VERSION={plan.cage_version}",
             "-t",
             plan.image,
             "-t",
@@ -462,6 +473,18 @@ def _acquire_image(runtime: ContainerRuntime) -> None:
     )
     if result.returncode != 0:
         raise ContainerTargetError(f"{plan.tool} image build failed")
+
+
+def _ensure_build_capacity(runtime: ContainerRuntime) -> None:
+    if runtime.build_preflight_done:
+        return
+    storage.preflight(
+        runtime.docker,
+        runtime.plan.storage_policy,
+        preferred_image=runtime.plan.image,
+        requires_build=True,
+    )
+    runtime.build_preflight_done = True
 
 
 def _start_netgate(runtime: ContainerRuntime) -> list[str]:
@@ -991,6 +1014,14 @@ def run_container_target(
     primary_status = 0
     try:
         _validate_before_effects(runtime)
+        if os.environ.get("CAGE_STORAGE_PREFLIGHT_DONE") != "1":
+            storage.preflight(
+                docker,
+                prepared.plan.storage_policy,
+                preferred_image=prepared.plan.image,
+                requires_build=prepared.plan.rebuild,
+            )
+        runtime.build_preflight_done = prepared.plan.rebuild
         for warning in prepared.plan.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
         _handle_collision(runtime)
@@ -1119,7 +1150,7 @@ def run_container_target(
             file=sys.stderr,
         )
         primary_status = 1
-    except (ContainerTargetError, config.ConfigError) as exc:
+    except (ContainerTargetError, config.ConfigError, storage.StorageError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         primary_status = 1
     finally:

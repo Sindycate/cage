@@ -80,8 +80,8 @@ jobs:
       - name: Build shared base and Desktop Codex smoke image
         if: matrix.python-version == '3.12'
         run: |
-          docker build -t cage-base:ci -f Dockerfile.base .
-          docker build --build-arg CAGE_BASE=cage-base:ci -t codex:desktop-smoke -f Dockerfile.codex .
+          docker build --build-arg CAGE_VERSION=ci -t cage-base:ci -f Dockerfile.base .
+          docker build --build-arg CAGE_BASE=cage-base:ci --build-arg CAGE_VERSION=ci -t codex:desktop-smoke -f Dockerfile.codex .
 
       - name: Run Desktop SSH integration smoke test
         if: matrix.python-version == '3.12'
@@ -208,6 +208,8 @@ jobs:
           push: true
           sbom: true
           provenance: mode=max
+          build-args: |
+            CAGE_VERSION=${{ env.VERSION }}
           tags: ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}
 
       - name: Attest candidate base image provenance
@@ -246,6 +248,7 @@ jobs:
           provenance: mode=max
           build-args: |
             CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
+            CAGE_VERSION=${{ env.VERSION }}
           tags: ghcr.io/sindycate/cage/claude-code:candidate-${{ env.SHA }}
 
       - name: Attest candidate claude-code image provenance
@@ -270,6 +273,7 @@ jobs:
           provenance: mode=max
           build-args: |
             CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
+            CAGE_VERSION=${{ env.VERSION }}
           tags: ghcr.io/sindycate/cage/codex:candidate-${{ env.SHA }}
 
       - name: Attest candidate codex image provenance
