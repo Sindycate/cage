@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -248,10 +249,11 @@ class CleanupExecutionTests(unittest.TestCase):
 
 class HostBypassTests(unittest.TestCase):
     def test_host_native_launch_does_not_probe_docker_storage(self):
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as config_raw:
             repo = Path(raw)
+            config_root = Path(config_raw)
             resolved = ResolvedConfig(
-                config_path=repo / "config.toml",
+                config_path=config_root / "config.toml",
                 repo_path=str(repo),
                 preset_name="host",
                 preset_source="flag",
@@ -259,9 +261,11 @@ class HostBypassTests(unittest.TestCase):
                 target="host",
                 net="open",
             )
-            with patch("cage_core.cli._resolve", return_value=resolved), patch(
-                "cage_core.cli.run_host_target", return_value=0
-            ), patch("cage_core.cli.storage.preflight") as preflight:
+            with patch.dict(os.environ, {"CAGE_CONFIG_DIR": str(config_root)}), patch(
+                "cage_core.cli._resolve", return_value=resolved
+            ), patch("cage_core.cli.run_host_target", return_value=0), patch(
+                "cage_core.cli.storage.preflight"
+            ) as preflight:
                 status = cli.main([str(repo)], cage_version="0.26.9")
 
         self.assertEqual(status, 0)

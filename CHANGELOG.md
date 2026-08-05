@@ -3,6 +3,11 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.27.1 — 2026-08-05
+
+- make the host-native storage-bypass coverage independent of a runner's
+  pre-existing Cage configuration directory.
+
 ## 0.27.0 — 2026-08-05
 
 - add a validated top-level `[storage]` policy and immutable launch-plan
