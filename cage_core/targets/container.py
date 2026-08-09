@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import TextIO
 
 from .. import config, storage
+from ..opencode import (
+    OpenCodeError,
+    create_launch_snapshot,
+    remove_snapshot,
+    write_runtime_environment,
+)
 from ..lifecycle import (
     LifecycleCoordinator,
     Resource,
@@ -27,7 +33,12 @@ from ..lifecycle import (
     wait_for_line,
 )
 from ..planning import CAGE_REGISTRY, PreparedLaunch
-from ..state import ClaudeSessionSync, OAuthReconciler, SyncError
+from ..state import (
+    ClaudeSessionSync,
+    OAuthReconciler,
+    OpenCodeStateReconciler,
+    SyncError,
+)
 
 
 class ContainerTargetError(RuntimeError):
@@ -64,6 +75,8 @@ class ContainerRuntime:
     host_command_label: str = ""
     container_name_override: str = ""
     build_preflight_done: bool = False
+    opencode_snapshot: Path | None = None
+    opencode_environment: dict[str, str] = field(default_factory=dict)
 
     @property
     def plan(self):
@@ -196,7 +209,7 @@ def _validate_before_effects(runtime: ContainerRuntime) -> None:
             raise ContainerTargetError(
                 f"Invalid CLAUDE_AUTH: {mode} (use 'bedrock' or 'api-key')"
             )
-    else:
+    elif plan.tool == "codex":
         codex_home = Path(
             resolved.host_codex_dir or (Path.home() / ".codex")
         ).expanduser()
@@ -216,6 +229,17 @@ def _validate_before_effects(runtime: ContainerRuntime) -> None:
                 raise ContainerTargetError(
                     f"selected skill {item['name']!r} is missing SKILL.md: "
                     f"{skill_path}"
+                )
+    else:
+        if plan.target != "container":
+            raise ContainerTargetError(
+                "OpenCode currently supports only container execution"
+            )
+        for item in resolved.skill_mounts:
+            skill_path = Path(item["path"]).expanduser()
+            if not skill_path.is_dir() or not (skill_path / "SKILL.md").is_file():
+                raise ContainerTargetError(
+                    f"selected skill {item['name']!r} is missing or invalid: {skill_path}"
                 )
     if plan.target == "desktop":
         if os.environ.get("CAGE_DESKTOP_INTERNAL") != "1":
@@ -506,6 +530,23 @@ def _ensure_build_capacity(runtime: ContainerRuntime) -> None:
     runtime.build_preflight_done = True
 
 
+def _append_environment_argument(
+    runtime: ContainerRuntime,
+    arguments: list[str],
+    name: str,
+    value: str,
+) -> None:
+    if runtime.plan.tool == "opencode":
+        previous = runtime.opencode_environment.get(name)
+        if previous is not None and previous != value:
+            raise ContainerTargetError(
+                f"conflicting private OpenCode environment value for {name}"
+            )
+        runtime.opencode_environment[name] = value
+        return
+    arguments.extend(("-e", f"{name}={value}"))
+
+
 def _start_netgate(runtime: ContainerRuntime) -> list[str]:
     if runtime.plan.network == "off":
         return ["--network", "none"]
@@ -547,22 +588,20 @@ def _start_netgate(runtime: ContainerRuntime) -> list[str]:
     proxy_url = (
         f"http://cage:{token}@host.docker.internal:{port}"
     )
-    return [
+    arguments = [
         "--add-host",
         "host.docker.internal:host-gateway",
-        "-e",
-        f"HTTP_PROXY={proxy_url}",
-        "-e",
-        f"HTTPS_PROXY={proxy_url}",
-        "-e",
-        f"http_proxy={proxy_url}",
-        "-e",
-        f"https_proxy={proxy_url}",
-        "-e",
-        "NO_PROXY=localhost,127.0.0.1",
-        "-e",
-        "no_proxy=localhost,127.0.0.1",
     ]
+    for name, value in (
+        ("HTTP_PROXY", proxy_url),
+        ("HTTPS_PROXY", proxy_url),
+        ("http_proxy", proxy_url),
+        ("https_proxy", proxy_url),
+        ("NO_PROXY", "localhost,127.0.0.1"),
+        ("no_proxy", "localhost,127.0.0.1"),
+    ):
+        _append_environment_argument(runtime, arguments, name, value)
+    return arguments
 
 
 def _parse_bridge_ports(
@@ -638,15 +677,15 @@ def _start_bridge(
     docker_arguments: list[str] = []
     for name, port in ports:
         normalized = name.upper().replace("-", "_")
-        docker_arguments.extend(
+        _append_environment_argument(
+            runtime,
+            docker_arguments,
             (
-                "-e",
-                (
-                    f"MCP_BRIDGE_PORT_{normalized}={port}"
-                    if kind == "mcp"
-                    else f"HOST_CMD_BRIDGE_PORT_{normalized}={port}"
-                ),
-            )
+                f"MCP_BRIDGE_PORT_{normalized}"
+                if kind == "mcp"
+                else f"HOST_CMD_BRIDGE_PORT_{normalized}"
+            ),
+            port,
         )
     names = [name for name, _ in ports]
     if kind == "mcp":
@@ -654,30 +693,36 @@ def _start_bridge(
             name: int(port)
             for name, port in ports
         }
-        docker_arguments.extend(
-            (
-                "-e",
-                "MCP_BRIDGE_HOST=host.docker.internal",
-                "-e",
-                f"MCP_BRIDGE_TOKEN={token}",
-                "-e",
-                "CAGE_MCP_SERVERS="
-                + json.dumps(mapping, separators=(",", ":")),
-            )
+        _append_environment_argument(
+            runtime, docker_arguments, "MCP_BRIDGE_HOST", "host.docker.internal"
+        )
+        _append_environment_argument(
+            runtime, docker_arguments, "MCP_BRIDGE_TOKEN", token
+        )
+        _append_environment_argument(
+            runtime,
+            docker_arguments,
+            "CAGE_MCP_SERVERS",
+            json.dumps(mapping, separators=(",", ":")),
         )
         label = " [MCP]"
         runtime.started_mcp_names.extend(names)
         runtime.mcp_label = label
     else:
-        docker_arguments.extend(
-            (
-                "-e",
-                "HOST_CMD_BRIDGE_HOST=host.docker.internal",
-                "-e",
-                f"HOST_CMD_BRIDGE_TOKEN={token}",
-                "-e",
-                "CAGE_HOST_COMMANDS=" + " ".join(names),
-            )
+        _append_environment_argument(
+            runtime,
+            docker_arguments,
+            "HOST_CMD_BRIDGE_HOST",
+            "host.docker.internal",
+        )
+        _append_environment_argument(
+            runtime, docker_arguments, "HOST_CMD_BRIDGE_TOKEN", token
+        )
+        _append_environment_argument(
+            runtime,
+            docker_arguments,
+            "CAGE_HOST_COMMANDS",
+            " ".join(names),
         )
         label = " [HOST-CMD]"
         runtime.host_command_label = label
@@ -732,7 +777,11 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
         "--cap-add",
         "SETUID",
         "--tmpfs",
-        "/tmp",
+        (
+            "/tmp:rw,nosuid,nodev,exec,mode=1777"
+            if plan.tool == "opencode"
+            else "/tmp"
+        ),
         "--tmpfs",
         "/run",
         "-v",
@@ -799,7 +848,7 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
             arguments.extend(
                 ("-e", f"ANTHROPIC_API_KEY={os.environ['ANTHROPIC_API_KEY']}")
             )
-    else:
+    elif plan.tool == "codex":
         arguments.extend(
             ("-v", f"{plan.volume_name}:{plan.container_home}/.codex")
         )
@@ -858,24 +907,59 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
                     + ":/cage-desktop/heartbeat:ro",
                 )
             )
-    if resolved.git_user_name:
-        arguments.extend(("-e", f"GIT_USER_NAME={resolved.git_user_name}"))
-    if resolved.git_user_email:
+    else:
         arguments.extend(
-            ("-e", f"GIT_USER_EMAIL={resolved.git_user_email}")
+            (
+                "-v",
+                f"{plan.volume_name}:{plan.container_home}/.cage-state",
+                "-e",
+                "OPENCODE_DISABLE_AUTOUPDATE=1",
+                "-e",
+                "CAGE_OPENCODE_PLUGINS="
+                + ("1" if resolved.opencode_plugins == "1" else "0"),
+            )
+        )
+        if runtime.opencode_snapshot is None:
+            raise ContainerTargetError("OpenCode launch snapshot was not prepared")
+        arguments.extend(
+            (
+                "-v",
+                f"{runtime.opencode_snapshot}:/cage-opencode-snapshot:ro",
+            )
+        )
+        callback_ports: list[str] = []
+        caller = list(runtime.prepared.request.tool_arguments)
+        if caller[:2] == ["mcp", "auth"]:
+            callback_ports.append("19876")
+        elif caller[:2] in (["auth", "login"], ["providers", "login"]):
+            callback_ports.extend(("1455", "19876"))
+        if callback_ports:
+            arguments.extend(
+                ("-e", "CAGE_OPENCODE_CALLBACK_PORTS=" + " ".join(callback_ports))
+            )
+            for port in callback_ports:
+                arguments.extend(("-p", f"127.0.0.1:{port}:{port}"))
+    if resolved.git_user_name:
+        _append_environment_argument(
+            runtime, arguments, "GIT_USER_NAME", resolved.git_user_name
+        )
+    if resolved.git_user_email:
+        _append_environment_argument(
+            runtime, arguments, "GIT_USER_EMAIL", resolved.git_user_email
         )
     if resolved.ssh_key:
         ssh_key = Path(resolved.ssh_key).expanduser()
         if ssh_key.is_file():
             arguments.extend(
-                (
-                    "-v",
-                    f"{ssh_key}:{plan.container_home}/.ssh/id:ro",
-                    "-e",
-                    "GIT_SSH_COMMAND=ssh -i "
-                    f"{plan.container_home}/.ssh/id -o IdentitiesOnly=yes "
-                    "-o StrictHostKeyChecking=accept-new",
-                )
+                ("-v", f"{ssh_key}:{plan.container_home}/.ssh/id:ro")
+            )
+            _append_environment_argument(
+                runtime,
+                arguments,
+                "GIT_SSH_COMMAND",
+                "ssh -i "
+                f"{plan.container_home}/.ssh/id -o IdentitiesOnly=yes "
+                "-o StrictHostKeyChecking=accept-new",
             )
             known_hosts = Path.home() / ".ssh" / "known_hosts"
             if known_hosts.is_file():
@@ -887,12 +971,14 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
                     )
                 )
     if resolved.ssh_host:
-        arguments.extend(("-e", f"SSH_HOST={resolved.ssh_host}"))
+        _append_environment_argument(
+            runtime, arguments, "SSH_HOST", resolved.ssh_host
+        )
     for name in resolved.extra_env:
         value = os.environ.get(name)
         if value:
-            arguments.extend(("-e", f"{name}={value}"))
-    if resolved.remote_mcp:
+            _append_environment_argument(runtime, arguments, name, value)
+    if resolved.remote_mcp and plan.tool != "opencode":
         arguments.extend(
             (
                 "-e",
@@ -914,8 +1000,40 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
             arguments.extend(("-v", f"{host_gh}:/host-gh:ro"))
         token = _resolve_github_token(resolved)
         if token:
-            arguments.extend(("-e", f"GH_TOKEN={token}"))
+            _append_environment_argument(runtime, arguments, "GH_TOKEN", token)
     return arguments
+
+
+def _create_opencode_snapshot(runtime: ContainerRuntime) -> None:
+    destination = runtime.config_root / (
+        ".opencode-launch-" + str(os.getpid()) + "-" + secrets.token_hex(8)
+    )
+    create_launch_snapshot(
+        destination=destination,
+        host_config_directory=Path(
+            runtime.resolved.host_opencode_config_dir
+            or Path.home() / ".config" / "opencode"
+        ).expanduser(),
+        repository=Path(runtime.plan.repository),
+        stdio_mcp=(
+            [] if runtime.plan.network == "off" else runtime.resolved.stdio_mcp
+        ),
+        remote_mcp=runtime.resolved.remote_mcp,
+        skill_mounts=runtime.resolved.skill_mounts,
+        host_agents_directory=(
+            None
+            if runtime.resolved.skill_mounts
+            else Path(
+                runtime.resolved.host_agents_dir or Path.home() / ".agents"
+            ).expanduser()
+        ),
+        plugins_enabled=runtime.resolved.opencode_plugins == "1",
+    )
+    runtime.opencode_snapshot = destination
+    runtime.lifecycle.register(
+        "OpenCode configuration snapshot",
+        lambda: remove_snapshot(destination),
+    )
 
 
 def _append_extra_mounts(
@@ -1043,8 +1161,44 @@ def run_container_target(
         runtime.build_preflight_done = prepared.plan.rebuild
         for warning in prepared.plan.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
+        if prepared.plan.tool == "opencode":
+            _create_opencode_snapshot(runtime)
         _handle_collision(runtime)
         _acquire_image(runtime)
+        if prepared.plan.tool == "opencode":
+            volume = runtime.run(
+                ["volume", "create", prepared.plan.volume_name],
+                stdout=subprocess.DEVNULL,
+                check=False,
+            )
+            if volume.returncode != 0:
+                raise ContainerTargetError("cannot create OpenCode state volume")
+            opencode_state = OpenCodeStateReconciler(
+                volume_name=prepared.plan.volume_name,
+                image=prepared.plan.image,
+                host_directory=Path(
+                    runtime.resolved.host_opencode_data_dir
+                    or Path.home() / ".local" / "share" / "opencode"
+                ).expanduser(),
+                config_directory=config_root.resolve(),
+                selected_mcp_names={
+                    str(server["name"])
+                    for server in runtime.resolved.remote_mcp
+                    if server.get("auth") == "oauth"
+                },
+                copy_auth=runtime.resolved.opencode_copy_auth != "0",
+                selected_mcp_urls={
+                    str(server["name"]): str(server["url"])
+                    for server in runtime.resolved.remote_mcp
+                    if server.get("auth") == "oauth"
+                },
+                docker=docker,
+            )
+            opencode_state.sync_in()
+            runtime.lifecycle.register(
+                "OpenCode authentication reconciliation",
+                lambda: _cleanup_opencode_state(opencode_state),
+            )
         proxy_arguments = _start_netgate(runtime)
         mcp = _start_bridge(
             runtime,
@@ -1109,12 +1263,15 @@ def run_container_target(
                     "Codex OAuth reconciliation",
                     lambda: _cleanup_oauth(oauth),
                 )
-
         yolo_label = " [YOLO]" if prepared.plan.yolo else ""
         network_label = runtime.proxy_label
         if prepared.plan.network == "off":
             network_label = " [NET:OFF]"
-        display = "Claude Code" if prepared.plan.tool == "claude" else "Codex CLI"
+        display = {
+            "claude": "Claude Code",
+            "codex": "Codex CLI",
+            "opencode": "OpenCode",
+        }[prepared.plan.tool]
         print(
             f"=== {display} Container{yolo_label}{network_label}"
             f"{runtime.mcp_label}{runtime.host_command_label} ==="
@@ -1137,6 +1294,12 @@ def run_container_target(
             docker_arguments.extend(mcp.docker_arguments)
         if host_command is not None:
             docker_arguments.extend(host_command.docker_arguments)
+        if prepared.plan.tool == "opencode":
+            assert runtime.opencode_snapshot is not None
+            write_runtime_environment(
+                runtime.opencode_snapshot / "runtime-env.json",
+                runtime.opencode_environment,
+            )
         _append_extra_mounts(runtime, docker_arguments)
         if prepared.plan.tool == "claude" and prepared.plan.target != "desktop":
             overlay = _create_claude_mcp_overlay(runtime)
@@ -1150,9 +1313,11 @@ def run_container_target(
         if prepared.plan.yolo:
             if prepared.plan.tool == "claude":
                 tool_arguments.append("--dangerously-skip-permissions")
-            else:
+            elif prepared.plan.tool == "codex":
                 tool_arguments.append("--yolo")
                 docker_arguments.extend(("-e", "CAGE_YOLO=1"))
+            else:
+                tool_arguments.append("--auto")
         if prepared.plan.target == "desktop":
             from .desktop import run_desktop
 
@@ -1165,11 +1330,16 @@ def run_container_target(
         primary_status = exc.status
     except SyncError as exc:
         print(
-            f"ERROR: Codex OAuth credential sync failed: {exc}",
+            f"ERROR: authentication state sync failed: {exc}",
             file=sys.stderr,
         )
         primary_status = 1
-    except (ContainerTargetError, config.ConfigError, storage.StorageError) as exc:
+    except (
+        ContainerTargetError,
+        OpenCodeError,
+        config.ConfigError,
+        storage.StorageError,
+    ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         primary_status = 1
     finally:
@@ -1185,6 +1355,18 @@ def _cleanup_oauth(oauth: OAuthReconciler) -> int:
     except (SyncError, OSError, ValueError) as exc:
         print(
             f"ERROR: Codex OAuth credential sync failed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _cleanup_opencode_state(state: OpenCodeStateReconciler) -> int:
+    try:
+        state.sync_out()
+        return 0
+    except (SyncError, OSError, ValueError) as exc:
+        print(
+            f"ERROR: OpenCode authentication sync failed: {exc}",
             file=sys.stderr,
         )
         return 1

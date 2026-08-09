@@ -120,8 +120,12 @@ class ResolvedConfig:
     aws_profile: str = ""
     aws_region: str = ""
     host_codex_dir: str = ""
+    host_opencode_config_dir: str = ""
+    host_opencode_data_dir: str = ""
     host_agents_dir: str = ""
     codex_copy_auth: str = ""
+    opencode_copy_auth: str = ""
+    opencode_plugins: str = ""
     git_user_name: str = ""
     git_user_email: str = ""
     ssh_key: str = ""
@@ -203,8 +207,14 @@ class ResolvedConfig:
                 "aws_profile": self.aws_profile,
                 "aws_region": self.aws_region,
                 "host_codex_dir": self.host_codex_dir,
+                "host_opencode_config_dir": self.host_opencode_config_dir,
+                "host_opencode_data_dir": self.host_opencode_data_dir,
                 "host_agents_dir": self.host_agents_dir,
-                "copy_auth": self.codex_copy_auth == "1",
+                "copy_auth": (
+                    self.opencode_copy_auth == "1"
+                    if self.tool == "opencode"
+                    else self.codex_copy_auth == "1"
+                ),
             },
             "identity": {
                 "name": self.identity_name,
@@ -245,8 +255,12 @@ class RuntimeConfig:
     aws_profile: str
     aws_region: str
     host_codex_dir: str
+    host_opencode_config_dir: str
+    host_opencode_data_dir: str
     host_agents_dir: str
     codex_copy_auth: str
+    opencode_copy_auth: str
+    opencode_plugins: str
     codex_profile: str
     git_user_name: str
     git_user_email: str
@@ -279,8 +293,12 @@ class RuntimeConfig:
             aws_profile=resolved.aws_profile,
             aws_region=resolved.aws_region,
             host_codex_dir=resolved.host_codex_dir,
+            host_opencode_config_dir=resolved.host_opencode_config_dir,
+            host_opencode_data_dir=resolved.host_opencode_data_dir,
             host_agents_dir=resolved.host_agents_dir,
             codex_copy_auth=resolved.codex_copy_auth,
+            opencode_copy_auth=resolved.opencode_copy_auth,
+            opencode_plugins=resolved.opencode_plugins,
             codex_profile=resolved.codex_profile,
             git_user_name=resolved.git_user_name,
             git_user_email=resolved.git_user_email,
@@ -362,7 +380,7 @@ class LaunchPlan:
     session_sync: bool = False
 
     def __post_init__(self) -> None:
-        if self.tool not in {"claude", "codex"}:
+        if self.tool not in {"claude", "codex", "opencode"}:
             raise ContractError(f"invalid tool: {self.tool!r}")
         if self.target not in {"container", "desktop", "host"}:
             raise ContractError(f"invalid execution target: {self.target!r}")

@@ -25,7 +25,7 @@ PRIVATE_MACOS_HOME_RE = re.compile(
     r"/Users/(?!example(?:/|$)|me(?:/|$))[A-Za-z0-9._-]+(?:/|$)"
 )
 GENERATED_TARGET_RE = re.compile(
-    r"\bcage-(?:claude|codex)-[A-Za-z0-9._-]+-[0-9a-f]{8,16}\b"
+    r"\bcage-(?:claude|codex|opencode)-[A-Za-z0-9._-]+-[0-9a-f]{8,16}\b"
 )
 
 
@@ -78,6 +78,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             "ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}",
             "ghcr.io/sindycate/cage/claude-code:candidate-${{ env.SHA }}",
             "ghcr.io/sindycate/cage/codex:candidate-${{ env.SHA }}",
+            "ghcr.io/sindycate/cage/opencode:candidate-${{ env.SHA }}",
         ):
             self.assertIn(fragment, text)
         # Leaves build from the exact (effective) base digest, never a mutable
@@ -86,7 +87,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         leaf_base = (
             "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}"
         )
-        self.assertEqual(text.count(leaf_base), 2)
+        self.assertEqual(text.count(leaf_base), 3)
         # Candidate images retain SBOM + max provenance and per-image attestations.
         self.assertIn("sbom: true", text)
         self.assertIn("provenance: mode=max", text)
@@ -94,11 +95,13 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             "subject-name: ghcr.io/sindycate/cage/base",
             "subject-name: ghcr.io/sindycate/cage/claude-code",
             "subject-name: ghcr.io/sindycate/cage/codex",
+            "subject-name: ghcr.io/sindycate/cage/opencode",
         ):
             self.assertIn(subject, text)
         # Manifest artifact is SHA-named, schema-typed, and uploaded.
         self.assertIn("name: release-candidate-${{ env.SHA }}", text)
         self.assertIn('"schema": "cage.release-candidate"', text)
+        self.assertIn('"schema_version": 2', text)
 
     def test_ci_candidates_are_write_once_verify_reuse_or_fail_closed(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
@@ -127,7 +130,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         # Build and attest steps are conditionally skipped for reused images, so a
         # CI rerun can never replace an immutable candidate with freshly resolved
         # mutable dependencies.
-        for image_key in ("base", "claude", "codex"):
+        for image_key in ("base", "claude", "codex", "opencode"):
             self.assertIn(
                 f"if: steps.resolve.outputs.{image_key}_exists != 'true'", text
             )
@@ -234,6 +237,12 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             'if [ -z "$TAG_OBJECT" ] || [ -z "$TAG_COMMIT" ]; then',
         ):
             self.assertIn(fragment, text)
+        self.assertIn('manifest.get("schema_version") != 2', text)
+        self.assertIn('manifest.get("ci_run_id") != int(run_id)', text)
+        self.assertIn('manifest.get("platforms") != ["linux/amd64", "linux/arm64"]', text)
+        self.assertIn(
+            'set(images) != set(names)', text
+        )
         # The gate refuses a conflicting existing version tag.
         self.assertIn(
             "version tag ${versioned} exists with digest ${existing} != ${expected}",
@@ -509,16 +518,30 @@ class SharedBaseImageTests(unittest.TestCase):
         self.assertIn("host-cmd-relay", base)
 
     def test_leaf_dockerfiles_reference_base(self):
-        for dockerfile_name in ("Dockerfile", "Dockerfile.codex"):
+        for dockerfile_name in ("Dockerfile", "Dockerfile.codex", "Dockerfile.opencode"):
             content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
             self.assertIn("CAGE_BASE", content, f"{dockerfile_name} must reference CAGE_BASE build arg")
             self.assertIn("FROM ${CAGE_BASE}", content, f"{dockerfile_name} must build FROM the base image")
+
+    def test_opencode_image_pins_runtime_isolation_and_callback_contracts(self):
+        content = (ROOT / "Dockerfile.opencode").read_text(encoding="utf-8")
+        for contract in (
+            "--pure",
+            "OPENCODE_DISABLE_PROJECT_CONFIG",
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+            "127.0.0.1:19876",
+            "O$=1455",
+            "/auth/callback",
+            "/.well-known/opencode",
+        ):
+            self.assertIn(contract, content)
 
     def test_all_managed_images_have_role_and_version_labels(self):
         roles = {
             "Dockerfile.base": "base",
             "Dockerfile": "claude",
             "Dockerfile.codex": "codex",
+            "Dockerfile.opencode": "opencode",
         }
         for dockerfile_name, role in roles.items():
             content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
@@ -539,7 +562,7 @@ class SharedBaseImageTests(unittest.TestCase):
     def test_leaf_dockerfiles_do_not_duplicate_base_packages(self):
         """Leaf images must not reinstall packages already in the base."""
         base_packages = {"bubblewrap", "gosu", "ripgrep", "python3-venv"}
-        for dockerfile_name in ("Dockerfile", "Dockerfile.codex"):
+        for dockerfile_name in ("Dockerfile", "Dockerfile.codex", "Dockerfile.opencode"):
             content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
             for pkg in base_packages:
                 self.assertNotIn(pkg, content,
@@ -602,7 +625,7 @@ class SharedBaseImageTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertEqual(
             workflow.count("CAGE_VERSION=${{ env.VERSION }}"),
-            3,
+            4,
         )
 
 
@@ -766,15 +789,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.27.4\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.27.4^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.0^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.27.4\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.0\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.27.4\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.27.4^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.28.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -787,7 +810,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.27.4",
+                "GITHUB_REF": "refs/tags/v0.28.0",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -806,8 +829,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.27.4", output)
-        self.assertIn("tag=v0.27.4", output)
+        self.assertIn("version=0.28.0", output)
+        self.assertIn("tag=v0.28.0", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")
@@ -867,13 +890,13 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
     def test_authoritative_404_authorizes_creation(self):
         result, outputs = self._run_resolve("absent")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for key in ("base", "claude", "codex"):
+        for key in ("base", "claude", "codex", "opencode"):
             self.assertEqual(outputs.get(f"{key}_exists"), "false", outputs)
 
     def test_200_verified_candidate_is_reused(self):
         result, outputs = self._run_resolve("present")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for key in ("base", "claude", "codex"):
+        for key in ("base", "claude", "codex", "opencode"):
             self.assertEqual(outputs.get(f"{key}_exists"), "true", outputs)
             self.assertTrue(outputs.get(f"{key}_digest", "").startswith("sha256:"))
 

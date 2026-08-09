@@ -126,7 +126,7 @@ class ProbeAndPreflightTests(unittest.TestCase):
             images=(),
             referenced_image_ids=frozenset(),
             candidates=(),
-            retained_versions={"base": (), "claude": (), "codex": ()},
+            retained_versions={"base": (), "claude": (), "codex": (), "opencode": ()},
             legacy_cage_images=0,
         )
 

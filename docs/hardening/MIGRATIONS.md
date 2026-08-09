@@ -6,6 +6,78 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+### OpenCode container integration (targeting 0.28.0)
+
+Who is affected: users who add an OpenCode auth block or preset, and maintainers
+of custom image, CI, registry, or release automation. Existing Claude and Codex
+presets keep their current behavior.
+
+New behavior: `tool = "opencode"` selects a container-only third assistant.
+OpenCode auth blocks may set `host_opencode_config_dir` (defaulting to the
+host's XDG OpenCode config directory), `host_opencode_data_dir` (defaulting to
+the host's XDG OpenCode data directory), `copy_auth`, and the existing
+`host_agents_dir`. Presets may select existing `skill_packs`, `mcp_packs`,
+identities, host commands, and extra mounts. They also add
+`opencode_plugins = false`; the default launches with `--pure`, while `true`
+explicitly trusts global and project plugin code. OpenCode rejects `target =
+"host"`, `target = "desktop"`, and `session_sync`.
+
+Cage freezes bounded, symlink-free copies of applicable JSON/JSONC settings,
+root project instructions, project-local skills, and selected host skills. It
+resolves the snapshot with the exact image binary, removes inherited MCPs,
+adds only selected local/remote MCP definitions, disables live project config
+and external skill discovery, and aborts unless the final MCP transports and
+disk skills match the frozen selection. Repository files are not rewritten.
+Proxy, provider, GitHub, bridge, identity, and selected environment values use
+a private mode-0600 launch-file handoff rather than Docker `Config.Env`.
+Configuration-defined external instruction and skill paths/URLs fail closed;
+nested instruction files remain ordinary readable repository content and are
+not claimed to be hidden by the container boundary.
+
+Provider `auth.json` is synchronized as one selected store when `copy_auth =
+true`; `mcp-auth.json` is imported and merged only for selected OAuth server
+names and matching configured URLs. Both use bounded duplicate-key JSON
+validation, private permissions, no-follow/hardlink checks, locking, and
+compare-and-swap conflict detection. Static configuration, sessions, history,
+indexes, state, and cache remain volume-local. With `copy_auth = false`, stale
+provider credentials are removed from that volume and no provider writeback
+occurs.
+
+`cage -y` maps to OpenCode `--auto`; raw `--auto` is rejected so Cage retains
+the yolo label and gated-network default. Live server modes, project/working
+directory overrides, `mcp add`, and unselected MCP auth operations fail before
+Docker effects. Selected OpenCode OAuth commands run in the container through
+fixed, localhost-only callback relays. Image-level contracts pin those callback
+ports and the required project/skill suppression flags. Real-Docker CI proves
+that provider and remote-MCP HTTP traffic presents Cage's authenticated proxy
+credential and that `--net off` starts without network access.
+
+Migration and verification:
+
+1. Create a distinct OpenCode auth block for each provider-account store that
+   must remain isolated; set both host directories explicitly when relying on a
+   non-default XDG layout.
+2. Create an OpenCode preset and select only the MCP and skill packs needed for
+   that repository. Leave `opencode_plugins = false` unless extension code is
+   intentionally trusted.
+3. Run `cage config doctor --preset NAME PATH` and inspect `cage config explain
+   --preset NAME PATH`; secret values and raw passthrough arguments must not
+   appear in the public plan.
+4. Launch with `cage opencode --preset NAME PATH`, then verify `run`, provider
+   auth, selected MCPs, Git/SSH/GitHub identity, mounts, and host commands as
+   applicable. Use `cage mcp login NAME --preset PRESET PATH` only for a selected
+   OAuth MCP server.
+5. Custom builders and release tooling must treat `Dockerfile.opencode`, image
+   role/repository `opencode`, and candidate-manifest schema 2 as mandatory
+   alongside `base`, `claude-code`, and `codex`.
+
+Rollback: install 0.27.2 and stop using OpenCode presets; the older strict
+schema will reject them. Do not delete `opencode-state-*` volumes during
+rollback. They are intentionally preserved and can be reused after reinstalling
+0.28.0. Host static configuration is never modified by OpenCode launch, and
+only the explicitly selected provider/MCP auth stores may have received normal
+credential rotation writeback.
+
 ### Maintainer release reliability and evidence
 
 No user configuration migration. The maintainer-only publisher now closes stdin

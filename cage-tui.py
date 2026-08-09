@@ -38,8 +38,10 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
         ("env", "Environment variable names", "list"),
         ("aws_profile", "AWS profile", "text"), ("aws_region", "AWS region", "text"),
         ("host_codex_dir", "Host Codex directory", "text"),
+        ("host_opencode_config_dir", "Host OpenCode config directory", "text"),
+        ("host_opencode_data_dir", "Host OpenCode data directory", "text"),
         ("host_agents_dir", "Host agents directory", "text"),
-        ("copy_auth", "Copy main Codex login", "bool"),
+        ("copy_auth", "Copy main tool login", "bool"),
     ],
     "identities": [
         ("git_user_name", "Git user name", "text"),
@@ -175,7 +177,7 @@ class Controller:
                 continue
             auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
             tool = preset.get("tool") or (auth.get("tool") if isinstance(auth, dict) else "")
-            if tool != "codex":
+            if tool not in {"codex", "opencode"}:
                 continue
             for pack_name in preset.get("mcp_packs", []):
                 pack = packs.get(pack_name, {})
@@ -382,6 +384,10 @@ class Controller:
             )
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
+        if preset.get("tool") == "opencode" and preset.get("opencode_plugins") is True:
+            risks.append(
+                "OpenCode plugins are enabled and may execute global or project extension code."
+            )
         if net == "open" and target != "host":
             risks.append("The container has unrestricted network access.")
         for mount in preset.get("extra_mounts", []):
@@ -415,7 +421,7 @@ class Controller:
         if collection == "host_commands" and value.get("command"):
             return ["This command can execute with full host-user authority."]
         if collection == "auth" and value.get("copy_auth") is True:
-            return ["This profile copies the main Codex login into project containers."]
+            return ["This profile copies the main tool login into project containers."]
         if collection == "mcp_packs":
             authenticated = [
                 str(server.get("name", "unnamed")) for server in value.get("servers", [])
@@ -536,7 +542,12 @@ class Controller:
         auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
         if isinstance(auth, dict):
             required.update(auth.get("env", []))
-            for key in ("host_codex_dir", "host_agents_dir"):
+            for key in (
+                "host_codex_dir",
+                "host_opencode_config_dir",
+                "host_opencode_data_dir",
+                "host_agents_dir",
+            ):
                 raw_path = auth.get(key)
                 if raw_path and not Path(str(raw_path)).expanduser().is_dir():
                     warnings.append(f"{key} does not exist: {raw_path}")
@@ -920,6 +931,10 @@ class CursesView:
         if value["tool"] == "claude":
             value.pop("skill_packs", None)
             value.pop("codex_profile", None)
+            value.pop("opencode_plugins", None)
+        elif value["tool"] == "opencode":
+            value.pop("codex_profile", None)
+            value.pop("session_sync", None)
         cursor = "tool"
         while True:
             yolo_value = "on" if value.get("yolo") is True else "off"
@@ -953,6 +968,19 @@ class CursesView:
                 ("mounts", f"Extra mounts: {len(value.get('extra_mounts', []))}"),
                 ("done", "Done"),
             ]
+            if value.get("tool") == "opencode":
+                rows.insert(
+                    7,
+                    (
+                        "plugins",
+                        "OpenCode plugins: "
+                        + (
+                            "enabled"
+                            if value.get("opencode_plugins") is True
+                            else "pure/disabled"
+                        ),
+                    ),
+                )
             choice = self.menu("Customize launch", rows, initial_key=cursor)
             if not choice:
                 return None
@@ -970,13 +998,23 @@ class CursesView:
                 if self.controller.tool_override:
                     self.message = f"Tool is fixed to {self.controller.tool_override} by the command."
                     continue
-                selected = self.select_value("Tool", ["codex", "claude"], str(value.get("tool", "codex")), False)
+                selected = self.select_value(
+                    "Tool", ["codex", "claude", "opencode"],
+                    str(value.get("tool", "codex")), False,
+                )
                 if selected:
                     value["tool"] = selected
                     if selected == "claude":
                         value.pop("skill_packs", None)
                         value.pop("codex_profile", None)
+                        value.pop("opencode_plugins", None)
                         value.pop("target", None)  # non-container targets are Codex-only
+                    elif selected == "opencode":
+                        value.pop("codex_profile", None)
+                        value.pop("session_sync", None)
+                        value.pop("target", None)
+                    else:
+                        value.pop("opencode_plugins", None)
             elif choice == "profile":
                 if value.get("tool", "codex") != "codex":
                     self.message = "Named Codex profiles are only supported for Codex."
@@ -1036,6 +1074,17 @@ class CursesView:
                         value[key] = selected
                     else:
                         value.pop(key, None)
+            elif choice == "plugins":
+                if value.get("tool") != "opencode":
+                    self.message = "Plugin isolation is an OpenCode-only setting."
+                    continue
+                selected = self.select_value(
+                    "OpenCode plugins", ["pure", "enabled"],
+                    "enabled" if value.get("opencode_plugins") is True else "pure",
+                    False,
+                )
+                if selected:
+                    value["opencode_plugins"] = selected == "enabled"
             elif choice == "net":
                 if self.controller.net_override:
                     self.message = f"Network is fixed to {self.controller.net_override} by the command."
@@ -1052,6 +1101,9 @@ class CursesView:
                 if selected:
                     value["yolo"] = selected == "on"
             elif choice == "sync":
+                if value.get("tool") == "opencode":
+                    self.message = "OpenCode state remains in its per-repository volume."
+                    continue
                 selected = self.select_value("Claude history sync", ["default", "on", "off"], sync_value, False)
                 if selected == "default":
                     value.pop("session_sync", None)
@@ -1254,6 +1306,15 @@ class CursesView:
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
+        if preset.get("tool") == "opencode":
+            lines.append(
+                "OpenCode plugins: "
+                + (
+                    "enabled"
+                    if preset.get("opencode_plugins") is True
+                    else "pure/disabled"
+                )
+            )
         return lines
 
     def launch_actions(self, preset: dict[str, Any]) -> bool:
@@ -1335,7 +1396,7 @@ class CursesView:
                 value[key] = not bool(value.get(key, False))
                 continue
             if kind in ("tool", "auth_mode"):
-                values = ["codex", "claude"] if kind == "tool" else ["bedrock", "api-key"]
+                values = ["codex", "claude", "opencode"] if kind == "tool" else ["bedrock", "api-key"]
                 selected = self.select_value(label, values, str(value.get(key, "")))
                 if selected is not None:
                     if selected: value[key] = selected
@@ -1811,7 +1872,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--net-override", choices=["open", "gate", "off"], default="")
     parser.add_argument("--yolo-override", choices=["on", "off"], default="")
-    parser.add_argument("--tool-override", choices=["codex", "claude"], default="")
+    parser.add_argument(
+        "--tool-override", choices=["codex", "claude", "opencode"], default=""
+    )
     parser.add_argument("--target-override", choices=["container", "desktop", "host"], default="")
     args = parser.parse_args(argv)
     if not sys.stdin.isatty() or not sys.stdout.isatty():

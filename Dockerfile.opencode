@@ -1,0 +1,43 @@
+ARG CAGE_BASE=cage-base:latest
+FROM ${CAGE_BASE}
+ARG CAGE_VERSION=dev
+
+LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
+LABEL org.opencontainers.image.description="cage - Docker isolation for OpenCode"
+
+RUN useradd -m -s /bin/bash opencode && \
+    mkdir -p /home/opencode/.local/bin /home/opencode/.ssh \
+             /home/opencode/.npm-global /home/opencode/.cage-state && \
+    chown -R opencode:opencode /home/opencode && \
+    echo "opencode ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/opencode
+
+ENV NPM_CONFIG_PREFIX=/home/opencode/.npm-global
+ENV PATH=/home/opencode/.npm-global/bin:/home/opencode/.local/bin:$PATH
+USER opencode
+RUN npm install -g --allow-scripts=opencode-ai opencode-ai@latest && \
+    opencode --help 2>&1 | grep -q -- '--pure' && \
+    OPENCODE_BINARY=/home/opencode/.npm-global/lib/node_modules/opencode-ai/bin/opencode.exe && \
+    test -x "$OPENCODE_BINARY" && \
+    grep -a -F -q 'OPENCODE_DISABLE_PROJECT_CONFIG' "$OPENCODE_BINARY" && \
+    grep -a -F -q 'OPENCODE_DISABLE_EXTERNAL_SKILLS' "$OPENCODE_BINARY" && \
+    grep -a -F -q '127.0.0.1:19876' "$OPENCODE_BINARY" && \
+    grep -a -F -q 'O$=1455' "$OPENCODE_BINARY" && \
+    grep -a -F -q '/auth/callback' "$OPENCODE_BINARY" && \
+    grep -a -F -q '/.well-known/opencode' "$OPENCODE_BINARY"
+USER root
+
+COPY entrypoint-opencode.sh /home/opencode/entrypoint.sh
+RUN chmod 755 /home/opencode/entrypoint.sh
+
+ENV HOME=/home/opencode
+ENV OPENCODE_DISABLE_AUTOUPDATE=1
+
+WORKDIR /home/opencode
+RUN chmod -R a+rwX /home/opencode
+
+ENTRYPOINT ["/home/opencode/entrypoint.sh"]
+
+LABEL org.opencontainers.image.version="${CAGE_VERSION}" \
+      io.cage.managed="true" \
+      io.cage.role="opencode" \
+      io.cage.version="${CAGE_VERSION}"

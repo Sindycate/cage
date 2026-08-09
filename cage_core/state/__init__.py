@@ -2,5 +2,11 @@
 
 from .sessions import ClaudeSessionSync
 from .oauth import OAuthReconciler, SyncError
+from .opencode import OpenCodeStateReconciler
 
-__all__ = ["ClaudeSessionSync", "OAuthReconciler", "SyncError"]
+__all__ = [
+    "ClaudeSessionSync",
+    "OAuthReconciler",
+    "OpenCodeStateReconciler",
+    "SyncError",
+]

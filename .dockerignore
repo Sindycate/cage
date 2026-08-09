@@ -1,8 +1,10 @@
 **
 !Dockerfile
 !Dockerfile.codex
+!Dockerfile.opencode
 !entrypoint.sh
 !entrypoint-codex.sh
+!entrypoint-opencode.sh
 !codex-remote.py
 !cage_core/
 !cage_core/**

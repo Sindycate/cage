@@ -39,11 +39,12 @@ from typing import Callable, Optional, Sequence
 
 REPOSITORY = "Sindycate/cage"
 GHCR_ROOT = "ghcr.io/sindycate/cage"
-IMAGE_NAMES: tuple[str, ...] = ("base", "claude-code", "codex")
+IMAGE_NAMES: tuple[str, ...] = ("base", "claude-code", "codex", "opencode")
 IMAGE_DOCKERFILE = {
     "base": "Dockerfile.base",
     "claude-code": "Dockerfile",
     "codex": "Dockerfile.codex",
+    "opencode": "Dockerfile.opencode",
 }
 PHASES: tuple[str, ...] = (
     "local_ready",
@@ -1164,6 +1165,7 @@ class Orchestrator:
             "cage-netgate.sh",
             "entrypoint.sh",
             "entrypoint-codex.sh",
+            "entrypoint-opencode.sh",
             "install.sh",
             ".github/scripts/install-gitleaks.sh",
         ]
@@ -1252,13 +1254,25 @@ class Orchestrator:
     def _validate_candidate_manifest(self, data: dict) -> None:
         if data.get("schema") != CANDIDATE_SCHEMA:
             raise ReleaseError("candidate manifest schema mismatch")
+        if data.get("schema_version") != 2:
+            raise ReleaseError("candidate manifest schema version mismatch")
         if data.get("source_sha") != self.context.commit_sha:
             raise ReleaseError("candidate manifest source_sha mismatch")
         if data.get("version") != self.context.version:
             raise ReleaseError("candidate manifest version mismatch")
+        if data.get("ci_run_id") != self.state.ci_run_id:
+            raise ReleaseError("candidate manifest CI run mismatch")
+        if data.get("platforms") != ["linux/amd64", "linux/arm64"]:
+            raise ReleaseError("candidate manifest platform set mismatch")
         images = data.get("images") or {}
+        if set(images) != set(IMAGE_NAMES):
+            raise ReleaseError("candidate manifest image set mismatch")
         for name in IMAGE_NAMES:
             entry = images.get(name) or {}
+            if entry.get("name") != f"{GHCR_ROOT}/{name}":
+                raise ReleaseError(f"candidate manifest image name mismatch for {name}")
+            if entry.get("tag") != f"candidate-{self.context.commit_sha}":
+                raise ReleaseError(f"candidate manifest tag mismatch for {name}")
             if not DIGEST_RE.fullmatch(entry.get("digest") or ""):
                 raise ReleaseError(f"candidate manifest missing valid digest for {name}")
         self.state.images = {name: images[name]["digest"] for name in IMAGE_NAMES}

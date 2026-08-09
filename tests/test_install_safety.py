@@ -54,6 +54,9 @@ class InstallerSafetyTests(unittest.TestCase):
             "host-cmd-bridge.py",
             "host-cmd-relay",
             "codex-remote.py",
+            "entrypoint.sh",
+            "entrypoint-codex.sh",
+            "entrypoint-opencode.sh",
         ]
         for name in required:
             path = release_root / name
@@ -74,10 +77,13 @@ class InstallerSafetyTests(unittest.TestCase):
             "config.py",
             "lifecycle.py",
             "models.py",
+            "opencode.py",
+            "opencode_policy.py",
             "planning.py",
             "storage.py",
             "state/__init__.py",
             "state/oauth.py",
+            "state/opencode.py",
             "state/sessions.py",
             "targets/__init__.py",
             "targets/container.py",
@@ -347,6 +353,7 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "cage-desktop.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "codex-remote.py", os.X_OK))
+            self.assertTrue(os.access(install_dir / "entrypoint-opencode.sh", os.X_OK))
             self.assertEqual(
                 subprocess.check_output(
                     [str(install_dir / "cage"), "--version"], text=True

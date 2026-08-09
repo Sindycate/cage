@@ -32,6 +32,7 @@ RESERVED_MOUNT_ROOTS = (
     "/root",
     "/home/claude",
     "/home/codex",
+    "/home/opencode",
     "/workspace",
 )
 
@@ -249,13 +250,20 @@ def build_launch_plan(
         container_prefix = "claude"
         volume_prefix = "claude-state"
         container_home = "/home/claude"
-    else:
+    elif resolved.tool == "codex":
         image = f"codex:{cage_version}"
         registry_image = f"{CAGE_REGISTRY}/codex:{cage_version}"
         dockerfile = "Dockerfile.codex"
         container_prefix = "codex"
         volume_prefix = "codex-state"
         container_home = "/home/codex"
+    else:
+        image = f"opencode:{cage_version}"
+        registry_image = f"{CAGE_REGISTRY}/opencode:{cage_version}"
+        dockerfile = "Dockerfile.opencode"
+        container_prefix = "opencode"
+        volume_prefix = "opencode-state"
+        container_home = "/home/opencode"
     container_name = f"{container_prefix}-{basename}-{digest}"
     volume_name = f"{volume_prefix}-{basename}-{digest}"
     if target == "desktop":
@@ -290,6 +298,10 @@ def build_launch_plan(
         capabilities.append("remote-mcp")
     if resolved.host_commands:
         capabilities.append("host-command-bridge")
+    if resolved.tool == "opencode":
+        capabilities.append("opencode-frozen-config")
+        if resolved.opencode_plugins == "1":
+            capabilities.append("opencode-plugins")
     if target == "desktop":
         capabilities.extend(("desktop-ssh", "desktop-heartbeat"))
     if target == "host":

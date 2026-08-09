@@ -11,17 +11,18 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from . import config, storage
+from . import config, opencode_policy, storage
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
 from .targets.host import HostTargetError, run_host_target
 
 
-USAGE = """Usage: cage [claude|codex] [-y|--yolo] [-i|--interactive] [--host|--container|--desktop] [--no-open] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]
+USAGE = """Usage: cage [claude|codex|opencode] [-y|--yolo] [-i|--interactive] [--host|--container|--desktop] [--no-open] [--rebuild] [--preset NAME] [--net open|gate|off] [--mount-ro PATH] [--mount-rw PATH] [/path/to/repo] [tool-args...]
 
 Tools:
   claude    Run Claude Code (default)
   codex     Run OpenAI Codex CLI
+  opencode  Run OpenCode
 
 Commands:
   setup                     Create starter ~/.config/cage/config.toml
@@ -30,8 +31,8 @@ Commands:
   config edit               Edit config.toml in $EDITOR
   config explain PATH       Explain the resolved launch configuration
   config doctor PATH        Validate the resolved launch configuration
-  mcp login NAME PATH       Authenticate with an OAuth MCP server for a resolved Codex preset
-  mcp logout NAME PATH      Remove OAuth MCP authentication for a resolved Codex preset
+  mcp login NAME PATH       Authenticate with a selected OAuth MCP server
+  mcp logout NAME PATH      Remove selected OAuth MCP authentication
   desktop setup             Register Cage's managed SSH Include
   desktop start ...         Start or reuse a persistent Desktop target
   desktop restart ...       Restart a Desktop target
@@ -46,7 +47,7 @@ Commands:
   netgate deny DOMAIN        Deny a domain (project)
   netgate remove DOMAIN      Remove a decision (re-enables prompting)
   netgate reset [PATH]       Delete all project decisions
-  update [claude|codex]      Refresh the tool binary only (fast; no full rebuild)
+  update [claude|codex|opencode] Refresh the tool binary only (fast; no full rebuild)
   storage status             Show Docker capacity and exact cleanup candidates
   storage clean              Preview and confirm narrow Cage image cleanup
 
@@ -79,6 +80,7 @@ Examples:
   cage desktop status --preset codex-company ~/projects/myapp
   cage --interactive ~/projects/myapp
   cage codex ~/projects/myapp
+  cage opencode ~/projects/myapp
   cage codex -y ~/projects/myapp
   cage -y ~/projects/myapp
   cage --net gate ~/projects/myapp
@@ -101,7 +103,7 @@ def _need_value(arguments: list[str], index: int, option: str) -> str:
 def parse_launch_request(arguments: list[str]) -> LaunchRequest:
     args = list(arguments)
     explicit_tool = ""
-    if args and args[0] in {"claude", "codex"}:
+    if args and args[0] in {"claude", "codex", "opencode"}:
         explicit_tool = args.pop(0)
     preset = ""
     interactive = False
@@ -407,7 +409,7 @@ def _default_tool(config_path: Path) -> str:
                 auth = config.as_table(data, "auth").get(auth_name, {})
                 if isinstance(auth, dict):
                     tool = auth.get("tool")
-            if tool in {"claude", "codex"}:
+            if tool in {"claude", "codex", "opencode"}:
                 return str(tool)
     except (config.ConfigError, OSError):
         pass
@@ -453,9 +455,32 @@ def _run_update(
             "chmod -R a+rwX /home/codex\n"
             f"LABEL io.cage.managed=\"true\" io.cage.role=\"codex\" io.cage.version=\"{cage_version}\"\n"
         )
+    elif tool == "opencode":
+        image = f"opencode:{cage_version}"
+        registry = f"ghcr.io/sindycate/cage/opencode:{cage_version}"
+        dockerfile = "Dockerfile.opencode"
+        overlay = (
+            f"FROM {image}\n"
+            "ENV NPM_CONFIG_PREFIX=/home/opencode/.npm-global\n"
+            "USER opencode\n"
+            "RUN npm install -g --allow-scripts=opencode-ai opencode-ai@latest && "
+            "opencode --help 2>&1 | grep -q -- '--pure' && "
+            "OPENCODE_BINARY=/home/opencode/.npm-global/lib/node_modules/opencode-ai/bin/opencode.exe && "
+            "test -x \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q 'OPENCODE_DISABLE_PROJECT_CONFIG' \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q 'OPENCODE_DISABLE_EXTERNAL_SKILLS' \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q '127.0.0.1:19876' \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q 'O$=1455' \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q '/auth/callback' \"$OPENCODE_BINARY\" && "
+            "grep -a -F -q '/.well-known/opencode' \"$OPENCODE_BINARY\"\n"
+            "USER root\n"
+            "RUN chown -R opencode:opencode /home/opencode/.npm-global && "
+            "chmod -R a+rwX /home/opencode\n"
+            f"LABEL io.cage.managed=\"true\" io.cage.role=\"opencode\" io.cage.version=\"{cage_version}\"\n"
+        )
     else:
         print(
-            f"Unknown tool: {tool} (use 'claude' or 'codex')",
+            f"Unknown tool: {tool} (use 'claude', 'codex', or 'opencode')",
             file=sys.stderr,
         )
         return 1
@@ -675,6 +700,17 @@ def main(
             config.reject_unsafe_codex_passthrough_args(
                 list(request.tool_arguments)
             )
+        elif resolved.tool == "opencode":
+            try:
+                opencode_policy.reject_unsafe_passthrough_args(
+                    list(request.tool_arguments),
+                    selected_mcp_names={
+                        str(server["name"])
+                        for server in (*resolved.stdio_mcp, *resolved.remote_mcp)
+                    },
+                )
+            except opencode_policy.PolicyError as exc:
+                raise config.ConfigError(str(exc)) from exc
         prepared = build_launch_plan(
             request,
             resolved,

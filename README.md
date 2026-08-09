@@ -1,12 +1,12 @@
 # cage
 
-Run AI coding assistants ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex)) in Docker containers to reduce the host filesystem blast radius of accidental or over-broad tool actions.
+Run AI coding assistants ([Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), and [OpenCode](https://opencode.ai/)) in Docker containers to reduce the host filesystem blast radius of accidental or over-broad tool actions.
 
 Born after a sub-agent deleted ~200GB of files on a MacBook. Never again.
 
 ## What it does
 
-- Runs Claude Code or Codex CLI inside a Docker container with an isolated home
+- Runs Claude Code, Codex CLI, or OpenCode inside a Docker container with an isolated home
 - Mounts the target repo read-write and makes extra host mounts explicit
 - Reuses host credentials and supported configuration automatically for a low-friction workflow
 - Per-repo persistent state via Docker volumes (sessions, onboarding survive restarts)
@@ -25,6 +25,7 @@ credentials.
 - Python 3.11+ (for central config parsing; also used by network gating)
 - **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
 - **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
+- **OpenCode:** provider auth from the selected OpenCode XDG data directory, or provider environment variables
 
 Start Colima with enough memory (macOS, Claude Code needs 4GB+):
 
@@ -62,10 +63,11 @@ ln -sf ~/cage/cage ~/.local/bin/cage
 Docker images are built automatically on first run. To pre-build:
 
 ```bash
-docker compose build              # shared base, then both agent images
+docker compose build              # shared base, then all agent images
 docker compose build base         # just the agent-neutral shared base
 docker compose build claude       # Claude Code (requires the base)
 docker compose build codex        # Codex CLI (requires the base)
+docker compose build opencode     # OpenCode (requires the base)
 ```
 
 ## Usage
@@ -80,6 +82,9 @@ cage claude ~/projects/myapp     # explicit
 
 # Run Codex CLI against a repo
 cage codex ~/projects/myapp
+
+# Run OpenCode against a repo
+cage opencode ~/projects/myapp
 
 # Run a named central preset
 cage --preset codex-company ~/projects/myapp
@@ -255,6 +260,22 @@ mcp_packs = ["linear"]
 skill_packs = ["agent-basics", "external-systems"]
 net = "gate"
 
+[auth.opencode-local]
+tool = "opencode"
+host_opencode_config_dir = "~/.config/opencode"
+host_opencode_data_dir = "~/.local/share/opencode"
+host_agents_dir = "~/.agents"
+copy_auth = true
+
+[presets.opencode-local]
+tool = "opencode"
+auth = "opencode-local"
+mcp_packs = ["linear", "local-tools"]
+skill_packs = ["agent-basics"]
+# Plugins execute extension code and are disabled with --pure by default.
+opencode_plugins = false
+net = "gate"
+
 [projects]
 "/Users/me/projects/myapp" = "codex-work"
 ```
@@ -308,6 +329,19 @@ volume `mcpServers` is reconciled to exactly the selected set, and a private
 read-only `.mcp.json` overlay (built from the bridges that actually started, so
 `--net off` leaves it empty) always suppresses repository MCP definitions.
 
+For OpenCode, Cage freezes bounded, symlink-free copies of host and repository
+JSON/JSONC configuration, resolves them with the image-installed binary, strips
+all inherited MCP definitions, and generates only the selected local and remote
+transports. Live project config loading is disabled for the final process, and
+a second resolved-config check requires the effective MCP names and transports
+to match the selected set exactly. A selected name already defined by inherited
+configuration is replaced by the frozen Cage-selected definition. MCP entries
+using `oauth_resource` are rejected
+for OpenCode because its current schema cannot preserve that field faithfully.
+With `--net off`, selected host STDIO bridges are omitted because they cannot be
+reached; selected remote definitions remain visible but cannot make network
+connections.
+
 `cage config explain`, `cage config doctor`, and the TUI review state
 `MCP policy: selected packs only` and list the selected active servers. For
 `target = "host"` they also list the suppressed inherited servers; for container
@@ -356,6 +390,28 @@ The import helpers enforce that allowlist before removing any destination and
 abort the launch on every unsupported file or directory name. CI and tagged
 releases exercise the real Codex entrypoint with conflicting host and volume
 runtime state so this boundary cannot regress silently.
+
+OpenCode provider `auth.json` is synchronized exactly when `copy_auth` is
+enabled. Its `mcp-auth.json` is filtered to selected OAuth MCP names on import,
+and only those entries are merged back after exit while unrelated host entries
+are preserved. Both paths validate bounded JSON, reject symlinks and hardlinks,
+lock and compare state before replacement, and fail on two-sided conflicts.
+Static configuration is never written back; sessions, history, indexes, and
+caches remain in the per-repository OpenCode volume.
+
+OpenCode launches with `--pure` unless `opencode_plugins = true`. That opt-in
+expands the trust boundary to global/project extension code. Cage `-y` maps to
+OpenCode `--auto`; raw `--auto`, `--pure`, working-directory overrides,
+`mcp add`, and unmanaged `serve`, `web`, `attach`, and `pr` modes are rejected.
+`cage mcp login/logout` runs selected OpenCode OAuth flows inside the container
+through narrowly published loopback callback ports.
+
+OpenCode's installed runtime is also exercised in real Docker CI for provider
+and remote-MCP HTTP traffic. Both must present Cage's authenticated proxy
+credential before `--net gate` is considered supported. `--net off` is covered
+by a real OpenCode launch. These checks validate the current supported runtime;
+raw TCP, DNS, SSH, plugins, and other non-HTTP transports retain Netgate's
+documented limits.
 
 Host command definitions should name the executable when Codex supplies its own
 arguments. For example, a custom provider whose Codex auth configuration runs
@@ -591,12 +647,26 @@ central preset. Mounts vary by tool:
 | SSH key (from preset identity) | `/home/codex/.ssh/id` | read-only |
 | `~/.ssh/known_hosts` | `/home/codex/.ssh/known_hosts` | read-only |
 
+**OpenCode** (`cage opencode ~/repo`):
+
+| Mount | Path in container | Access |
+|-------|-------------------|--------|
+| Your repo | same absolute path as on host | **read-write** |
+| Private frozen configuration, selected skills, and private runtime handoff | `/cage-opencode-snapshot` | read-only |
+| Docker volume (per-repo) | `/home/opencode/.cage-state` | read-write |
+
 Unlisted host paths are not directly mounted. Selected host commands/MCP bridges
 can still access the host with the configured command's authority, credentials
 can be used from inside the container, and enabled session/OAuth synchronization
 writes selected state back outside the repository. See [SECURITY.md](SECURITY.md).
 
 On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials in `.credentials.json` are synchronized by the host launcher before and after the run so refresh-token rotation persists outside the container volume.
+
+The OpenCode entrypoint resolves the private snapshot under tmpfs-backed
+`/run`, expands selected MCP credentials there, sanitizes plugins according to
+the preset, and verifies the final MCP inventory before `exec`. Resolved header
+values and tokens do not enter Docker `Config.Env` or Cage's public launch-plan
+output.
 
 ## Git commit & push
 
@@ -672,8 +742,8 @@ What it does, in order:
 ### Candidate images
 
 To reduce release time safely, a successful `ci.yml` run on `main` publishes
-immutable `candidate-<full-commit-sha>` images for `base`, `claude-code`, and
-`codex`, each with BuildKit SBOM, max-level provenance, and a signed GitHub
+immutable `candidate-<full-commit-sha>` images for `base`, `claude-code`,
+`codex`, and `opencode`, each with BuildKit SBOM, max-level provenance, and a signed GitHub
 provenance attestation, plus a small `release-candidate-<SHA>` manifest
 artifact. Candidate tags are public and write-once, but they are not stable
 releases and are never referenced by Cage's image-pull logic. The
@@ -757,6 +827,7 @@ To force-rebuild the versioned image Cage actually launches:
 ```bash
 cage --rebuild ~/path/to/repo
 cage codex --rebuild ~/path/to/repo
+cage opencode --rebuild ~/path/to/repo
 ```
 
 ### Docker storage guardrails
@@ -791,11 +862,10 @@ removal so a newly created container makes deletion fail safe.
 
 Tagged releases publish the source archive, its SHA-256 checksum, and an SPDX
 SBOM. GitHub also records signed provenance and SBOM attestations for the source
-archive. The two GHCR images carry BuildKit SBOM and max-level provenance
-metadata plus a signed GitHub provenance attestation. Their agent-neutral
-shared base is published under `ghcr.io/sindycate/cage/base` with the same
-metadata and signed provenance; the existing `claude-code` and `codex` image
-names remain unchanged.
+archive. The three assistant images carry BuildKit SBOM and max-level provenance
+metadata plus signed GitHub provenance attestations. Their agent-neutral shared
+base is published under `ghcr.io/sindycate/cage/base` with the same metadata and
+signed provenance; the image names are `claude-code`, `codex`, and `opencode`.
 
 ```bash
 VERSION="$(cage --version | awk '{print $NF}')"
@@ -816,7 +886,8 @@ gh attestation verify \
   --repo Sindycate/cage
 ```
 
-Repeat the image command with `claude-code` to verify that image. Attestations
+Repeat the image command with `claude-code` and `opencode` to verify those
+images. Attestations
 link an artifact to its source and build workflow; an SBOM inventories detected
 components. Neither is a guarantee that the artifact is vulnerability-free.
 
@@ -836,14 +907,17 @@ cd ~/cage && make uninstall
 # List active containers
 docker ps --filter "name=claude-"
 docker ps --filter "name=codex-"
+docker ps --filter "name=opencode-"
 
 # List per-repo state volumes
 docker volume ls --filter "name=claude-state-"
 docker volume ls --filter "name=codex-state-"
+docker volume ls --filter "name=opencode-state-"
 
 # Reset state for a repo
 docker volume rm claude-state-<name>
 docker volume rm codex-state-<name>
+docker volume rm opencode-state-<name>
 ```
 
 ## Network gating

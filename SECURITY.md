@@ -70,8 +70,12 @@ execution. Desktop remote execution enables only one target-specific
 passthrough exception: the current app's exact `features.code_mode_host=true`
 override before `app-server`. Other feature values and roots, and
 the same override on host or ordinary container paths, still fail closed.
-Secret values are resolved only after plan validation and at the
-process-creation boundary.
+OpenCode passthrough and selected-only MCP rules are likewise implemented as
+pure policy. Secret values are resolved only after plan validation and at the
+process-creation boundary; OpenCode MCP headers are materialized only in the
+container's tmpfs-backed `/run` state, while proxy, provider, GitHub, bridge,
+identity, and selected environment values cross a private launch-file handoff,
+not Docker metadata.
 
 ## Network behavior
 
@@ -81,6 +85,12 @@ process-creation boundary.
 against code that ignores proxy environment variables or uses raw TCP, UDP, SSH,
 or DNS. An enforced-egress architecture is tracked in
 `docs/hardening/WORKFLOW.md`.
+
+The supported OpenCode image is contract-tested in real Docker for both
+provider and remote-MCP HTTP traffic: the runtime must present Cage's fresh
+authenticated proxy credential. `--net off` is also exercised by a real
+OpenCode process. An upstream runtime that breaks these image/runtime contracts
+fails CI; these checks do not expand Netgate beyond its proxy-based boundary.
 
 ## Host integrations
 
@@ -134,7 +144,51 @@ repository. Host execution:
 - rejects host command bridges, extra mounts, custom `host_agents_dir` and
   non-default skill-pack sources (all still require container execution).
 
-Host execution is supported only for Codex. Claude host execution is rejected.
+Host execution is supported only for Codex. Claude and OpenCode host execution
+are rejected.
+
+## OpenCode container execution
+
+OpenCode is container-only in this release. Cage snapshots host and repository
+configuration through bounded no-follow reads, rejects symlinked, hard-linked,
+special, oversized, or concurrently replaced inputs, then resolves and
+sanitizes the snapshot with the exact OpenCode binary installed in the image.
+The final process has live project-config loading disabled and must report an
+effective MCP inventory matching the selected Cage pack exactly. Configuration-
+defined external instruction and skill paths/URLs fail closed. Root project
+instructions and discovered project skills come from the snapshot; nested
+instruction files remain ordinary readable repository content, because Cage
+does not hide or rewrite the repository mount.
+
+OpenCode's TUI extracts a native renderer library at startup. Its container
+therefore receives a dedicated ephemeral `/tmp` tmpfs with `exec` enabled,
+while retaining `nosuid` and `nodev`; Claude and Codex keep Cage's existing
+non-executable default tmpfs. The executable temporary state disappears with
+the container and is not stored in the per-repository volume.
+
+External OpenCode plugins are disabled with `--pure` by default. A preset with
+`opencode_plugins = true` explicitly permits snapshot-copied global/project
+plugin code and is therefore a larger code-execution trust boundary. Plugin
+network and external side effects are not constrained by the native selected-
+MCP allowlist.
+
+OpenCode proxy credentials, provider environment values, GitHub tokens, bridge
+handshakes, and selected identity/environment values are loaded from a private
+mode-0600 launch file only after the container starts. They are available to
+the final tool process as needed but do not appear in Docker `Config.Env`.
+
+Provider `auth.json` is synchronized exactly only when `copy_auth` is enabled.
+MCP OAuth state is imported and merged back only for selected server names.
+Both use bounded duplicate-key-rejecting JSON parsing, regular-file and
+hardlink checks, private modes, per-identity locks, and conflict detection.
+OpenCode sessions, history, indexes, logs, cache, and other runtime state stay
+inside the per-repository volume. Only provider auth and selected MCP OAuth
+entries can be written back to the chosen host OpenCode data directory.
+
+Provider and MCP browser authentication temporarily publishes only the known
+loopback callback ports on host `127.0.0.1`, relayed to the container's loopback
+listener. Ordinary OpenCode launches publish no ports. `serve`, `web`,
+`attach`, and `pr` are not managed targets.
 
 ## ChatGPT Desktop execution (target = "desktop")
 
@@ -189,7 +243,7 @@ archive. Published container images, including the agent-neutral shared base,
 include BuildKit SBOM and max-level provenance metadata and a signed GitHub
 provenance attestation. The base contains shared operating-system tooling and
 bridge relays only; agent users, entrypoints, agent binaries, and Codex-only
-OpenSSH remain in their leaf images. Workflow action dependencies are pinned
+OpenSSH remain in the Claude, Codex, and OpenCode leaf images. Workflow action dependencies are pinned
 to immutable commits and tracked by Dependabot.
 
 These records make the source revision, build workflow, and detected components
@@ -208,7 +262,8 @@ a registry tag alone.
 ### SHA candidates, exact-digest promotion, and attestation identities
 
 A successful `ci.yml` run on `main` publishes immutable
-`candidate-<full-commit-sha>` images for `base`, `claude-code`, and `codex`.
+`candidate-<full-commit-sha>` images for `base`, `claude-code`, `codex`, and
+`opencode`.
 Candidate tags are **public and write-once**: anyone can inspect them, a
 conflicting or unverifiable candidate fails closed and is never overwritten,
 and they are not stable releases — Cage's image-pull logic never references
@@ -224,7 +279,7 @@ The tag-triggered release workflow **promotes** the exact verified candidate
 digests to the version and `latest` tags with `docker buildx imagetools
 create`; it never rebuilds images, never uses QEMU, and never resolves mutable
 package sources. Version tags are immutable (an existing version tag with a
-different digest fails closed), and `latest` moves only after all three version
+different digest fails closed), and `latest` moves only after all four version
 tags and their attestations succeed. Promotion is idempotent so a workflow
 rerun can finish after a partial registry interruption.
 

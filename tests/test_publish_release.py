@@ -305,6 +305,7 @@ class Scenario:
             "base": "sha256:" + "1" * 64,
             "claude-code": "sha256:" + "2" * 64,
             "codex": "sha256:" + "3" * 64,
+            "opencode": "sha256:" + "4" * 64,
         }
         self.archive_bytes = make_archive_bytes(version)
         self.archive_digest = __import__("hashlib").sha256(self.archive_bytes).hexdigest()
@@ -331,12 +332,23 @@ class Scenario:
 
     # response helpers
     def manifest(self):
+        matching_runs = [
+            run
+            for run in self.ci_runs
+            if run.get("headSha") == self.sha
+            and run.get("headBranch") == "main"
+            and run.get("conclusion") == "success"
+        ]
+        ci_run_id = max(
+            (int(run["databaseId"]) for run in matching_runs),
+            default=123,
+        )
         return {
             "schema": "cage.release-candidate",
-            "schema_version": 1,
+            "schema_version": 2,
             "source_sha": self.sha,
             "version": self.version,
-            "ci_run_id": 123,
+            "ci_run_id": ci_run_id,
             "platforms": ["linux/amd64", "linux/arm64"],
             "images": {
                 name: {
@@ -1197,6 +1209,34 @@ class DigestConflictTests(PublishReleaseTestCase):
         with self.assertRaises(pr.ReleaseError):
             orch._validate_candidate_manifest(bad)
 
+    def test_candidate_manifest_requires_exact_v2_identity(self):
+        scenario = Scenario(pushed=True, ci_runs=[make_run("a" * 40)])
+        orch, *_ = make_orch(scenario)
+        orch._preflight()
+        mutations = (
+            ("schema_version", 1),
+            ("ci_run_id", 999),
+            ("platforms", ["linux/amd64"]),
+        )
+        for field, value in mutations:
+            bad = scenario.manifest()
+            bad[field] = value
+            with self.subTest(field=field), self.assertRaises(pr.ReleaseError):
+                orch._validate_candidate_manifest(bad)
+
+        bad = scenario.manifest()
+        bad["images"]["extra"] = dict(bad["images"]["base"])
+        with self.assertRaises(pr.ReleaseError):
+            orch._validate_candidate_manifest(bad)
+        for field, value in (
+            ("name", "ghcr.io/other/opencode"),
+            ("tag", "latest"),
+        ):
+            bad = scenario.manifest()
+            bad["images"]["opencode"][field] = value
+            with self.subTest(image_field=field), self.assertRaises(pr.ReleaseError):
+                orch._validate_candidate_manifest(bad)
+
     def test_candidate_manifest_source_sha_mismatch(self):
         scenario = Scenario(pushed=True, ci_runs=[make_run("a" * 40)])
         orch, *_ = make_orch(scenario)
@@ -1254,7 +1294,7 @@ class PublicVerificationResilienceTests(PublishReleaseTestCase):
 
         orch.image_inspector = inspect
         self.assertIn("version tags match", orch._verify_image_version_digests())
-        self.assertEqual(calls, 5)  # three base attempts, then one per leaf
+        self.assertEqual(calls, 6)  # three base attempts, then one per leaf
         self.assertEqual(sleeper.sleeps, 2)
 
     def test_latest_digest_propagation_is_retried_but_bounded(self):

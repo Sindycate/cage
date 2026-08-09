@@ -24,3 +24,12 @@ services:
         CAGE_VERSION: ${CAGE_VERSION:-dev}
     image: codex:latest
     depends_on: [base]
+  opencode:
+    build:
+      context: .
+      dockerfile: Dockerfile.opencode
+      args:
+        CAGE_BASE: cage-base:latest
+        CAGE_VERSION: ${CAGE_VERSION:-dev}
+    image: opencode:latest
+    depends_on: [base]

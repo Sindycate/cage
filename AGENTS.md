@@ -16,7 +16,7 @@ durable source of truth across context compaction and maintainer handoffs.
 ## Build and Run
 
 ```bash
-# Build/rebuild all images (builds shared base first, then both leaves)
+# Build/rebuild all images (builds shared base first, then all three leaves)
 docker compose build
 
 # Build just the shared base
@@ -25,6 +25,7 @@ docker compose build base
 # Build just one leaf image (requires base to exist)
 docker compose build claude
 docker compose build codex
+docker compose build opencode
 
 # Rebuild from scratch (e.g., to update tool versions)
 docker compose build --no-cache
@@ -37,6 +38,7 @@ cage --rebuild ~/path/to/repo
 cage update          # update the default tool
 cage update claude
 cage update codex
+cage update opencode
 
 # Inspect capacity/retention and run exact, confirmation-gated image cleanup
 cage storage status
@@ -48,6 +50,9 @@ cage claude ~/path/to/repo
 
 # Run Codex CLI against a repo
 cage codex ~/path/to/repo
+
+# Run OpenCode against a repo (container-only)
+cage opencode ~/path/to/repo
 
 # Pass args through to the tool
 cage ~/path/to/repo --resume
@@ -169,7 +174,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   remote path alone accepts the current app's exact
   `features.code_mode_host=true` override before `app-server`;
   other feature values/roots and host/container uses still fail closed
-- Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
+- Accepts optional subcommand (`cage claude`, `cage codex`, or `cage opencode`) to select a tool and `--preset NAME` to select a central runnable configuration
 - Bare `cage` and `--interactive`/`-i` open `cage-tui.py` before any Docker,
   bridge, sync, or volume operation. The curses UI can launch once, remember a
   hidden project-owned preset, save reusable presets, and manage all central
@@ -195,15 +200,15 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   atomic. They preserve untouched TOML blocks, source permissions, and symlink
   targets; keep ten private backups under the config directory; and never load
   backup files as config fragments
-- Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the leaf image (useful for getting the latest tool version)
-- `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
+- Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the selected leaf image (useful for getting the latest tool version)
+- `cage update [claude|codex|opencode]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`; OpenCode: an unprivileged `npm install -g --allow-scripts=opencode-ai opencode-ai@latest` plus its image-level contract checks), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Ordinary same-repository launches keep one shared persistent state volume but
   use suffixed container names for parallel sessions. The collision menu reads
   from `/dev/tty` when available and otherwise from an interactive stdin, so
   restricted IDE/sandbox terminals remain usable; truly noninteractive
   collisions fail closed
-- Presets default to `target = "container"` and may opt into Codex-only
+- Presets default to `target = "container"`. Claude and OpenCode are container-only; Codex may opt into
   `target = "host"` or `target = "desktop"` (also available as launch-only
   `--host`/`--desktop` overrides).
   The host branch runs before Docker/image/volume/bridge/state-sync work,
@@ -213,6 +218,19 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   the writable repository. Selected skill packs become a process-local filter
   only for the default `~/.agents/skills` registry. Host commands, extra
   mounts, custom agent registries, and SSH aliases still fail closed
+- OpenCode presets add `host_opencode_config_dir` and
+  `host_opencode_data_dir` auth roots plus `opencode_plugins` (false by
+  default). Cage creates a bounded, symlink-free private snapshot of applicable
+  host and repository configuration, project instructions and skills, and
+  selected host skills. The image-installed OpenCode binary resolves that
+  snapshot once with project/external discovery disabled; Cage removes inherited
+  MCPs, writes only selected transports, and verifies the final MCP and disk-skill
+  inventories before execution. Plugins are suppressed with `--pure` unless the
+  preset explicitly opts in. Provider `auth.json` is synchronized exactly when
+  `copy_auth=true`; `mcp-auth.json` is filtered and merged only for selected
+  OAuth MCP names. Sessions, history, cache, indexes, and static config are never
+  synchronized to the host. OpenCode `target=host`, `target=desktop`, and
+  `session_sync` fail closed
 - The macOS-only Desktop branch delegates to `cage-desktop.py`. A detached
   repository/preset-specific supervisor owns the ordinary container launcher,
   Netgate and selected bridges, OAuth reconciliation, a private Unix control
@@ -234,7 +252,8 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   - **Claude (api-key auth):** `ANTHROPIC_API_KEY` env var, `~/.claude` read-only at `/host-claude`
   - **Claude (ccstatusline):** if `~/.config/ccstatusline/` exists on the host, it is mounted read-only at `/host-ccstatusline` and copied into the volume so a customized ccstatusline status line propagates (ccstatusline stores its config there, separate from `settings.json`)
   - **Codex:** host Codex directory from the preset auth block (default `~/.codex` if omitted) read-only at `/host-codex` for auth and supported global configuration, `OPENAI_API_KEY` env var if set. The entrypoint allowlists user `config.toml`, profile `*.config.toml` files, global `AGENTS.md`/`AGENTS.override.md`, `hooks.json`, and `rules/`, plus explicitly governed credentials; per-repository sessions, history, SQLite indexes, logs, memories, and caches remain volume-local and must never be replaced from the shared host directory. MCP OAuth `.credentials.json` is synchronized by the host launcher between the host Codex dir and the per-repo Docker volume before launch and after exit, so rotating refresh tokens do not diverge. If the preset selects `skill_packs`, each selected skill directory is mounted read-only at `/host-agent-skills/<name>` and copied into `$HOME/.agents/skills` inside the container. If no `skill_packs` are selected, the selected auth block's host agents directory is mounted read-only at `/host-agents` and copied wholesale so globally-installed skills (`npx skills add … -g`) are visible inside the container
-  - **GitHub CLI (both tools, opt-in via preset identity `gh_auth = true`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
+  - **OpenCode:** bounded private host/repository configuration snapshot read-only at `/cage-opencode-snapshot`; per-repository state volume at `/home/opencode/.cage-state`; selected skills or the fallback registry copied into that private snapshot before Docker starts; provider `auth.json` and selected `mcp-auth.json` entries reconciled by the host launcher around the run. The final effective configuration is generated under tmpfs-backed `/run`; credentials, selected environment values, and resolved headers never enter Docker `Config.Env`
+  - **GitHub CLI (all container tools, opt-in via preset identity `gh_auth = true`):** `~/.config/gh` read-only at `/host-gh` (if exists), `GH_TOKEN`/`GITHUB_TOKEN` env var if set
   - Per-repo named Docker volume for persistent state
   - SSH key read-only for git push (if the preset identity configures `ssh_key`)
   - `~/.ssh/known_hosts` read-only (if exists)
@@ -270,18 +289,46 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Copies GitHub CLI config from `/host-gh` (same as Claude entrypoint)
 - Execs `codex` instead of `claude`
 
+**`entrypoint-opencode.sh`** (runs inside the OpenCode container on every start):
+- Uses the same root-to-user UID/GID remapping, Git/SSH/GitHub identity, extra
+  mounts, host-command shims, and selected bridge environment as the other
+  container entrypoints
+- Keeps XDG data, state, and cache in the per-repository state volume, while the
+  final XDG configuration is private run state under tmpfs-backed `/run`
+- Uses an ephemeral `exec,nosuid,nodev` `/tmp` tmpfs because OpenCode's TUI
+  extracts and maps its native renderer there; the other tool containers keep
+  the existing non-executable default tmpfs
+- Resolves only Cage's bounded host/repository snapshot, rejects unfreezable
+  instructions or external skill paths, strips inherited MCPs, generates the
+  selected local/remote MCP definitions with private header expansion, and
+  validates exact effective MCP transports before execution
+- Copies frozen project skills plus selected host skill packs into the final
+  OpenCode discovery directory and verifies that no disk skill escaped that
+  boundary. When no pack is selected, it uses the existing fallback host agents
+  registry behavior
+- Runs with `--pure` unless `opencode_plugins=true`, disables in-process updates,
+  and maps Cage yolo to `--auto`. Raw `--auto`, project/working-directory
+  overrides, unselected MCP auth, MCP mutation, and live server modes are
+  rejected before Docker effects
+
 **`Dockerfile`**: Thin leaf image (`FROM cage-base`). Creates the `claude` user, installs Claude Code via official installer, and copies `entrypoint.sh`. Entrypoint runs as root (switches to host UID via gosu). `jq` is required by the statusLine command in the host's `settings.json`.
 
 **`Dockerfile.codex`**: Thin leaf image (`FROM cage-base`). Adds `openssh-server` (Codex-only, for Desktop SSH), creates the `codex` user, installs Codex CLI via `npm install -g @openai/codex`, and copies `entrypoint-codex.sh` and `codex-remote.py`. Same root→gosu pattern as Claude.
 
+**`Dockerfile.opencode`**: Thin leaf image (`FROM cage-base`). Creates the
+`opencode` user, installs `opencode-ai@latest` without root-owned lifecycle
+scripts, checks the required `--pure`, project/external-skill suppression, and
+fixed OAuth callback contracts at image build time, disables OpenCode's
+in-process updater, and copies `entrypoint-opencode.sh`.
+
 **`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, and the `mcp-relay`/`host-cmd-relay` bridge scripts. Contains no agent binaries, no entrypoints, no user accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
 
-All three Dockerfiles end with OCI version plus `io.cage.managed`,
+All four Dockerfiles end with OCI version plus `io.cage.managed`,
 `io.cage.role`, and `io.cage.version` labels. Local launcher, Compose, update
 overlay, CI candidate, and release-promotion paths preserve that identity so
 storage cleanup never infers ownership from repository names alone.
 
-**`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest` and `codex:latest`. Not used for running containers (that's `cage`'s job).
+**`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest`, `codex:latest`, and `opencode:latest`. Not used for running containers (that's `cage`'s job).
 
 **`netgate-proxy.py`** (host-side, runs when `--net gate` is active):
 - Python3 forward proxy that gates outbound HTTP/HTTPS by domain
@@ -370,10 +417,10 @@ from the release archive.
 installer, and Python 3.11/3.12 test/Docker/Desktop gates, a `candidate` job
 runs only on a `push` to `main` after every gate passes. It builds the shared
 base for `linux/amd64`+`linux/arm64`, publishes it as
-`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds both leaves from that
-exact base digest, publishes `claude-code`/`codex` candidate tags, retains
+`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds all three leaves from
+that exact base digest, publishes `claude-code`/`codex`/`opencode` candidate tags, retains
 BuildKit SBOM and `provenance: mode=max`, signs GitHub provenance attestations
-for all three digests, and uploads a small `release-candidate-<SHA>` manifest
+for all four digests, and uploads a schema-v2 `release-candidate-<SHA>` manifest
 artifact. Candidate tags are public, write-once, serialized per SHA
 (`cancel-in-progress: false`), and never referenced by Cage's pull logic. On a
 rerun for the same SHA, an existing candidate is verified (amd64/arm64 platforms
@@ -386,7 +433,7 @@ immutable commit SHAs (maintained by Dependabot), serialized per tag with
 cancellation disabled. (1) **Exact-commit gate**: requires an annotated
 `v<VERSION>` tag whose commit matches `CAGE_VERSION` and `GITHUB_SHA`, finds a
 successful `ci.yml` push run for exactly that SHA on `main`, downloads its
-candidate manifest, and verifies the three candidate digests, their
+candidate manifest, and verifies the four candidate digests, their
 amd64/arm64 platforms, and their CI attestations (expected repo, exact source
 digest, `refs/heads/main`, pinned `ci.yml` signer); fails closed if a version
 tag already exists with a different digest. This gate protects manual tag
@@ -405,7 +452,7 @@ it validates the generated deliverable.
 - Version is defined in `CAGE_VERSION` at the top of the `cage` script (e.g., `CAGE_VERSION="0.1.0"`)
 - `cage --version` prints the current version
 - Git tags use `v` prefix: `v0.1.0`, `v0.2.0`, etc.
-- Docker images are tagged with the version (`claude-code:0.1.0`) plus `:latest`, and published to `ghcr.io/sindycate/cage/` as multi-arch (amd64/arm64)
+- Docker images are tagged with the version (`claude-code:0.1.0`, `codex:0.1.0`, and `opencode:0.1.0`) plus `:latest`, and published to `ghcr.io/sindycate/cage/` as multi-arch (amd64/arm64)
 - On first run, cage pulls the pre-built image from ghcr.io; falls back to local build if pull fails
 - `--rebuild` forces a local `docker build --no-cache` to get the latest tool version
 - Releases are automated via GitHub Actions on tag push
@@ -435,7 +482,7 @@ it validates the generated deliverable.
 
 ## Remote HTTP MCP servers (Linear, Dash0)
 
-The stdio bridge is for **local stdio** MCP servers selected through `mcp_packs`. `mcp_packs` can also define **remote streamable-HTTP** servers like Linear (`https://mcp.linear.app/mcp`) or Dash0 (`https://api.<region>.aws.dash0.com/mcp`). cage forwards the named token env vars and generates tool-native MCP config inside the writable container state only: Claude gets `mcpServers` entries in `~/.claude.json`; Codex gets `[mcp_servers.<name>]` entries in `~/.codex/config.toml`.
+The stdio bridge is for **local stdio** MCP servers selected through `mcp_packs`. `mcp_packs` can also define **remote streamable-HTTP** servers like Linear (`https://mcp.linear.app/mcp`) or Dash0 (`https://api.<region>.aws.dash0.com/mcp`). cage forwards the named token env vars and generates tool-native MCP config inside private runtime/container state: Claude gets `mcpServers` entries in `~/.claude.json`; Codex gets `[mcp_servers.<name>]` entries in `~/.codex/config.toml`; OpenCode gets a sanitized frozen `mcp` object under tmpfs-backed `/run`.
 
 **How it works:**
 - The token is forwarded by naming the env var in `mcp_packs.<name>.env` and/or `bearer_token_env_var`, then exporting it in your host shell. The secret is never stored in `config.toml`.
@@ -477,6 +524,14 @@ The host launcher synchronizes Codex MCP OAuth `.credentials.json` between the
 host Codex directory and the per-repo Docker volume before launch and after
 exit, so providers with rotating refresh tokens do not leave stale copies.
 
+For OpenCode, the same command resolves an OpenCode preset, restricts the
+operation to a selected server name, and runs `opencode mcp auth/logout` inside
+the prepared container. Cage publishes only the image-contract loopback OAuth
+ports on host `127.0.0.1` for the duration of the auth operation. The selected
+server entry in `mcp-auth.json` is synchronized around the run; unrelated host
+entries remain untouched. OpenCode presets reject `oauth_resource` because the
+current OpenCode schema cannot preserve it faithfully.
+
 For Claude, select the same OAuth MCP pack from a Claude preset and authenticate
 inside the cage session with `/mcp`. No container port publishing is required
 for the first version; if the browser callback cannot reach the container, use
@@ -487,7 +542,7 @@ uses the URL and optional client ID; shared Codex fields such as
 ## Key Constraints
 
 - Central `config.toml` stores env var names and paths, not secret values. `cage config explain`/`doctor` must redact secrets and report env vars only as set/unset
-- Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex` must match the resolved preset tool or fail clearly
+- Central presets are complete runnable configurations. `--preset NAME` overrides project/default preset selection; explicit `cage claude`/`cage codex`/`cage opencode` must match the resolved preset tool or fail clearly
 - Desktop targets are Codex-only, macOS-only, and require a saved or
   project-owned preset. Launch-once TUI configurations fail closed because a
   persistent target must be reconstructable
@@ -498,8 +553,8 @@ uses the URL and optional client ID; shared Codex fields such as
   uses the config-authoring TUI. Direct `cage PATH` launches remain unchanged
 - Central `mcp_packs` are the **authoritative allowlist** for every Cage session. Only MCP servers selected by the resolved preset may start; an absent or empty `mcp_packs` selection means zero active MCPs. Duplicate MCP server names across selected packs are invalid. For container and desktop targets, stdio MCP servers run on the host through the authenticated MCP bridge and HTTP MCP servers become tool-native container config. For host targets, both become process-local Codex config overrides; stdio commands execute directly as pinned host processes. A selected name already defined in a base/profile/project Codex layer fails closed
 - At launch, Cage inventories the inherited MCP servers in the **launching runtime** and disables every server the preset did not select with highest-precedence overrides, supplemented by direct profile/project layer parsing because `codex mcp list` does not enumerate every layer. Loaded servers receive `mcp_servers.<name>.enabled=false`. A direct-only definition that is not loaded yet (especially an untrusted project) receives a same-kind inert transport plus `enabled=false`; this avoids Codex's `invalid transport` failure and remains authoritative if trust is granted in the same process. `target = "host"` inventories the host Codex binary; container launches inventory inside the image (entrypoint, after configuration import); Desktop re-inventories inside the persistent container on every app-server connection so live project changes are still suppressed. Across all three Codex paths, caller arguments may not replace the inventoried profile (`-p`/`--profile`) or repository (`-C`/`--cd`), use `--enable`/`--disable`, select another app-server with `--remote`, ignore the inventoried user layer with `--ignore-user-config`, or set an unallowlisted `-c`/`--config` root; normal prompts and dedicated model/sandbox options remain available, and `--` ends the policy scan for positional/subcommand payload. Desktop selected-MCP authorization metadata is root-owned and non-replaceable by the remote Codex user. Unselected definitions may remain visible as disabled in `codex mcp list`; they never start. For Claude, the volume `mcpServers` is reconciled to the selected set only (host `~/.claude.json` MCP definitions are no longer merged) and a private read-only `.mcp.json` overlay — built from the bridges that actually started, empty under `--net off` — always suppresses repository MCP definitions. `config explain`, `config doctor`, and the TUI review state the policy and list selected servers; for host targets they also list suppressed servers, while container/Desktop disclose the authoritative suppressed set at launch. Cage fails closed when a trustworthy inventory cannot be obtained; there is no legacy inheritance escape hatch
-- Central `skill_packs` are composed per Codex preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container and desktop targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
-- OAuth HTTP MCP servers are supported for Codex and Claude presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` remain Codex-only host-mediated wrappers around `codex mcp login/logout` so OAuth browser callbacks happen on the host instead of inside an un-published container port. Claude OAuth login happens inside the cage session through `/mcp`; cage generates Claude's native MCP config but does not copy host keychain state. cage forces `mcp_oauth_credentials_store = "file"` for Codex OAuth flows and generated container Codex config. cage also syncs Codex MCP OAuth `.credentials.json` between host and volume before launch and after exit to preserve rotated refresh tokens. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host Codex configs unless intentionally debugging.
+- Central `skill_packs` are composed per Codex or OpenCode preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container and Desktop targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. OpenCode additionally freezes project-local skills and verifies its final disk-skill inventory. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
+- OAuth HTTP MCP servers are supported for Codex, Claude, and OpenCode presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` dispatch by resolved tool: Codex remains a host-mediated wrapper so browser callbacks happen on the host, while OpenCode runs the selected-only operation inside the container and publishes only its image-contract callback ports on `127.0.0.1`. Claude OAuth login happens inside the cage session through `/mcp`. Cage forces `mcp_oauth_credentials_store = "file"` for Codex and synchronizes `.credentials.json`; OpenCode synchronizes only selected entries in `mcp-auth.json`. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host tool configs unless intentionally debugging.
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`,
   legacy Cage profile files, folder mappings, or repo `.cage.conf`; native
   Codex profile files selected by `codex_profile` are a separate supported
@@ -511,6 +566,11 @@ uses the URL and optional client ID; shared Codex fields such as
 - Codex auth uses `host_codex_dir` in the selected auth block, or `~/.codex` when omitted. Set `copy_auth = false` to skip copying `auth.json` for non-OpenAI providers like Azure OpenAI
 - Codex runtime state is per-repository volume data. Host import is allowlisted to user/profile TOML configuration, global AGENTS guidance, hooks/rules, plus the separately governed `auth.json` and `.credentials.json`; never copy or replace shared-host `sessions`, `archived_sessions`, `history.jsonl`, SQLite state, logs, memories, goals, caches, or shell snapshots over a project volume. Keep the fail-closed name checks inside both import helpers and the complete real-Docker preservation fixture when changing this boundary
 - Codex skills: set `host_agents_dir` in the selected Codex auth block to define the canonical/fallback agents registry, usually `~/.agents/`. Prefer preset-level `skill_packs` for choosing which skills are available in a cage session. Mounts are conditional on the host paths existing; selected `skill_packs` hard-fail if a selected skill is missing `SKILL.md`
+- OpenCode auth uses `host_opencode_config_dir` and
+  `host_opencode_data_dir`, defaulting to the host XDG config/data roots. Set
+  `copy_auth=false` to remove stale provider auth from that project volume and
+  disable provider-store writeback. Static configuration and runtime-owned
+  sessions/history/cache/indexes are never synchronized to the host
 - GitHub CLI auth is off by default. Set `gh_auth = true` in the selected identity. When enabled: cage auto-extracts the token via `gh auth token` on the host (works with keychain-based auth), or passes `GH_TOKEN`/`GITHUB_TOKEN` env var if set. `~/.config/gh/` is mounted read-only for non-auth settings. Set `gh_account` in the identity for account selection
 - Hashing uses `md5 -q` on macOS and `md5sum` on Linux (auto-detected in the cage script)
 - Network gating (`--net gate`) only covers HTTP/HTTPS traffic routed via proxy env vars. Raw TCP/SSH/DNS bypass the proxy (including `git push` over SSH)
@@ -523,4 +583,4 @@ uses the URL and optional client ID; shared Codex fields such as
 - MCP bridge runs stdio MCP commands from selected `mcp_packs` on the host and relays stdio MCP protocol into the container via TCP on `host.docker.internal`. Incompatible with `--net off`. When `--net gate` is also active, MCP bridge traffic bypasses the netgate proxy (direct TCP, not HTTP)
 - Host command bridge uses selected `host_commands`: each `name=host command` entry gets a TCP listener on the host and a `/usr/local/bin/<name>` shim in the container. Caller arguments are appended; if they exactly equal fixed arguments already present after the configured executable, Cage de-duplicates that suffix solely for pre-0.23 compatibility. Prefer executable-only definitions when the client supplies arguments. Commands run with full host user privileges — treat as opt-in only, like MCP bridge. Incompatible with `--net off`; bypasses netgate when `--net gate` is active
 - Extra named mounts from preset `extra_mounts`, or `--mount-ro`/`--mount-rw` flags, bind-mount additional host directories at their **same absolute host path** inside the container (mirroring the repo mount), read-only by default. Paths are validated against the same reserved-path guard as the repo (`_is_reserved_mount_path`, a shared function); tildes are expanded and relative paths resolve against cage's launch cwd. Non-existent paths and paths overlapping the repo are **warn-and-skipped**; reserved container paths **hard-fail**. Extra mounts do **not** affect the container/volume name hash (derived from `REPO_PATH` only). Adding a mount requires relaunching cage (Docker fixes bind mounts at `docker run` time). No entrypoint involvement — these are plain bind mounts used in place, not copied into the volume
-- **Container security:** Both Claude and Codex containers use `apparmor=unconfined` and `seccomp=unconfined` so bubblewrap can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary
+- **Container security:** Claude, Codex, and OpenCode containers use `apparmor=unconfined` and `seccomp=unconfined` so coding tools can create user namespaces for subprocess isolation/sandboxing. `--cap-drop ALL` still applies. Entrypoints run as root for UID remapping then switch to the target user via `gosu`. Users have passwordless `sudo` for installing packages (Playwright, etc.) — the container itself is the security boundary

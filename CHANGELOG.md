@@ -3,6 +3,29 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.28.0 — 2026-08-09
+
+- add OpenCode as a container-only third assistant, with a dedicated managed
+  image, persistent per-repository state, controlled updates, TUI/configuration
+  support, Cage-labelled `--auto`, and fail-closed passthrough policy;
+- freeze bounded host and project OpenCode configuration before launch, remove
+  inherited MCP definitions, reconcile only Cage-selected local/remote MCPs,
+  keep plugins disabled by default with `--pure`, and verify the final MCP
+  inventory before execution;
+- hand proxy, provider, GitHub, bridge, identity, and selected environment
+  values to OpenCode through a private launch file rather than Docker
+  `Config.Env`;
+- synchronize the selected provider store and selected MCP OAuth entries with
+  private locking and compare-and-swap conflict checks while keeping sessions,
+  history, indexes, and caches volume-local;
+- give only the OpenCode container an ephemeral executable `/tmp` tmpfs required
+  by its native TUI renderer, retaining `nosuid`/`nodev` and leaving Claude and
+  Codex tmpfs behavior unchanged;
+- extend storage, Compose, deterministic archives, CI candidates, attestations,
+  release promotion, and anonymous verification to the fourth managed image;
+  candidate manifests now require schema 2 and exact entries for `base`,
+  `claude-code`, `codex`, and `opencode`.
+
 ## 0.27.4 — 2026-08-09
 
 - restore current ChatGPT/Codex Desktop SSH-host startup by accepting the

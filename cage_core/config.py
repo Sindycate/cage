@@ -53,6 +53,7 @@ CODEX_INVENTORY_TIMEOUT = 30.0
 SAFE_CODEX_PASSTHROUGH_CONFIG_ROOTS = (
     codex_policy.SAFE_PASSTHROUGH_CONFIG_ROOTS
 )
+VALID_TOOLS = {"claude", "codex", "opencode"}
 
 TOP_LEVEL_KEYS = {
     "version",
@@ -82,6 +83,8 @@ AUTH_KEYS = {
     "aws_profile",
     "aws_region",
     "host_codex_dir",
+    "host_opencode_config_dir",
+    "host_opencode_data_dir",
     "host_agents_dir",
     "copy_auth",
     "codex_copy_auth",
@@ -129,6 +132,7 @@ PRESET_KEYS = {
     "host_commands",
     "extra_mounts",
     "yolo",
+    "opencode_plugins",
 }
 
 VALID_EXEC_TARGETS = {"container", "desktop", "host"}
@@ -405,9 +409,15 @@ def validate_schema(data: dict[str, Any]) -> None:
             raise ConfigError(
                 f"presets.{preset_name}.codex_profile must contain only letters, digits, hyphens, or underscores"
             )
-        if codex_profile and preset.get("tool") == "claude":
+        if codex_profile and preset.get("tool") in {"claude", "opencode"}:
             raise ConfigError(
                 f"presets.{preset_name}.codex_profile is only supported for Codex presets"
+            )
+        if "opencode_plugins" in preset and not isinstance(
+            preset["opencode_plugins"], bool
+        ):
+            raise ConfigError(
+                f"presets.{preset_name}.opencode_plugins must be true or false"
             )
 
 
@@ -481,12 +491,12 @@ def selected_seed_preset(data: dict[str, Any], repo: str) -> tuple[str, dict[str
 
 def preset_tool(data: dict[str, Any], preset: dict[str, Any]) -> str:
     tool = preset.get("tool")
-    if tool in {"claude", "codex"}:
+    if tool in VALID_TOOLS:
         return str(tool)
     auth_name = preset.get("auth")
     if isinstance(auth_name, str):
         auth = as_table(data, "auth").get(auth_name, {})
-        if isinstance(auth, dict) and auth.get("tool") in {"claude", "codex"}:
+        if isinstance(auth, dict) and auth.get("tool") in VALID_TOOLS:
             return str(auth["tool"])
     return ""
 
@@ -664,8 +674,10 @@ def host_command_label(name: str, command_def: dict[str, Any]) -> str:
 
 
 def build_interactive_preset(selections: InteractiveSelections) -> dict[str, Any]:
-    if selections.tool not in {"claude", "codex"}:
-        raise ConfigError("interactive selection must choose tool 'claude' or 'codex'")
+    if selections.tool not in VALID_TOOLS:
+        raise ConfigError(
+            "interactive selection must choose tool 'claude', 'codex', or 'opencode'"
+        )
     preset: dict[str, Any] = {"tool": selections.tool}
     if selections.auth_name:
         preset["auth"] = selections.auth_name
@@ -745,7 +757,7 @@ def interactive_select(
             tool = prompt_single(
                 tty,
                 "Select tool",
-                [("codex", "codex"), ("claude", "claude")],
+                [("codex", "codex"), ("claude", "claude"), ("opencode", "opencode")],
                 tool_default,
             )
             seed_for_tool = seed_preset if not seed_tool or seed_tool == tool else {}
@@ -775,7 +787,7 @@ def interactive_select(
         )
 
         skill_pack_names: list[str] = []
-        if tool == "codex":
+        if tool in {"codex", "opencode"}:
             skill_packs = as_table(data, "skill_packs")
             skill_choices = [
                 (name, skill_pack_label(name, skill_packs[name]))
@@ -987,8 +999,10 @@ def resolve_config(
         raise ConfigError(f"auth {auth_name!r} must be a table")
 
     tool = preset.get("tool") or auth.get("tool") or ""
-    if not isinstance(tool, str) or tool not in {"claude", "codex"}:
-        raise ConfigError(f"preset {preset_name!r} must resolve to tool 'claude' or 'codex'")
+    if not isinstance(tool, str) or tool not in VALID_TOOLS:
+        raise ConfigError(
+            f"preset {preset_name!r} must resolve to tool 'claude', 'codex', or 'opencode'"
+        )
     if explicit_tool and explicit_tool != tool:
         raise ConfigError(
             f"preset {preset_name!r} is for {tool}, but command requested {explicit_tool}; "
@@ -996,6 +1010,20 @@ def resolve_config(
         )
     if auth.get("tool") and auth.get("tool") != tool:
         raise ConfigError(f"auth {auth_name!r} is for {auth.get('tool')}, but preset uses {tool}")
+    if tool != "opencode":
+        for key in ("host_opencode_config_dir", "host_opencode_data_dir"):
+            if key in auth:
+                raise ConfigError(
+                    f"auth.{auth_name}.{key} is only supported for OpenCode"
+                )
+    elif "codex_copy_auth" in auth:
+        raise ConfigError(
+            f"auth.{auth_name}.codex_copy_auth is Codex-only; use copy_auth for OpenCode"
+        )
+    if "opencode_plugins" in preset and tool != "opencode":
+        raise ConfigError(
+            f"presets.{preset_name}.opencode_plugins is only supported for OpenCode"
+        )
 
     resolved = ResolvedConfig(
         config_path=config_path,
@@ -1014,6 +1042,13 @@ def resolve_config(
         preset.get("session_sync", defaults.get("session_sync")),
         f"presets.{preset_name}.session_sync",
     )
+    if tool == "opencode":
+        if "session_sync" in preset:
+            raise ConfigError(
+                f"presets.{preset_name}.session_sync is not supported for OpenCode; "
+                "OpenCode state remains in its per-repository volume"
+            )
+        resolved.session_sync = "0"
     resolved.yolo = bool_to_flag(preset.get("yolo"), f"presets.{preset_name}.yolo")
 
     target = preset.get("target", "container")
@@ -1059,13 +1094,41 @@ def resolve_config(
         resolved.claude_auth = mode
         resolved.aws_profile = str(auth.get("aws_profile") or preset.get("aws_profile") or "")
         resolved.aws_region = str(auth.get("aws_region") or preset.get("aws_region") or "")
-    else:
+    elif tool == "codex":
         if auth.get("host_codex_dir"):
             resolved.host_codex_dir = expand_path_string(str(auth["host_codex_dir"]))
         if auth.get("host_agents_dir"):
             resolved.host_agents_dir = expand_path_string(str(auth["host_agents_dir"]))
         copy_auth = auth.get("copy_auth", auth.get("codex_copy_auth"))
         resolved.codex_copy_auth = bool_to_flag(copy_auth, f"auth.{auth_name}.copy_auth")
+    else:
+        config_default = Path(
+            os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        ) / "opencode"
+        data_default = Path(
+            os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+        ) / "opencode"
+        resolved.host_opencode_config_dir = expand_path_string(
+            str(auth.get("host_opencode_config_dir") or config_default)
+        )
+        resolved.host_opencode_data_dir = expand_path_string(
+            str(auth.get("host_opencode_data_dir") or data_default)
+        )
+        if auth.get("host_agents_dir"):
+            resolved.host_agents_dir = expand_path_string(str(auth["host_agents_dir"]))
+        resolved.opencode_copy_auth = (
+            bool_to_flag(auth.get("copy_auth"), f"auth.{auth_name}.copy_auth")
+            or "1"
+        )
+        resolved.opencode_plugins = bool_to_flag(
+            preset.get("opencode_plugins", False),
+            f"presets.{preset_name}.opencode_plugins",
+        )
+        if resolved.opencode_plugins == "1":
+            resolved.warnings.append(
+                "OpenCode plugins are enabled; global and project plugin code may execute "
+                "with the selected container capabilities"
+            )
 
     resolved.git_user_name = str(identity.get("git_user_name") or "")
     resolved.git_user_email = str(identity.get("git_user_email") or "")
@@ -1149,6 +1212,11 @@ def resolve_config(
                         f"mcp server {name}.oauth_resource",
                     )
                     if oauth_resource:
+                        if tool == "opencode":
+                            raise ConfigError(
+                                f"MCP server {name!r} uses oauth_resource, which OpenCode "
+                                "cannot represent faithfully"
+                            )
                         out["oauth_resource"] = oauth_resource
                     client_id = optional_str(
                         server.get("oauth_client_id"),
@@ -1194,8 +1262,8 @@ def resolve_config(
                 raise ConfigError(f"unsupported MCP server type for {name!r}: {server_type}")
 
     skill_pack_names = as_str_list(preset.get("skill_packs"), f"presets.{preset_name}.skill_packs")
-    if skill_pack_names and tool != "codex":
-        raise ConfigError("skill_packs are only supported for Codex presets")
+    if skill_pack_names and tool not in {"codex", "opencode"}:
+        raise ConfigError("skill_packs are only supported for Codex and OpenCode presets")
     seen_skills: set[str] = set()
     for pack_name in skill_pack_names:
         require_name(pack_name, "skill pack name")
@@ -1762,6 +1830,10 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             print(f"  - {name}: {status}")
     if resolved.host_codex_dir:
         print(f"Codex dir: {resolved.host_codex_dir}")
+    if resolved.host_opencode_config_dir:
+        print(f"OpenCode config dir: {resolved.host_opencode_config_dir}")
+    if resolved.host_opencode_data_dir:
+        print(f"OpenCode data dir: {resolved.host_opencode_data_dir}")
     if resolved.host_agents_dir:
         print(f"Agents dir: {resolved.host_agents_dir}")
     if resolved.gh_auth == "1":
@@ -1782,6 +1854,16 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
     elif resolved.target == "host":
         print("  - credentials: resolved host CODEX_HOME used directly (copy_auth is container-only)")
+    elif resolved.tool == "opencode":
+        if resolved.opencode_copy_auth == "0":
+            print("  - credentials: host OpenCode provider auth copy disabled")
+        else:
+            print("  - credentials: exact host OpenCode provider auth reuse")
+        print("  - configuration: frozen, sanitized launch snapshot")
+        print(
+            "  - plugins: "
+            + ("enabled (expanded trust boundary)" if resolved.opencode_plugins == "1" else "disabled (--pure)")
+        )
     elif resolved.codex_copy_auth == "0":
         print("  - credentials: host Codex auth.json copy disabled")
     else:
@@ -1891,6 +1973,23 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             )
         except ConfigError as exc:
             errors.append(str(exc))
+    if resolved.tool == "opencode":
+        if resolved.target != "container":
+            errors.append("OpenCode currently supports only target = 'container'")
+        if resolved.host_opencode_config_dir and not Path(
+            resolved.host_opencode_config_dir
+        ).is_dir():
+            warnings.append(
+                "OpenCode config directory is missing; an empty configuration snapshot "
+                f"will be used: {resolved.host_opencode_config_dir}"
+            )
+        if resolved.host_opencode_data_dir and not Path(
+            resolved.host_opencode_data_dir
+        ).is_dir():
+            warnings.append(
+                "OpenCode data directory is missing; provider and MCP auth start empty: "
+                f"{resolved.host_opencode_data_dir}"
+            )
     if resolved.tool == "claude" and resolved.claude_auth == "api-key" and not os.environ.get("ANTHROPIC_API_KEY"):
         errors.append("ANTHROPIC_API_KEY is required for Claude api-key auth")
     if resolved.tool == "claude" and resolved.claude_auth == "bedrock":
@@ -1998,8 +2097,25 @@ def selected_oauth_mcp_server(resolved: ResolvedConfig, name: str) -> dict[str, 
 
 def command_mcp_auth(args: argparse.Namespace, action: str) -> int:
     data = load_config(args.config)
-    resolved = resolve_config(data, args.config, args.repo, args.preset or "", "codex")
+    resolved = resolve_config(data, args.config, args.repo, args.preset or "", "")
     server = selected_oauth_mcp_server(resolved, args.name)
+    if resolved.tool == "opencode":
+        cage_bin = _INSTALL_ROOT / "cage"
+        command = [
+            str(cage_bin),
+            "opencode",
+            "--preset",
+            resolved.preset_name,
+            args.repo,
+            "mcp",
+            "auth" if action == "login" else "logout",
+            args.name,
+        ]
+        return subprocess.call(command)
+    if resolved.tool != "codex":
+        raise ConfigError(
+            f"MCP OAuth login/logout is not supported for {resolved.tool!r}"
+        )
     codex_home = resolved.host_codex_dir or expand_path_string("~/.codex")
     Path(codex_home).mkdir(parents=True, exist_ok=True)
 
@@ -2039,7 +2155,7 @@ def command_default_tool(args: argparse.Namespace) -> int:
             auth = as_table(data, "auth").get(auth_name, {})
             if isinstance(auth, dict):
                 tool = auth.get("tool")
-        if tool in {"claude", "codex"}:
+        if tool in VALID_TOOLS:
             print(tool)
             return 0
     print("claude")
@@ -2835,7 +2951,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resolve-json", help=argparse.SUPPRESS)
     p.add_argument("--repo", required=True)
     p.add_argument("--preset")
-    p.add_argument("--tool", choices=["claude", "codex"])
+    p.add_argument("--tool", choices=sorted(VALID_TOOLS))
     p.set_defaults(func=command_resolve_json)
 
     p = sub.add_parser("default-tool", help=argparse.SUPPRESS)
@@ -2873,13 +2989,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("explain", help="Explain the resolved launch config")
     p.add_argument("--preset")
-    p.add_argument("--tool", choices=["claude", "codex"])
+    p.add_argument("--tool", choices=sorted(VALID_TOOLS))
     p.add_argument("repo")
     p.set_defaults(func=command_explain)
 
     p = sub.add_parser("doctor", help="Validate the resolved launch config")
     p.add_argument("--preset")
-    p.add_argument("--tool", choices=["claude", "codex"])
+    p.add_argument("--tool", choices=sorted(VALID_TOOLS))
     p.add_argument("repo")
     p.set_defaults(func=command_doctor)
 
@@ -2905,7 +3021,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ui-resolve-json", help=argparse.SUPPRESS)
     p.add_argument("--repo", required=True)
     p.add_argument("--result", type=Path, required=True)
-    p.add_argument("--tool", choices=["claude", "codex"])
+    p.add_argument("--tool", choices=sorted(VALID_TOOLS))
     p.set_defaults(func=command_ui_resolve_json)
 
     p = sub.add_parser("mcp", help="Manage OAuth MCP authentication")

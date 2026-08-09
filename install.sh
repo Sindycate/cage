@@ -238,8 +238,8 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
         cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
         codex-remote.py
-        docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex
-        entrypoint.sh entrypoint-codex.sh install.sh Makefile README.md SECURITY.md
+        docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex Dockerfile.opencode
+        entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh Makefile README.md SECURITY.md
         CHANGELOG.md
     )
     for source_file in "${SOURCE_FILES[@]}"; do
@@ -264,7 +264,7 @@ else
     tar xzf "$TARBALL" -C "$STAGE_DIR" --strip-components=1
 fi
 
-for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py; do
+for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh; do
     [ -f "$STAGE_DIR/$required" ] && [ ! -L "$STAGE_DIR/$required" ] || \
         error "Release archive is missing a safe regular file: $required"
 done
@@ -275,8 +275,8 @@ unsafe_entry="$(find "$STAGE_DIR/cage_core" -type l -print -quit)"
 unsafe_entry="$(find "$STAGE_DIR/cage_core" ! -type f ! -type d -print -quit)"
 [ -z "$unsafe_entry" ] || error "Release archive contains a non-regular package entry: $unsafe_entry"
 for required in \
-    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py planning.py storage.py \
-    state/__init__.py state/oauth.py state/sessions.py \
+    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py opencode.py opencode_policy.py planning.py storage.py \
+    state/__init__.py state/oauth.py state/opencode.py state/sessions.py \
     targets/__init__.py targets/container.py targets/desktop.py targets/host.py; do
     [ -f "$STAGE_DIR/cage_core/$required" ] && [ ! -L "$STAGE_DIR/cage_core/$required" ] || \
         error "Release archive is missing a safe core module: cage_core/$required"
@@ -284,6 +284,7 @@ done
 
 printf '%s\n' "$VERSION" > "$STAGE_DIR/$INSTALL_MARKER"
 chmod +x "$STAGE_DIR/cage" "$STAGE_DIR/cage-main.py" "$STAGE_DIR/cage-config.py" "$STAGE_DIR/cage-desktop.py" "$STAGE_DIR/cage-tui.py" "$STAGE_DIR/cage-netgate.sh" "$STAGE_DIR/netgate-proxy.py" "$STAGE_DIR/mcp-bridge.py" "$STAGE_DIR/mcp-relay" "$STAGE_DIR/host-cmd-bridge.py" "$STAGE_DIR/host-cmd-relay" "$STAGE_DIR/codex-remote.py"
+chmod +x "$STAGE_DIR/entrypoint.sh" "$STAGE_DIR/entrypoint-codex.sh" "$STAGE_DIR/entrypoint-opencode.sh"
 
 validate_launcher_path
 if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then

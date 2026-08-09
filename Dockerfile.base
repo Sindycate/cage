@@ -47,7 +47,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
 LABEL org.opencontainers.image.source=https://github.com/Sindycate/cage
 LABEL org.opencontainers.image.description="cage - Docker isolation for AI coding assistants (shared base)"
 
-# Bridge relay scripts shared by both agents
+# Bridge relay scripts shared by all three assistants
 COPY mcp-relay /usr/local/bin/mcp-relay
 COPY host-cmd-relay /usr/local/bin/host-cmd-relay
 RUN chmod 755 /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay

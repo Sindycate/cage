@@ -76,6 +76,63 @@ Validation evidence:
 The source version is now `0.27.3`. No commit, push, tag, release, or
 Docker-state mutation had occurred when this release checkpoint was prepared.
 
+## 2026-08-09 — OpenCode container parity prepared for 0.28.0
+
+Checkpoint: container-only OpenCode integration and four-image release wiring
+are locally complete; publication and anonymous public verification remain
+separate post-push gates
+
+OpenCode is now a typed third assistant across central configuration, TUI,
+planning, image acquisition/update, storage classification, ordinary container
+execution, deterministic installation, and release automation. Host and Desktop
+targets remain Codex-only. Cage freezes bounded host/project JSON or JSONC,
+instructions, project skills, and selected host skills before Docker effects;
+the exact image binary resolves that snapshot with live project/external-skill
+discovery disabled. Inherited MCPs are removed, selected local/remote transports
+are regenerated, and final MCP plus disk-skill inventories fail closed on any
+difference.
+
+Provider `auth.json` uses exact-store lock/CAS reconciliation when enabled;
+selected `mcp-auth.json` entries are URL-bound, filtered both directions, and
+merged without touching unrelated host entries. `copy_auth=false` scrubs
+provider credentials again on exit and does not create an unused host data
+directory. Proxy, provider, GitHub, MCP/host bridge, identity, and selected
+environment values cross a private mode-0600 launch-file handoff rather than
+Docker `Config.Env`. Plugins remain disabled with `--pure` by default; opt-in is
+an explicit expanded trust boundary. Cage yolo maps to `--auto`, while raw
+authority/project/server overrides fail before launch.
+
+The new `opencode` leaf is mandatory in schema-v2 candidate manifests alongside
+`base`, `claude-code`, and `codex`. Candidate validation now requires the exact
+schema, source SHA, version, CI run, platform set, image set, repository names,
+candidate tags, and digests before four-image promotion, re-attestation, and
+`latest` movement.
+
+Validation evidence:
+
+- complete Python 3.12 suite: `495 passed, 12 skipped`;
+- complete Python 3.11 suite: `495 passed, 12 skipped` (isolated reuse of the
+  installed pure-Python pytest stack with plugin autoload disabled);
+- existing opt-in real-Docker suite: `7 passed, 1 skipped`;
+- OpenCode real-Docker contracts: `4 passed` against OpenCode `1.18.15`, covering
+  authenticated provider and remote-MCP proxy traffic, immutable project config,
+  inherited-MCP non-execution, selected plus project skills, and `--network none`;
+- real Cage TUI startup passed in both offline and authenticated-Netgate modes;
+  live Docker metadata contained only non-sensitive infrastructure names, while
+  the proxy contracts proved the private values reached the OpenCode process;
+- a selected STDIO bridge reached `mcp-relay` and executed its host marker while
+  the container cleaned up normally; `cage update opencode` reinstalled the
+  package and passed every pinned image/runtime contract;
+- shell syntax, recursive compilation, Compose validation, `git diff --check`,
+  temporary source installation, and two fixed-epoch byte-identical release
+  archives passed; the payload contained the OpenCode image, entrypoint, policy,
+  snapshot, and state modules.
+
+No push, tag, GitHub Release, candidate publication, registry promotion, or
+public-state mutation occurred. Independent anonymous verification of the
+source assets and all four multi-architecture images can run only after the
+versioned commit reaches `main` and the release workflow publishes them.
+
 ## 2026-08-05 — issue #6 acceptance hardening and live timing evidence
 
 Checkpoint: remaining locally actionable issue #6 gaps implemented for the
