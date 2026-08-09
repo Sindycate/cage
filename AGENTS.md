@@ -165,7 +165,10 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
-  suppression decisions to one shared policy implementation
+  suppression decisions to one shared policy implementation. The Desktop
+  remote path alone accepts the current app's exact
+  `features.code_mode_host=true` override before `app-server`;
+  other feature values/roots and host/container uses still fail closed
 - Accepts optional subcommand (`cage claude` or `cage codex`) to select tool and `--preset NAME` to select a central runnable configuration
 - Bare `cage` and `--interactive`/`-i` open `cage-tui.py` before any Docker,
   bridge, sync, or volume operation. The curses UI can launch once, remember a

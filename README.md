@@ -293,11 +293,15 @@ assignments use a small allowlist of runtime-only roots such as model, sandbox,
 approval, personality, shell-environment, and web-search settings; MCP,
 plugin, feature, project, and unknown roots fail closed. Normal positional
 prompts and dedicated options such as `--model` and `--sandbox` remain
-available. `--remote` and `--remote-auth-token-env` are rejected because they
-would hand execution to an app-server runtime Cage did not inventory, and
-`--ignore-user-config` is rejected because it would remove a layer after Cage
-classified its MCP transports. The conventional `--` delimiter ends this
-policy scan, so later tokens are preserved as positional/subcommand payload.
+available. The Desktop remote entrypoint alone accepts the current app's exact
+`features.code_mode_host=true` override when it precedes `app-server`; false,
+combined feature tables, other feature keys, and the same override on host or
+ordinary container paths remain rejected. `--remote` and
+`--remote-auth-token-env` are rejected because they would hand execution to an
+app-server runtime Cage did not inventory, and `--ignore-user-config` is
+rejected because it would remove a layer after Cage classified its MCP
+transports. The conventional `--` delimiter ends this policy scan, so later
+tokens are preserved as positional/subcommand payload.
 
 For Claude, Cage no longer merges host `~/.claude.json` MCP definitions. The
 volume `mcpServers` is reconciled to exactly the selected set, and a private

@@ -364,6 +364,7 @@ class HostAndContainerArgPathTests(unittest.TestCase):
             ["--remote-auth-token-env=TOKEN"],
             ["exec", "--ignore-user-config"],
             ["-c", "features.plugins=true"],
+            ["-c", "features.code_mode_host=true", "app-server"],
             ["--config", 'projects."/repo".trust_level="trusted"'],
             ["-c", "plugins.example.enabled=true"],
             ["-c", "future_inventory_layer=true"],

@@ -860,6 +860,27 @@ class RemoteLauncherTests(unittest.TestCase):
             ]
         )
 
+    def test_remote_launcher_allows_only_desktop_code_mode_host_feature(self):
+        remote.reject_unsafe_codex_passthrough_args(
+            [
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "--listen",
+                "unix:///tmp/app.sock",
+            ]
+        )
+        rejected = [
+            ["-c", "features.code_mode_host=false", "app-server"],
+            ["-c", "features.plugins=true", "app-server"],
+            ["-c", "features={code_mode_host=true,plugins=true}", "app-server"],
+            ["-c", "features.code_mode_host=true", "exec"],
+            ["app-server", "--config=features.code_mode_host=true"],
+        ]
+        for argv in rejected:
+            with self.subTest(argv=argv), self.assertRaises(RuntimeError):
+                remote.reject_unsafe_codex_passthrough_args(argv)
+
     def test_remote_rejects_unsafe_passthrough_before_inventory(self):
         with (
             patch.object(remote.sys, "argv", ["codex", "--profile=evil"]),

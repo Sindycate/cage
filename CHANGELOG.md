@@ -3,6 +3,14 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.27.4 — 2026-08-09
+
+- restore current ChatGPT/Codex Desktop SSH-host startup by accepting the
+  launcher's exact `features.code_mode_host=true` app-server override while
+  continuing to reject every other feature, plugin, MCP, project, or unknown
+  passthrough configuration root; host and ordinary container launches remain
+  unchanged and fail closed for the same override.
+
 ## 0.27.3 — 2026-08-09
 
 - preserve same-project parallel launches in IDE and sandboxed terminals that

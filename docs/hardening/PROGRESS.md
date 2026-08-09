@@ -3,6 +3,41 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-09 — Desktop code-mode-host compatibility fix prepared for v0.27.4
+
+Checkpoint: v0.27.4 patch release candidate; publication remains a separate gate
+
+ChatGPT Desktop 26.803.41515 now launches a remote Codex host with
+`-c features.code_mode_host=true app-server --listen unix://...`. Cage's shared
+selected-only MCP passthrough guard rejected the previously unseen `features`
+root, so SSH authentication and the remote shell succeeded but `codex-remote.py`
+exited before creating the requested Unix socket. Desktop surfaced that early
+EOF as `ECONNRESET` / socket hang up.
+
+The shared policy now has one explicit target-scoped exception: Desktop remote
+execution may pass the exact semantic `features.code_mode_host=true` assignment
+only when the configuration option precedes `app-server`. False, other feature
+keys, combined feature tables, other configuration roots, and host/container
+use remain rejected. The inventory, selected-only MCP suppressions, SSH
+transport, and application socket ownership are unchanged.
+
+Validation evidence before release preparation:
+
+- direct SSH transport, persistent container health, and the remote shell all
+  succeeded independently of app-server startup;
+- the Desktop log identified the current launcher arguments and recorded the
+  transition from `initialized=true` to `connected` after the patch;
+- the live remote inventory reported zero MCP servers for the selected-empty
+  preset, preserving the authoritative allowlist;
+- focused Desktop/passthrough coverage passed 72 tests, plus compilation and
+  `git diff --check`;
+- negative coverage rejects false, unrelated or combined feature assignments,
+  post-subcommand configuration, and the same exact assignment on host and
+  ordinary container paths.
+
+The source version is now `0.27.4`. No v0.27.4 commit, push, tag, release, or
+registry mutation had occurred when this checkpoint was prepared.
+
 ## 2026-08-09 — same-project terminal concurrency fix prepared for v0.27.3
 
 Checkpoint: v0.27.3 patch release candidate; publication remains a separate gate

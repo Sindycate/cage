@@ -97,7 +97,9 @@ def config_override_root(expression: str) -> str | None:
 
 def reject_unsafe_codex_passthrough_args(argv: list[str]) -> None:
     try:
-        codex_policy.reject_unsafe_passthrough_args(argv)
+        codex_policy.reject_unsafe_passthrough_args(
+            argv, allow_desktop_code_mode_host=True
+        )
     except codex_policy.PolicyError as exc:
         raise RuntimeError(str(exc)) from exc
 

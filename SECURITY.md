@@ -66,7 +66,11 @@ package-entry checks.
 The Codex passthrough and selected-only MCP suppression rules are implemented
 once as pure policy. Host, container entrypoint, and Desktop remote execution
 delegate to it; target-specific adapters own filesystem inspection and process
-execution. Secret values are resolved only after plan validation and at the
+execution. Desktop remote execution enables only one target-specific
+passthrough exception: the current app's exact `features.code_mode_host=true`
+override before `app-server`. Other feature values and roots, and
+the same override on host or ordinary container paths, still fail closed.
+Secret values are resolved only after plan validation and at the
 process-creation boundary.
 
 ## Network behavior

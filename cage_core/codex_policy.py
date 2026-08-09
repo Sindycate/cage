@@ -28,6 +28,7 @@ SAFE_PASSTHROUGH_CONFIG_ROOTS = {
     "shell_environment_policy",
     "web_search",
 }
+DESKTOP_APP_SERVER_CODE_MODE_HOST = {"features": {"code_mode_host": True}}
 
 
 class PolicyError(ValueError):
@@ -74,7 +75,51 @@ def config_override_root(expression: str) -> str | None:
     return next(iter(parsed))
 
 
-def reject_unsafe_passthrough_args(argv: list[str]) -> None:
+def _app_server_index_after_config_overrides(argv: list[str]) -> int | None:
+    """Return the app-server index when only config flags precede it.
+
+    ChatGPT Desktop currently places its required code-mode-host override
+    before ``app-server``. Keep this parser deliberately narrow so an
+    arbitrary positional command cannot opt into the Desktop-only exception.
+    """
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "app-server":
+            return index
+        if argument == "--":
+            return None
+        if argument in {"-c", "--config"}:
+            if index + 1 >= len(argv):
+                return None
+            index += 2
+            continue
+        if (
+            argument.startswith("--config=")
+            or argument.startswith("-c=")
+            or (argument.startswith("-c") and len(argument) > 2)
+        ):
+            index += 1
+            continue
+        return None
+    return None
+
+
+def _is_desktop_code_mode_host_override(expression: str) -> bool:
+    try:
+        return tomllib.loads(expression) == DESKTOP_APP_SERVER_CODE_MODE_HOST
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+def reject_unsafe_passthrough_args(
+    argv: list[str], *, allow_desktop_code_mode_host: bool = False
+) -> None:
+    desktop_app_server_index = (
+        _app_server_index_after_config_overrides(argv)
+        if allow_desktop_code_mode_host
+        else None
+    )
     index = 0
     while index < len(argv):
         argument = argv[index]
@@ -141,7 +186,16 @@ def reject_unsafe_passthrough_args(argv: list[str]) -> None:
                     "Codex launch arguments may not override mcp_servers; define "
                     "the server in a central Cage mcp_pack and select that pack"
                 )
-            if root not in SAFE_PASSTHROUGH_CONFIG_ROOTS:
+            is_desktop_code_mode_host = (
+                root == "features"
+                and desktop_app_server_index is not None
+                and index < desktop_app_server_index
+                and _is_desktop_code_mode_host_override(expression)
+            )
+            if (
+                root not in SAFE_PASSTHROUGH_CONFIG_ROOTS
+                and not is_desktop_code_mode_host
+            ):
                 raise PolicyError(
                     f"Codex config override root {root!r} is not safe after MCP "
                     "inventory; move it to the selected Cage-owned Codex "
