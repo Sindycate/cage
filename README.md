@@ -114,7 +114,15 @@ cage ~/projects/myapp -p "fix the failing tests"
 # Multiple repos in parallel (separate terminals)
 cage ~/repo-a   # terminal 1
 cage ~/repo-b   # terminal 2
+
+# Multiple sessions for the same repo (choose "Start a parallel instance")
+cage ~/repo-a   # terminal 3; reuses repo-a's persistent state volume
 ```
+
+Same-project parallel sessions use distinct container names and share the
+project's persistent tool-state volume. The collision menu remains available
+when a terminal provides an interactive stdin but restricts direct access to
+`/dev/tty`, as some IDE and sandboxed terminals do.
 
 ### Central configuration
 

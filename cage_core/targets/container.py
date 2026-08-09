@@ -13,6 +13,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -242,6 +244,30 @@ def _validate_before_effects(runtime: ContainerRuntime) -> None:
                 )
 
 
+@contextmanager
+def _collision_prompt(
+    name: str,
+) -> Iterator[tuple[TextIO, TextIO]]:
+    try:
+        tty = open("/dev/tty", "r+", encoding="utf-8")
+    except OSError as exc:
+        try:
+            stdin_is_tty = sys.stdin.isatty()
+        except (AttributeError, OSError, ValueError):
+            stdin_is_tty = False
+        if not stdin_is_tty:
+            raise ContainerTargetError(
+                f"container {name!r} already exists, but Cage has no "
+                "interactive input for collision handling.\n"
+                "Re-run from an interactive terminal to start a parallel "
+                "instance or attach."
+            ) from exc
+        yield sys.stdin, sys.stderr
+        return
+    with tty:
+        yield tty, tty
+
+
 def _handle_collision(runtime: ContainerRuntime) -> None:
     name = runtime.container_name
     existing = runtime.output(
@@ -254,14 +280,7 @@ def _handle_collision(runtime: ContainerRuntime) -> None:
     ).strip()
     if not existing:
         return
-    try:
-        tty = open("/dev/tty", "r+", encoding="utf-8")
-    except OSError as exc:
-        raise ContainerTargetError(
-            f"container {name!r} already exists and stdin is not a tty.\n"
-            f"Re-run interactively, or 'docker rm -f {name}' to clear."
-        ) from exc
-    with tty:
+    with _collision_prompt(name) as (input_stream, output_stream):
         next_name = ""
         parallel_index = 0
         for index in range(2, 10):
@@ -296,17 +315,17 @@ def _handle_collision(runtime: ContainerRuntime) -> None:
                 ("rm", "Remove the stopped container and start fresh")
             )
         actions.append(("abort", "Abort"))
-        tty.write(
+        output_stream.write(
             "\nA cage container already exists for this repo:\n"
             f"  Name:   {name}\n"
             f"  Status: {'running' if running else 'stopped'}\n\n"
             "What would you like to do?\n"
         )
         for index, (_, label) in enumerate(actions, 1):
-            tty.write(f"  {index}) {label}\n")
-        tty.write(f"\nChoice [{len(actions)}]: ")
-        tty.flush()
-        choice = tty.readline().strip() or str(len(actions))
+            output_stream.write(f"  {index}) {label}\n")
+        output_stream.write(f"\nChoice [{len(actions)}]: ")
+        output_stream.flush()
+        choice = input_stream.readline().strip() or str(len(actions))
     if not choice.isdigit() or not 1 <= int(choice) <= len(actions):
         raise ContainerTargetError("Invalid choice; aborting.")
     action = actions[int(choice) - 1][0]

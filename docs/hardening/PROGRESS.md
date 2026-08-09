@@ -3,6 +3,44 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-09 — same-project terminal concurrency fix prepared for v0.27.3
+
+Checkpoint: v0.27.3 patch release candidate; publication remains a separate gate
+
+Same-project parallel container support was still present, but the collision
+menu required opening `/dev/tty` directly. Sandboxed and some IDE terminals can
+provide a real PTY on stdin while denying that direct device open, so Cage
+incorrectly reported that stdin was not a TTY and blocked the second session.
+The collision prompt now prefers `/dev/tty` and falls back to interactive stdin
+plus stderr. Truly noninteractive collisions still fail closed, but no longer
+recommend forcibly deleting a potentially running container. Container naming,
+shared per-project volume behavior, and the interactive collision choices are
+otherwise unchanged.
+
+Validation evidence:
+
+- refreshed remote refs and the anonymous public GitHub Releases API both
+  identified `v0.27.2` as current; this backward-compatible fix therefore uses
+  the patch version `v0.27.3`;
+- reproduced `stdin.isatty() == True` together with `/dev/tty` open failing with
+  `EPERM` in the restricted terminal environment;
+- focused collision/core/storage suite: `27 passed`;
+- complete suite outside the restricted socket/process sandbox: `477 passed, 8
+  skipped`;
+- target/test compilation, shell syntax, Compose validation, and
+  `git diff --check` passed;
+- two fixed-epoch release archives were byte-identical and contained the shared
+  base Dockerfile plus patched container-target module;
+- the redacted Gitleaks history scan covered 104 commits and found no leaks;
+- the managed source installer upgraded the active command from `0.27.1` to
+  `0.27.2`, and the installed container-target module's SHA-256 matched the
+  verified worktree source;
+- a TTY smoke launch against the exact reported running container displayed the
+  parallel/attach/abort menu; selecting abort left that container running.
+
+The source version is now `0.27.3`. No commit, push, tag, release, or
+Docker-state mutation had occurred when this release checkpoint was prepared.
+
 ## 2026-08-05 — issue #6 acceptance hardening and live timing evidence
 
 Checkpoint: remaining locally actionable issue #6 gaps implemented for the

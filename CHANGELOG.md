@@ -3,6 +3,13 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.27.3 — 2026-08-09
+
+- preserve same-project parallel launches in IDE and sandboxed terminals that
+  provide an interactive stdin but deny direct `/dev/tty` access; the container
+  collision menu now falls back to that PTY and no longer recommends forcibly
+  deleting a running container when no interactive input exists.
+
 ## 0.27.2 — 2026-08-05
 
 - make the maintainer release command TTY-safe: only its explicit publication

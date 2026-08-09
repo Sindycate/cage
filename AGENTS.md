@@ -195,6 +195,11 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the leaf image (useful for getting the latest tool version)
 - `cage update [claude|codex]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
+- Ordinary same-repository launches keep one shared persistent state volume but
+  use suffixed container names for parallel sessions. The collision menu reads
+  from `/dev/tty` when available and otherwise from an interactive stdin, so
+  restricted IDE/sandbox terminals remain usable; truly noninteractive
+  collisions fail closed
 - Presets default to `target = "container"` and may opt into Codex-only
   `target = "host"` or `target = "desktop"` (also available as launch-only
   `--host`/`--desktop` overrides).
