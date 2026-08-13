@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -190,10 +192,26 @@ class OpenCodeConfigTests(unittest.TestCase):
             provider = arguments_for(("auth", "login"))
             self.assertIn("127.0.0.1:1455:1455", provider)
             self.assertIn("127.0.0.1:19876:19876", provider)
+            flagged_provider = arguments_for(
+                ("--log-level", "DEBUG", "auth", "login")
+            )
+            self.assertIn("127.0.0.1:1455:1455", flagged_provider)
+            self.assertIn("127.0.0.1:19876:19876", flagged_provider)
+            flagged_mcp = arguments_for(
+                ("--log-level=DEBUG", "mcp", "auth", "remote")
+            )
+            self.assertIn("127.0.0.1:19876:19876", flagged_mcp)
+            self.assertNotIn("127.0.0.1:1455:1455", flagged_mcp)
             self.assertFalse(
                 any(
                     value.startswith("0.0.0.0:")
-                    for value in (*ordinary, *mcp, *provider)
+                    for value in (
+                        *ordinary,
+                        *mcp,
+                        *provider,
+                        *flagged_provider,
+                        *flagged_mcp,
+                    )
                 )
             )
 
@@ -202,6 +220,82 @@ class OpenCodeConfigTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("CAGE_OPENCODE_CALLBACK_READY", entrypoint)
             self.assertIn("OpenCode callback relay failed to start", entrypoint)
+
+    def test_callback_relay_preserves_each_listener_port_mapping(self):
+        entrypoint = (
+            Path(__file__).resolve().parents[1] / "entrypoint-opencode.sh"
+        ).read_text(encoding="utf-8")
+        start = entrypoint.index(
+            "import os\nimport socket\nimport threading\n",
+            entrypoint.index("CAGE_OPENCODE_CALLBACK_PORTS"),
+        )
+        source = entrypoint[start : entrypoint.index("\nPY\n", start)]
+        listeners = []
+        thread_arguments = []
+
+        class FakeListener:
+            def __init__(self):
+                self.bound = None
+
+            def setsockopt(self, *_args):
+                return None
+
+            def bind(self, address):
+                self.bound = address
+
+            def listen(self, _backlog):
+                return None
+
+        class FakeThread:
+            def __init__(self, *, target, args, daemon):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                thread_arguments.append(args)
+
+            def start(self):
+                return None
+
+        fake_socket = types.ModuleType("socket")
+        fake_socket.SOL_SOCKET = 1
+        fake_socket.SO_REUSEADDR = 2
+        fake_socket.SHUT_WR = 1
+        fake_socket.gethostbyname = lambda _name: "172.18.0.2"
+        fake_socket.gethostname = lambda: "container"
+
+        def make_listener():
+            listener = FakeListener()
+            listeners.append(listener)
+            return listener
+
+        fake_socket.socket = make_listener
+        fake_socket.create_connection = lambda *_args, **_kwargs: None
+        fake_threading = types.ModuleType("threading")
+        fake_threading.Thread = FakeThread
+        fake_threading.Event = lambda: types.SimpleNamespace(wait=lambda: None)
+
+        with tempfile.TemporaryDirectory() as raw:
+            ready = Path(raw) / "ready"
+            with patch.dict(
+                os.environ,
+                {
+                    "CAGE_OPENCODE_CALLBACK_PORTS": "1455 19876",
+                    "CAGE_OPENCODE_CALLBACK_READY": str(ready),
+                },
+            ), patch.dict(
+                sys.modules,
+                {"socket": fake_socket, "threading": fake_threading},
+            ):
+                exec(compile(source, "entrypoint-callback-relay", "exec"), {})
+
+        self.assertEqual(
+            [listener.bound for listener in listeners],
+            [("172.18.0.2", 1455), ("172.18.0.2", 19876)],
+        )
+        self.assertEqual(
+            [arguments[1] for arguments in thread_arguments],
+            [1455, 19876],
+        )
 
     def test_sensitive_environment_uses_private_handoff_not_docker_metadata(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -402,6 +496,27 @@ class OpenCodePolicyTests(unittest.TestCase):
         )
         opencode_policy.reject_unsafe_passthrough_args(
             ["run", "--", "ordinary prompt"], selected_mcp_names=selected
+        )
+        self.assertEqual(
+            opencode_policy.callback_ports(
+                ["--log-level", "DEBUG", "auth", "login"]
+            ),
+            ("1455", "19876"),
+        )
+        self.assertEqual(
+            opencode_policy.callback_ports(
+                ["--log-level=DEBUG", "mcp", "auth", "remote"]
+            ),
+            ("19876",),
+        )
+        self.assertEqual(
+            opencode_policy.callback_ports(["auth", "list"]), ()
+        )
+        self.assertEqual(
+            opencode_policy.callback_ports(["--", "auth", "login"]), ()
+        )
+        self.assertEqual(
+            opencode_policy.callback_ports(["run", "auth", "login"]), ()
         )
 
 

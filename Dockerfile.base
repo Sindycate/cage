@@ -50,6 +50,7 @@ LABEL org.opencontainers.image.description="cage - Docker isolation for AI codin
 # Bridge relay scripts shared by all three assistants
 COPY mcp-relay /usr/local/bin/mcp-relay
 COPY host-cmd-relay /usr/local/bin/host-cmd-relay
+COPY cage-user-remap.py /usr/local/lib/cage/cage-user-remap.py
 RUN chmod 755 /usr/local/bin/mcp-relay /usr/local/bin/host-cmd-relay
 
 ENV HISTFILE=/dev/null

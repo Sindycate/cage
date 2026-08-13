@@ -10,18 +10,19 @@ RUN useradd -m -s /bin/bash claude && \
     chown -R claude:claude /home/claude && \
     echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
 
-COPY entrypoint.sh /home/claude/entrypoint.sh
-RUN chmod 755 /home/claude/entrypoint.sh
-
 ENV HOME=/home/claude
 ENV PATH=/home/claude/.local/bin:$PATH
 
-# Install Claude Code as the claude user, then make home writable for UID remapping
+# Install Claude Code as the claude user. Normalize the files in the same layer
+# that creates them so Docker does not retain a second copy of the tool tree.
 WORKDIR /tmp
 USER claude
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    chmod -R a+rwX /home/claude
 USER root
-RUN chmod -R a+rwX /home/claude
+
+COPY entrypoint.sh /home/claude/entrypoint.sh
+RUN chmod 755 /home/claude/entrypoint.sh
 
 WORKDIR /home/claude
 

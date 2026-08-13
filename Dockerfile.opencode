@@ -23,7 +23,8 @@ RUN npm install -g --allow-scripts=opencode-ai opencode-ai@latest && \
     grep -a -F -q '127.0.0.1:19876' "$OPENCODE_BINARY" && \
     grep -a -F -q 'O$=1455' "$OPENCODE_BINARY" && \
     grep -a -F -q '/auth/callback' "$OPENCODE_BINARY" && \
-    grep -a -F -q '/.well-known/opencode' "$OPENCODE_BINARY"
+    grep -a -F -q '/.well-known/opencode' "$OPENCODE_BINARY" && \
+    chmod -R a+rwX /home/opencode
 USER root
 
 COPY entrypoint-opencode.sh /home/opencode/entrypoint.sh
@@ -33,7 +34,6 @@ ENV HOME=/home/opencode
 ENV OPENCODE_DISABLE_AUTOUPDATE=1
 
 WORKDIR /home/opencode
-RUN chmod -R a+rwX /home/opencode
 
 ENTRYPOINT ["/home/opencode/entrypoint.sh"]
 

@@ -260,7 +260,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Uses `md5 -q` (macOS) or `md5sum` (Linux) for hashing — auto-detected
 
 **`entrypoint.sh`** (runs inside Claude Code container on every start):
-- Runs as root; remaps the `claude` user's UID/GID to match the host user (`HOST_UID`/`HOST_GID` env vars) for correct file ownership in the mounted repo
+- Runs as root; remaps the `claude` user's UID/GID to match the non-root host user (`HOST_UID`/`HOST_GID` env vars) for correct file ownership in the mounted repo. If an image account already owns either requested ID, the remapper swaps that account onto the target user's old ID; invalid, root, incomplete, or unverifiable mappings fail before tool execution
 - Fixes ownership on home dir and volume after UID remapping
 - Symlinks `~/.claude.json` into the volume so onboarding state persists across `--rm` restarts
 - Reconciles the volume's `~/.claude.json` `mcpServers` to exactly the selected set (central-config HTTP MCP definitions and the stdio bridge), expanding `${VAR}` refs from the env (servers with unset, defaultless vars are skipped with a warning). Host `~/.claude.json` MCP definitions are no longer merged, and stale or manually added volume entries are removed on every launch
@@ -321,7 +321,7 @@ scripts, checks the required `--pure`, project/external-skill suppression, and
 fixed OAuth callback contracts at image build time, disables OpenCode's
 in-process updater, and copies `entrypoint-opencode.sh`.
 
-**`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, and the `mcp-relay`/`host-cmd-relay` bridge scripts. Contains no agent binaries, no entrypoints, no user accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
+**`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, the `mcp-relay`/`host-cmd-relay` bridge scripts, and the shared fail-closed user-remapping helper. Contains no agent binaries, no entrypoints, no Cage tool accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
 
 All four Dockerfiles end with OCI version plus `io.cage.managed`,
 `io.cage.role`, and `io.cage.version` labels. Local launcher, Compose, update
@@ -428,7 +428,7 @@ and its `ci.yml` provenance attestation for the exact source SHA) and reused —
 its build/attest steps are skipped — while an unverifiable candidate fails
 closed rather than being rebuilt. No cross-version BuildKit cache is used.
 
-**`.github/workflows/release.yml`**: Four logical stages, all actions pinned to
+**`.github/workflows/release.yml`**: Five logical stages, all actions pinned to
 immutable commit SHAs (maintained by Dependabot), serialized per tag with
 cancellation disabled. (1) **Exact-commit gate**: requires an annotated
 `v<VERSION>` tag whose commit matches `CAGE_VERSION` and `GITHUB_SHA`, finds a
@@ -442,10 +442,13 @@ secret scan, checksum, SPDX SBOM, and source provenance/SBOM attestations. (3)
 **Image promotion**: creates immutable version tags from the exact candidate
 digests (`docker buildx imagetools create`, never rebuild/QEMU), re-attests
 each digest from the release workflow, and only then moves `latest`; idempotent
-for resume. (4) **GitHub Release**: reverifies the downloaded assets and
-creates the release last. The exact successful CI run replaces the duplicated
-Python/macOS/Docker/history-scan jobs; the archive-content scan stays because
-it validates the generated deliverable.
+for resume. (4) **Public consumer gate**: from a fresh empty Docker credential
+directory, verifies all four version and `latest` digests, their amd64/arm64
+platforms, and literal anonymous pulls. (5) **GitHub Release**: reverifies the
+downloaded assets and creates the release last. The
+exact successful CI run replaces the duplicated Python/macOS/Docker/history-scan
+jobs; the archive-content scan stays because it validates the generated
+deliverable.
 
 ## Versioning & Release Flow
 

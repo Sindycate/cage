@@ -6,6 +6,7 @@
 !entrypoint-codex.sh
 !entrypoint-opencode.sh
 !codex-remote.py
+!cage-user-remap.py
 !cage_core/
 !cage_core/**
 cage_core/**/__pycache__/

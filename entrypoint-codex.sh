@@ -4,12 +4,7 @@ umask 077
 
 # Match container user to host UID/GID for correct file ownership
 TARGET_USER="codex"
-if [ -n "${HOST_UID:-}" ] && [ "$(id -u "$TARGET_USER")" != "$HOST_UID" ]; then
-    usermod -u "$HOST_UID" "$TARGET_USER" 2>/dev/null || true
-fi
-if [ -n "${HOST_GID:-}" ] && [ "$(id -g "$TARGET_USER")" != "$HOST_GID" ]; then
-    groupmod -g "$HOST_GID" "$TARGET_USER" 2>/dev/null || true
-fi
+/usr/bin/python3 -I /usr/local/lib/cage/cage-user-remap.py "$TARGET_USER"
 
 # Ensure home dir and volume are owned by the (possibly remapped) user
 chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true

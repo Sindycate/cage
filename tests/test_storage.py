@@ -340,6 +340,41 @@ class SideEffectOrderTests(unittest.TestCase):
         self.assertEqual(status, 1)
         run.assert_not_called()
 
+    def test_update_overlays_coalesce_installer_and_permission_changes(self):
+        cases = (
+            ("claude", "https://claude.ai/install.sh", "/home/claude/.local"),
+            ("codex", "npm install -g @openai/codex@latest", "/home/codex/.npm-global"),
+            (
+                "opencode",
+                "npm install -g --allow-scripts=opencode-ai",
+                "/home/opencode/.npm-global",
+            ),
+        )
+        for tool, installer, writable_tree in cases:
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as raw, patch(
+                "cage_core.cli.shutil.which", return_value="docker"
+            ), patch("cage_core.cli.storage.preflight"), patch(
+                "cage_core.cli.subprocess.run",
+                return_value=completed([], returncode=0),
+            ) as run:
+                status = cli._run_update(
+                    [tool],
+                    install_root=Path(raw),
+                    config_root=Path(raw),
+                    cage_version="9.9.9",
+                )
+
+            self.assertEqual(status, 0)
+            overlay = run.call_args_list[-1].kwargs["input"]
+            install_line = next(
+                line for line in overlay.splitlines() if installer in line
+            )
+            self.assertIn(
+                f"chmod -R a+rwX {writable_tree}", install_line
+            )
+            self.assertEqual(overlay.count("RUN "), 1)
+            self.assertIn("\nUSER root\nLABEL ", overlay)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,30 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.28.1 — 2026-08-13
+
+- make container UID/GID remapping collision-safe and fail closed for Claude,
+  Codex, and OpenCode, including Ubuntu 24.04 images whose pre-existing
+  `ubuntu:1000:1000` account previously blocked the common Linux host mapping;
+- route each OpenCode OAuth callback listener to its matching loopback port and
+  publish the required ports even when policy-approved global flags precede an
+  `auth login`, `providers login`, or selected `mcp auth` command;
+- add a post-image-publication release-workflow gate that verifies all four managed
+  GHCR version and `latest` tags from a fresh empty Docker credential directory,
+  checks exact promoted digests plus `amd64`/`arm64` manifests, and performs
+  literal anonymous pulls; document the one-time per-package visibility and
+  source-association action for maintainers;
+- update eight pinned GitHub workflow actions to their validated current major
+  releases while retaining hosted-runner and artifact-flow compatibility;
+- coalesce each leaf image's recursive home-permission normalization into the
+  same layer that installs Claude Code, Codex, or OpenCode, removing the
+  metadata-only copy of the complete tool tree while preserving the existing
+  owner/mode distribution and runtime UID/GID remapping behavior;
+- apply the same single-layer construction to `cage update` overlays and keep
+  root-owned entrypoints outside the world-writable installed-tool trees;
+- avoid `COPY --chmod` or other BuildKit-only syntax, retaining legacy Docker
+  builder, multi-architecture, and source-install compatibility.
+
 ## 0.28.0 — 2026-08-09
 
 - add OpenCode as a container-only third assistant, with a dedicated managed

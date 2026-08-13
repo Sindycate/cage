@@ -42,6 +42,43 @@ _GLOBAL_VALUE_FLAGS = {
 }
 
 
+def _positional_position(
+    argv: list[str], start: int = 0
+) -> tuple[str, int | None]:
+    index = start
+    while index < len(argv):
+        argument = argv[index]
+        root, separator, _value = argument.partition("=")
+        if argument == "--":
+            break
+        if root in _GLOBAL_VALUE_FLAGS:
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    raise PolicyError(f"OpenCode option {root!r} requires a value")
+            index += 1
+            continue
+        if argument.startswith("-"):
+            index += 1
+            continue
+        return argument, index
+    return "", None
+
+
+def callback_ports(argv: list[str]) -> tuple[str, ...]:
+    """Return the fixed callback ports required by a validated auth command."""
+
+    command, command_index = _positional_position(argv)
+    if command_index is None:
+        return ()
+    action, _action_index = _positional_position(argv, command_index + 1)
+    if command == "mcp" and action == "auth":
+        return ("19876",)
+    if command in {"auth", "providers"} and action == "login":
+        return ("1455", "19876")
+    return ()
+
+
 def reject_unsafe_passthrough_args(
     argv: list[str], *, selected_mcp_names: set[str]
 ) -> None:
@@ -68,25 +105,7 @@ def reject_unsafe_passthrough_args(
                 "OpenCode live-server and attach overrides are not allowed through Cage"
             )
 
-    command = ""
-    index = 0
-    while index < len(argv):
-        argument = argv[index]
-        root, separator, _value = argument.partition("=")
-        if argument == "--":
-            break
-        if root in _GLOBAL_VALUE_FLAGS:
-            if not separator:
-                index += 1
-                if index >= len(argv):
-                    raise PolicyError(f"OpenCode option {root!r} requires a value")
-            index += 1
-            continue
-        if argument.startswith("-"):
-            index += 1
-            continue
-        command = argument
-        break
+    command, command_index = _positional_position(argv)
 
     if command and command not in _ALLOWED_COMMANDS:
         raise PolicyError(
@@ -97,10 +116,7 @@ def reject_unsafe_passthrough_args(
     if command != "mcp":
         return
 
-    try:
-        command_index = argv.index("mcp")
-    except ValueError:
-        return
+    assert command_index is not None
     tail = argv[command_index + 1 :]
     if not tail:
         return

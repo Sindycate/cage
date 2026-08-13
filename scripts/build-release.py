@@ -27,6 +27,7 @@ PAYLOAD_FILES = (
     "host-cmd-bridge.py",
     "host-cmd-relay",
     "codex-remote.py",
+    "cage-user-remap.py",
     "docker-compose.yml",
     "Dockerfile.base",
     "Dockerfile",

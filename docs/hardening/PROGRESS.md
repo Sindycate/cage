@@ -3,6 +3,78 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-13 — OpenCode callback publication and routing correction
+
+An independent OpenCode parity audit found two OAuth callback regressions. The
+embedded relay's listener threads captured the final loop port, so traffic for
+provider callback port `1455` was sent to loopback port `19876`. Separately,
+valid global options before `auth login`, `providers login`, or `mcp auth`
+passed policy validation but prevented the container target from publishing
+the required fixed callback ports. Shared positional parsing now drives both
+policy and publication, and each relay thread receives its own upstream port.
+Focused OpenCode coverage passed 19 tests; the complete suite including four
+real-Docker OpenCode contracts passed 501 tests with 10 skips.
+
+## 2026-08-13 — issue #1 collision-safe Linux identity remapping
+
+Current Ubuntu 24.04 base images already contain `ubuntu:1000:1000`, while the
+leaf assistant account is created as 1001. The prior entrypoints ignored
+`usermod` and `groupmod` collision failures, leaving the assistant at 1001 and
+unable to write owner-only mounts for the common Linux host identity. A shared
+isolated Python helper now swaps colliding image accounts to the assistant's
+old numeric IDs, rejects invalid/root/incomplete mappings, and verifies the
+final identity before any assistant starts. Real-Docker coverage passed all
+three entrypoints at colliding `1000:1000` and non-colliding `22001:22001`
+under Cage's exact runtime capabilities; the complete suite passed 512 tests
+with 13 skips.
+
+## 2026-08-13 — issue #5 public GHCR consumer gate
+
+Live anonymous verification confirmed that the original `v0.26.0`
+`claude-code` and `codex` version and current `latest` tags are public and
+multi-architecture. It also confirmed the evolved `v0.28.0` `base`,
+`claude-code`, `codex`, and `opencode` version and `latest` tags: fresh public
+Registry API reads reported `linux/amd64` plus `linux/arm64`, and literal
+`linux/arm64` pulls passed under a brand-new empty Docker credential directory.
+The two original and four current image provenance attestations verified against
+their exact tagged source commits and the release workflow signer.
+
+The package visibility correction was therefore already live, but the tagged
+workflow did not gate GitHub Release creation on consumer access. Added a
+four-image consumer job between promotion and Release creation that checks the
+version and `latest` digests, both platforms, and literal anonymous pulls
+without ambient credentials. Added the one-time per-package GHCR
+visibility/source-association procedure and explicit visibility-only recovery
+rule to the maintainer documentation. No registry, package-setting, tag,
+release, issue, or other GitHub mutation was performed.
+
+## 2026-08-13 — leaf permission layers coalesced
+
+The ADR-001 follow-up optimization is locally complete. Claude, Codex, and
+OpenCode previously normalized each entire home in a separate recursive
+`chmod` layer after installing the tool. Current public v0.28.0 arm64 history
+showed 295 MB, 275 MB, and 652 MB standalone layers respectively. The behavior
+originated as a direct host-UID container workaround before Cage adopted root
+entrypoints, in-container UID/GID remapping, recursive ownership transfer, and
+`gosu`, but its effective package-tree modes remain part of compatibility.
+
+The Dockerfiles now perform the same normalization in the installer layer, and
+`cage update` overlays do the same for the tool subtree. Root-owned `0755`
+entrypoints remain outside the writable tree. The change uses ordinary `RUN`
+and `COPY`, not BuildKit-only `COPY --chmod`, so legacy local builders and the
+multi-architecture release path retain their current Dockerfile syntax.
+
+Controlled arm64 no-cache builds against the same public v0.28.0 base and
+current installers reduced combined virtual image size from 1,384,086,460 to
+951,824,493 bytes: 412.2 MiB (31.2%). Per leaf, savings were 90.5 MiB Claude,
+111.1 MiB Codex, and 210.6 MiB OpenCode. Baseline and optimized owner/mode/type
+distributions matched exactly outside the intentionally hardened entrypoint;
+the baseline and optimized tool-binary SHA-256 digests matched, all entrypoints
+were root-owned `0755`, all three tools executed, and Codex's exact
+reduced-capability UID remap passed. Focused unit coverage enforces both leaf
+and update-overlay coalescing. No push, release, image deletion, or registry
+mutation was performed.
+
 ## 2026-08-09 — Desktop code-mode-host compatibility fix prepared for v0.27.4
 
 Checkpoint: v0.27.4 patch release candidate; publication remains a separate gate

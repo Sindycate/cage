@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .. import config, storage
+from .. import config, opencode_policy, storage
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -927,12 +927,9 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
                 f"{runtime.opencode_snapshot}:/cage-opencode-snapshot:ro",
             )
         )
-        callback_ports: list[str] = []
-        caller = list(runtime.prepared.request.tool_arguments)
-        if caller[:2] == ["mcp", "auth"]:
-            callback_ports.append("19876")
-        elif caller[:2] in (["auth", "login"], ["providers", "login"]):
-            callback_ports.extend(("1455", "19876"))
+        callback_ports = opencode_policy.callback_ports(
+            list(runtime.prepared.request.tool_arguments)
+        )
         if callback_ports:
             arguments.extend(
                 ("-e", "CAGE_OPENCODE_CALLBACK_PORTS=" + " ".join(callback_ports))

@@ -265,18 +265,49 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("promote:", text)
         self.assertIn("latest:", text)
         self.assertIn("release:", text)
-        # latest depends on all promote legs; release depends on package+promote+latest.
+        # latest depends on all promote legs; the public consumer gate follows
+        # latest; release depends on that gate and stays the final job.
         self.assertIn("needs: [gate, promote]", text)
-        self.assertIn("needs: [package, promote, latest]", text)
-        # Version-tag creation precedes the latest move, which precedes the release.
+        self.assertIn("needs: [gate, promote, latest]", text)
+        self.assertIn("needs: [package, promote, latest, public-images]", text)
+        # Version-tag creation precedes latest, then anonymous verification, then
+        # GitHub Release creation.
         self.assertLess(
             text.index("Create immutable version tag from exact candidate digest"),
             text.index("Move latest to the promoted digest"),
         )
         self.assertLess(
             text.index("Move latest to the promoted digest"),
+            text.index("Verify anonymous version and latest manifests and pulls"),
+        )
+        self.assertLess(
+            text.index("Verify anonymous version and latest manifests and pulls"),
             text.index("Create GitHub Release"),
         )
+
+    def test_release_workflow_has_post_publication_anonymous_image_gate(self):
+        text = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("public-images:", text)
+        self.assertIn("needs: [gate, promote, latest]", text)
+        self.assertLess(text.index("  public-images:"), text.index("  release:"))
+        for image in ("base", "claude-code", "codex", "opencode"):
+            self.assertIn(f"- image: {image}", text)
+        for fragment in (
+            'credential_dir="$(mktemp -d "$RUNNER_TEMP/cage-anonymous-docker.XXXXXX")"',
+            'find "$credential_dir" -mindepth 1 -print -quit',
+            '-u GH_TOKEN -u GITHUB_TOKEN',
+            '-u DOCKER_AUTH_CONFIG -u REGISTRY_AUTH_FILE',
+            'DOCKER_CONFIG="$credential_dir"',
+            'for tag in "$VERSION" latest; do',
+            "docker buildx imagetools inspect",
+            "{{.Manifest.Digest}}",
+            "linux/amd64",
+            "linux/arm64",
+            'docker pull --platform linux/amd64 "$ref"',
+        ):
+            self.assertIn(fragment, text)
+        public_gate = text[text.index("  public-images:") :]
+        self.assertNotIn("docker/login-action@", public_gate)
 
     def test_secret_scanning_is_pinned_narrow_and_release_blocking(self):
         installer = GITLEAKS_INSTALLER.read_text(encoding="utf-8")
@@ -469,6 +500,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             self.assertIn("cage-9.9.9/cage-tui.py", names)
             self.assertIn("cage-9.9.9/install.sh", names)
             self.assertIn("cage-9.9.9/Dockerfile.base", names)
+            self.assertIn("cage-9.9.9/cage-user-remap.py", names)
             self.assertIn("cage-9.9.9/netgate/defaults.json", names)
             self.assertIn("cage-9.9.9/docs/hardening/WORKFLOW.md", names)
             self.assertNotIn("cage-9.9.9/.git", names)
@@ -516,6 +548,9 @@ class SharedBaseImageTests(unittest.TestCase):
         self.assertIn("gh", base)
         self.assertIn("mcp-relay", base)
         self.assertIn("host-cmd-relay", base)
+        self.assertIn("cage-user-remap.py", base)
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn("!cage-user-remap.py", dockerignore)
 
     def test_leaf_dockerfiles_reference_base(self):
         for dockerfile_name in ("Dockerfile", "Dockerfile.codex", "Dockerfile.opencode"):
@@ -535,6 +570,39 @@ class SharedBaseImageTests(unittest.TestCase):
             "/.well-known/opencode",
         ):
             self.assertIn(contract, content)
+
+    def test_leaf_permission_normalization_shares_the_install_layer(self):
+        cases = (
+            ("Dockerfile", "https://claude.ai/install.sh", "/home/claude"),
+            ("Dockerfile.codex", "npm install -g @openai/codex", "/home/codex"),
+            (
+                "Dockerfile.opencode",
+                "npm install -g --allow-scripts=opencode-ai",
+                "/home/opencode",
+            ),
+        )
+        for dockerfile_name, installer, home in cases:
+            content = (ROOT / dockerfile_name).read_text(encoding="utf-8")
+            instructions = []
+            current = []
+            for line in content.splitlines():
+                current.append(line)
+                if not line.rstrip().endswith("\\"):
+                    instructions.append("\n".join(current))
+                    current = []
+            install_instruction = next(
+                instruction
+                for instruction in instructions
+                if instruction.startswith("RUN ") and installer in instruction
+            )
+            self.assertIn(f"chmod -R a+rwX {home}", install_instruction)
+            self.assertNotIn(f"\nRUN chmod -R a+rwX {home}", content)
+            self.assertLess(
+                content.index(f"chmod -R a+rwX {home}"),
+                content.index("COPY entrypoint"),
+                f"{dockerfile_name} must keep the root-owned entrypoint out "
+                "of the writable tool tree",
+            )
 
     def test_all_managed_images_have_role_and_version_labels(self):
         roles = {
@@ -789,15 +857,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.28.0\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.0^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.1\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.1^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.28.0\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.1\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.28.0\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.28.1\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.1^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -810,7 +878,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.28.0",
+                "GITHUB_REF": "refs/tags/v0.28.1",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -829,8 +897,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.28.0", output)
-        self.assertIn("tag=v0.28.0", output)
+        self.assertIn("version=0.28.1", output)
+        self.assertIn("tag=v0.28.1", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")
@@ -1025,6 +1093,125 @@ class VersionTagFailClosedTests(unittest.TestCase):
         result, created = self._run_promote("timeout", "")
         self.assertEqual(result.returncode, 1)
         self.assertFalse(created)
+
+
+class PublicImageGateTests(unittest.TestCase):
+    """Execute the real public-consumer block with a credential-auditing stub."""
+
+    DIGEST = "sha256:" + "1" * 64
+
+    @classmethod
+    def setUpClass(cls):
+        block = _extract_run_block(
+            RELEASE_WORKFLOW, "Verify anonymous version and latest manifests and pulls"
+        )
+        cls.script = block.replace("${{ matrix.image }}", "base")
+
+    def _run_gate(self, mode):
+        base = Path(tempfile.mkdtemp(prefix="public-images-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        log = base / "docker-calls.txt"
+        docker = base / "docker"
+        docker.write_text(
+            r'''#!/bin/bash
+set -euo pipefail
+for secret_var in GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE; do
+  if [ -n "${!secret_var+x}" ]; then
+    echo "credential variable leaked: ${secret_var}" >&2
+    exit 90
+  fi
+done
+if [ -z "${DOCKER_CONFIG:-}" ] || [ ! -d "$DOCKER_CONFIG" ]; then
+  echo "fresh DOCKER_CONFIG missing" >&2
+  exit 91
+fi
+if find "$DOCKER_CONFIG" -mindepth 1 -print -quit | grep -q .; then
+  echo "fresh DOCKER_CONFIG is not empty" >&2
+  exit 92
+fi
+printf '%s\t%s\n' "$DOCKER_CONFIG" "$*" >> "$PUBLIC_STUB_LOG"
+if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then
+  format="${@: -1}"
+  case "$format" in
+    *Manifest.Digest*)
+      if [ "$PUBLIC_STUB_MODE" = "digest-mismatch" ]; then
+        printf 'sha256:%064d' 9
+      else
+        printf '%s' "$EXPECTED_DIGEST"
+      fi
+      ;;
+    *Platform.OS*)
+      if [ "$PUBLIC_STUB_MODE" = "missing-arm64" ]; then
+        printf 'linux/amd64 unknown/unknown '
+      else
+        printf 'linux/amd64 linux/arm64 unknown/unknown '
+      fi
+      ;;
+    *) exit 93 ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pull" ]; then
+  [ "$PUBLIC_STUB_MODE" != "pull-failure" ]
+  exit $?
+fi
+exit 94
+''',
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        script = base / "public-images.sh"
+        script.write_text(self.script, encoding="utf-8")
+        runner_temp = base / "runner-temp"
+        runner_temp.mkdir()
+        env = dict(os.environ)
+        env.update(
+            {
+                "PATH": str(base) + os.pathsep + env.get("PATH", ""),
+                "RUNNER_TEMP": str(runner_temp),
+                "VERSION": "0.28.0",
+                "EXPECTED_DIGEST": self.DIGEST,
+                "PUBLIC_STUB_MODE": mode,
+                "PUBLIC_STUB_LOG": str(log),
+                # Deliberately seed every prohibited credential source. The
+                # workflow's env -u boundary must remove all of them.
+                "GH_TOKEN": "must-not-reach-docker",
+                "GITHUB_TOKEN": "must-not-reach-docker",
+                "GH_ENTERPRISE_TOKEN": "must-not-reach-docker",
+                "GITHUB_ENTERPRISE_TOKEN": "must-not-reach-docker",
+                "DOCKER_AUTH_CONFIG": "must-not-reach-docker",
+                "REGISTRY_AUTH_FILE": "must-not-reach-docker",
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(script)], env=env, capture_output=True, text=True
+        )
+        calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return result, calls
+
+    def test_public_version_and_latest_pass_with_fresh_credentials(self):
+        result, calls = self._run_gate("public")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 6)
+        self.assertTrue(any(":0.28.0" in call for call in calls))
+        self.assertTrue(any(":latest" in call for call in calls))
+
+    def test_digest_mismatch_fails_closed_before_pull(self):
+        result, calls = self._run_gate("digest-mismatch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("digest", result.stderr)
+        self.assertFalse(any("pull" in call for call in calls))
+
+    def test_missing_platform_fails_closed_before_pull(self):
+        result, calls = self._run_gate("missing-arm64")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing linux/arm64", result.stderr)
+        self.assertFalse(any("pull" in call for call in calls))
+
+    def test_anonymous_pull_failure_fails_closed(self):
+        result, calls = self._run_gate("pull-failure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any("pull --platform linux/amd64" in call for call in calls))
 
 
 

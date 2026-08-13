@@ -237,7 +237,7 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     SOURCE_FILES=(
         cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
-        codex-remote.py
+        codex-remote.py cage-user-remap.py
         docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex Dockerfile.opencode
         entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh Makefile README.md SECURITY.md
         CHANGELOG.md
@@ -264,7 +264,7 @@ else
     tar xzf "$TARBALL" -C "$STAGE_DIR" --strip-components=1
 fi
 
-for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh; do
+for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py cage-user-remap.py entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh; do
     [ -f "$STAGE_DIR/$required" ] && [ ! -L "$STAGE_DIR/$required" ] || \
         error "Release archive is missing a safe regular file: $required"
 done

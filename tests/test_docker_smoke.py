@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 NETGATE = ROOT / "netgate-proxy.py"
 ENTRYPOINT_CODEX = ROOT / "entrypoint-codex.sh"
 ENTRYPOINT_CLAUDE = ROOT / "entrypoint.sh"
+ENTRYPOINT_OPENCODE = ROOT / "entrypoint-opencode.sh"
+USER_REMAP = ROOT / "cage-user-remap.py"
 CODEX_CORE = ROOT / "cage_core"
 
 
@@ -29,6 +31,179 @@ def write_executable(path, content):
     "set CAGE_RUN_DOCKER_SMOKE=1 to run local Docker integration smoke tests",
 )
 class DockerSmokeTests(unittest.TestCase):
+    def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            snapshot = temp_path / "opencode-snapshot"
+            fake_bin.mkdir()
+            snapshot.mkdir()
+            (snapshot / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "selected_mcp": {"stdio": [], "remote": []},
+                        "selected_skill_names": [],
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            runtime_env = snapshot / "runtime-env.json"
+            runtime_env.write_text("{}\n", encoding="utf-8")
+            runtime_env.chmod(0o600)
+            write_executable(
+                fake_bin / "gosu",
+                "#!/bin/sh\n"
+                "user=$1\n"
+                "shift\n"
+                "exec setpriv --reuid \"$(id -u \"$user\")\" "
+                "--regid \"$(id -g \"$user\")\" --init-groups \"$@\"\n",
+            )
+            write_executable(fake_bin / "git", "#!/bin/sh\nexit 0\n")
+            write_executable(fake_bin / "jq", "#!/bin/sh\nexit 0\n")
+            proof = (
+                "actual=$(id -u):$(id -g)\n"
+                "[ \"$actual\" = \"$HOST_UID:$HOST_GID\" ] || { "
+                "echo \"unexpected identity $actual\" >&2; exit 81; }\n"
+                "proof=$WORKSPACE_DIR/$CAGE_TEST_TOOL-write-proof\n"
+                "printf '%s uid=%s gid=%s\\n' \"$CAGE_TEST_TOOL\" "
+                "\"$(id -u)\" \"$(id -g)\" > \"$proof\"\n"
+                "[ \"$(stat -c %u:%g \"$proof\")\" = \"$HOST_UID:$HOST_GID\" ] || exit 82\n"
+                "cat \"$proof\"\n"
+            )
+            write_executable(fake_bin / "claude", "#!/bin/sh\n" + proof)
+            write_executable(
+                fake_bin / "codex",
+                "#!/bin/sh\n"
+                "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
+                + proof,
+            )
+            write_executable(
+                fake_bin / "opencode",
+                "#!/bin/sh\n"
+                "case \" $* \" in\n"
+                "  *\" debug config \"*) printf '{\"mcp\":{}}\\n'; exit 0;;\n"
+                "  *\" debug skill \"*) printf '[]\\n'; exit 0;;\n"
+                "esac\n"
+                + proof,
+            )
+
+            tools = (
+                ("claude", "claude", ENTRYPOINT_CLAUDE),
+                ("codex", "codex", ENTRYPOINT_CODEX),
+                ("opencode", "opencode", ENTRYPOINT_OPENCODE),
+            )
+            for tool, target_user, entrypoint in tools:
+                for host_id in (1000, 22001):
+                    container = f"cage-uid-{tool}-{host_id}-{os.getpid()}"
+                    with self.subTest(tool=tool, host_id=host_id):
+                        mounts = [
+                            "--mount",
+                            f"type=bind,src={entrypoint},dst=/entrypoint.sh,readonly",
+                            "--mount",
+                            f"type=bind,src={USER_REMAP},dst=/usr/local/lib/cage/cage-user-remap.py,readonly",
+                            "--mount",
+                            f"type=bind,src={fake_bin},dst=/test-bin,readonly",
+                        ]
+                        if tool == "codex":
+                            mounts.extend(
+                                (
+                                    "--mount",
+                                    f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
+                                )
+                            )
+                        if tool == "opencode":
+                            mounts.extend(
+                                (
+                                    "--mount",
+                                    f"type=bind,src={snapshot},dst=/cage-opencode-snapshot,readonly",
+                                )
+                            )
+                        collision = (
+                            "groupadd -g 1000 occupied && "
+                            "useradd -u 1000 -g 1000 -M -s /bin/sh occupied && "
+                            if host_id == 1000
+                            else ""
+                        )
+                        tool_setup = ""
+                        if tool == "codex":
+                            tool_setup = (
+                                "mkdir -p /home/codex/.codex /home/codex/.npm-global/bin && "
+                                "ln -s /test-bin/codex /home/codex/.npm-global/bin/codex && "
+                            )
+                        elif tool == "opencode":
+                            tool_setup = "mkdir -p /home/opencode/.cage-state && "
+                        command = (
+                            "(test -x /usr/bin/python3 || "
+                            "ln -s /usr/local/bin/python3 /usr/bin/python3) && "
+                            + collision
+                            + f"groupadd -g 22000 {target_user} && "
+                            + f"useradd -u 22000 -g 22000 -M -s /bin/sh {target_user} && "
+                            + f"mkdir -p /home/{target_user} /workspace && "
+                            + tool_setup
+                            + f"chown -R {target_user}:{target_user} /home/{target_user} && "
+                            + f"chmod 700 /workspace && chown {host_id}:{host_id} /workspace && "
+                            + "exec /bin/bash /entrypoint.sh --version"
+                        )
+                        try:
+                            result = subprocess.run(
+                                [
+                                    "docker",
+                                    "run",
+                                    "--rm",
+                                    "--name",
+                                    container,
+                                    "--cap-drop",
+                                    "ALL",
+                                    "--cap-add",
+                                    "CHOWN",
+                                    "--cap-add",
+                                    "DAC_OVERRIDE",
+                                    "--cap-add",
+                                    "SETGID",
+                                    "--cap-add",
+                                    "SETUID",
+                                    *mounts,
+                                    "-e",
+                                    "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                    "-e",
+                                    f"HOME=/home/{target_user}",
+                                    "-e",
+                                    f"HOST_UID={host_id}",
+                                    "-e",
+                                    f"HOST_GID={host_id}",
+                                    "-e",
+                                    "WORKSPACE_DIR=/workspace",
+                                    "-e",
+                                    f"CAGE_TEST_TOOL={tool}",
+                                    "-e",
+                                    "CODEX_COPY_AUTH=0",
+                                    "python:3.12-slim",
+                                    "sh",
+                                    "-c",
+                                    command,
+                                ],
+                                cwd=ROOT,
+                                text=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                timeout=30,
+                                check=False,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertIn(
+                                f"{tool} uid={host_id} gid={host_id}", result.stdout
+                            )
+                        finally:
+                            subprocess.run(
+                                ["docker", "rm", "-f", container],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                check=False,
+                            )
+
     def test_storage_cleanup_preserves_references_custom_image_and_named_volume(self):
         major = 900000 + os.getpid()
         versions = [f"{major}.0.{index}" for index in range(5)]
@@ -567,6 +742,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
                     "--mount",
+                    f"type=bind,src={USER_REMAP},dst=/usr/local/lib/cage/cage-user-remap.py,readonly",
+                    "--mount",
                     f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
                     "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
@@ -589,6 +766,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "python:3.12-slim",
                     "sh",
                     "-c",
+                    "(test -x /usr/bin/python3 || "
+                    "ln -s /usr/local/bin/python3 /usr/bin/python3) && "
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
                     "mkdir -p /home/codex/.npm-global/bin && "
@@ -653,10 +832,13 @@ class DockerSmokeTests(unittest.TestCase):
                     "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE",
                     "--cap-add", "SETGID", "--cap-add", "SETUID",
                     "--mount", f"type=bind,src={ENTRYPOINT_CLAUDE},dst=/entrypoint.sh,readonly",
+                    "--mount", f"type=bind,src={USER_REMAP},dst=/usr/local/lib/cage/cage-user-remap.py,readonly",
                     "--mount", f"type=bind,src={fake_bin},dst=/test-bin,readonly",
                     "-e", "PATH=/test-bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     "-e", "HOME=/home/claude", "-e", "HOST_UID=22001", "-e", "HOST_GID=22001",
                     "-e", "WORKSPACE_DIR=/workspace", "python:3.12-slim", "sh", "-c",
+                    "(test -x /usr/bin/python3 || "
+                    "ln -s /usr/local/bin/python3 /usr/bin/python3) && "
                     "groupadd -g 22000 claude && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh claude && "
                     "mkdir -p /workspace /home/claude/.claude/projects/repo/memory && "
@@ -711,6 +893,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
                     "--mount",
+                    f"type=bind,src={USER_REMAP},dst=/usr/local/lib/cage/cage-user-remap.py,readonly",
+                    "--mount",
                     f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
                     "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
@@ -727,6 +911,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "python:3.12-slim",
                     "sh",
                     "-c",
+                    "(test -x /usr/bin/python3 || "
+                    "ln -s /usr/local/bin/python3 /usr/bin/python3) && "
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
                     "mkdir -p /home/codex/.npm-global/bin && "
@@ -780,6 +966,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "--mount",
                     f"type=bind,src={ENTRYPOINT_CODEX},dst=/entrypoint.sh,readonly",
                     "--mount",
+                    f"type=bind,src={USER_REMAP},dst=/usr/local/lib/cage/cage-user-remap.py,readonly",
+                    "--mount",
                     f"type=bind,src={CODEX_CORE},dst=/usr/local/lib/cage/cage_core,readonly",
                     "--mount",
                     f"type=bind,src={fake_bin},dst=/test-bin,readonly",
@@ -796,6 +984,8 @@ class DockerSmokeTests(unittest.TestCase):
                     "python:3.12-slim",
                     "sh",
                     "-c",
+                    "(test -x /usr/bin/python3 || "
+                    "ln -s /usr/local/bin/python3 /usr/bin/python3) && "
                     "groupadd -g 22000 codex && "
                     "useradd -u 22000 -g 22000 -M -s /bin/sh codex && "
                     "mkdir -p /workspace /home/codex/.codex && "

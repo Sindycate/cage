@@ -1143,6 +1143,7 @@ class Orchestrator:
             "cage-desktop.py",
             "cage-tui.py",
             "codex-remote.py",
+            "cage-user-remap.py",
             "netgate-proxy.py",
             "mcp-bridge.py",
             "mcp-relay",

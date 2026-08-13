@@ -206,6 +206,37 @@ rebuild.
    design must include a new cold/warm benchmark and must not reuse these
    release observations as warm-cache evidence.
 
+### Follow-up: leaf permission-layer optimization (2026-08-13)
+
+The proposed follow-up was validated on native arm64 with Docker Engine 28.4.0
+and Docker's legacy builder. A controlled pair of no-cache builds used the
+same public `base:0.28.0`, source tree, and current tool installers; the
+baseline Dockerfiles were read from `HEAD`, and only layer construction changed
+in the prototypes.
+
+| Leaf | Baseline virtual size | Coalesced virtual size | Saved |
+|------|----------------------:|-----------------------:|------:|
+| Claude | 343,989,011 B | 249,067,483 B | 90.5 MiB |
+| Codex | 506,389,814 B | 389,869,612 B | 111.1 MiB |
+| OpenCode | 533,707,635 B | 312,887,398 B | 210.6 MiB |
+| **Combined** | **1,384,086,460 B** | **951,824,493 B** | **412.2 MiB (31.2%)** |
+
+The baseline histories exposed standalone recursive-mode layers of 309 MB,
+275 MB, and 653 MB respectively (Docker's decimal, uncompressed history
+display). Moving each recursive `chmod` into the existing installer `RUN`
+removed those layers without changing the installed trees' owner/mode/type
+distributions. Claude and OpenCode copy their root-owned `0755` entrypoints
+after normalization; Codex already does so. Runtime tests retained the exact
+reduced-capability UID/GID remap and executable tool contracts. The baseline
+and optimized tool binaries also had identical SHA-256 digests for all three
+assistants.
+
+The update overlays use the same construction, scoped to their installed-tool
+subtrees. `COPY --chmod` was rejected for this optimization: it cannot affect
+installer-created files and would add a BuildKit/frontend-version dependency
+for only kilobytes of entrypoint/relay metadata. No image name, update command,
+runtime state, multi-architecture contract, or migration changes.
+
 ## Options evaluated
 
 ### Option 1: Keep two independent Dockerfiles (status quo)

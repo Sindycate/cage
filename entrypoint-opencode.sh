@@ -3,12 +3,7 @@ set -euo pipefail
 umask 077
 
 TARGET_USER=opencode
-if [ -n "${HOST_UID:-}" ] && [ "$(id -u "$TARGET_USER")" != "$HOST_UID" ]; then
-    usermod -u "$HOST_UID" "$TARGET_USER" 2>/dev/null || true
-fi
-if [ -n "${HOST_GID:-}" ] && [ "$(id -g "$TARGET_USER")" != "$HOST_GID" ]; then
-    groupmod -g "$HOST_GID" "$TARGET_USER" 2>/dev/null || true
-fi
+/usr/bin/python3 -I /usr/local/lib/cage/cage-user-remap.py "$TARGET_USER"
 chown -hR "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$HOME" 2>/dev/null || true
 gosu "$TARGET_USER" chmod 755 "$HOME"
 
@@ -478,7 +473,7 @@ for port in ports:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((container_ip, port))
     listener.listen(8)
-    listeners.append(listener)
+    listeners.append((listener, port))
 
 ready = os.open(
     os.environ["CAGE_OPENCODE_CALLBACK_READY"],
@@ -487,11 +482,13 @@ ready = os.open(
 )
 os.close(ready)
 
-def relay(listener):
+def relay(listener, upstream_port):
     while True:
         client, _ = listener.accept()
         try:
-            upstream = socket.create_connection(("127.0.0.1", port), timeout=10)
+            upstream = socket.create_connection(
+                ("127.0.0.1", upstream_port), timeout=10
+            )
         except OSError:
             client.close()
             continue
@@ -506,8 +503,10 @@ def relay(listener):
                 except OSError: pass
         threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
         threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
-for listener in listeners:
-    threading.Thread(target=relay, args=(listener,), daemon=True).start()
+for listener, upstream_port in listeners:
+    threading.Thread(
+        target=relay, args=(listener, upstream_port), daemon=True
+    ).start()
 threading.Event().wait()
 PY
     CALLBACK_RELAY_PID=$!

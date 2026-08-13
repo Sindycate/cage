@@ -436,9 +436,9 @@ def _run_update(
         overlay = (
             f"FROM {image}\n"
             "USER claude\n"
-            "RUN curl -fsSL https://claude.ai/install.sh | bash\n"
+            "RUN curl -fsSL https://claude.ai/install.sh | bash && "
+            "chmod -R a+rwX /home/claude/.local\n"
             "USER root\n"
-            "RUN chmod -R a+rwX /home/claude\n"
             f"LABEL io.cage.managed=\"true\" io.cage.role=\"claude\" io.cage.version=\"{cage_version}\"\n"
         )
     elif tool == "codex":
@@ -449,10 +449,9 @@ def _run_update(
             f"FROM {image}\n"
             "ENV NPM_CONFIG_PREFIX=/home/codex/.npm-global\n"
             "USER codex\n"
-            "RUN npm install -g @openai/codex@latest\n"
+            "RUN npm install -g @openai/codex@latest && "
+            "chmod -R a+rwX /home/codex/.npm-global\n"
             "USER root\n"
-            "RUN chown -R codex:codex /home/codex/.npm-global && "
-            "chmod -R a+rwX /home/codex\n"
             f"LABEL io.cage.managed=\"true\" io.cage.role=\"codex\" io.cage.version=\"{cage_version}\"\n"
         )
     elif tool == "opencode":
@@ -472,10 +471,9 @@ def _run_update(
             "grep -a -F -q '127.0.0.1:19876' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q 'O$=1455' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q '/auth/callback' \"$OPENCODE_BINARY\" && "
-            "grep -a -F -q '/.well-known/opencode' \"$OPENCODE_BINARY\"\n"
+            "grep -a -F -q '/.well-known/opencode' \"$OPENCODE_BINARY\" && "
+            "chmod -R a+rwX /home/opencode/.npm-global\n"
             "USER root\n"
-            "RUN chown -R opencode:opencode /home/opencode/.npm-global && "
-            "chmod -R a+rwX /home/opencode\n"
             f"LABEL io.cage.managed=\"true\" io.cage.role=\"opencode\" io.cage.version=\"{cage_version}\"\n"
         )
     else:

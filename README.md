@@ -792,6 +792,26 @@ It records full SHA-256 digests and sizes for all downloaded release assets in
 the human and JSON summaries. It never touches the maintainer's real Cage
 installation, configuration, Docker volumes, SSH config, or Codex state.
 
+GHCR package visibility is a one-time maintainer prerequisite that image pushes
+cannot set. A public GitHub repository does not automatically make its container
+packages public. After the first publication of each managed package (`cage/base`,
+`cage/claude-code`, `cage/codex`, and `cage/opencode`), an organization owner or
+package administrator must open the package on the Sindycate organization's
+**Packages** page, choose **Package settings**, use **Change visibility** to make
+it **Public**, and confirm that the package is connected to the `Sindycate/cage`
+source repository. Repeat this for every newly introduced image package; changing
+a package's visibility does not require moving or recreating an immutable version
+tag.
+
+The `public-images` job in `release.yml` starts after all image promotion and
+before the GitHub Release is created. It checks every version and `latest`
+manifest for the promoted digest and both `linux/amd64` and `linux/arm64`, then
+performs literal pulls with a fresh empty `DOCKER_CONFIG` and credential-bearing
+environment variables removed. A private or incorrectly associated package
+therefore blocks the final GitHub Release job and leaves the workflow visibly
+failed. Correct the package setting and rerun the failed jobs; do not retag or
+overwrite the immutable image tags.
+
 Manual `git push` / `git tag` / `gh release create` remain available only as
 emergency recovery; the release workflow's exact-commit gate protects manual
 tag pushes too.

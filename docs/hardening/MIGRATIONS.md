@@ -6,7 +6,44 @@ when that version is committed and tagged.
 
 ## Unreleased
 
-### OpenCode container integration (targeting 0.28.0)
+## 0.28.1 — 2026-08-13
+
+### Collision-safe container identity remapping
+
+No configuration migration. Claude, Codex, and OpenCode containers still run
+as the non-root host UID/GID supplied by Cage. If an image account already owns
+either requested numeric ID, the shared remapper now moves that account to the
+tool account's previous free ID before assigning the requested host identity.
+Invalid, incomplete, root, or unverifiable mappings fail before the assistant
+starts instead of silently retaining an unwritable identity.
+
+### OpenCode OAuth callback routing correction
+
+No configuration migration. OpenCode provider login now forwards callback port
+`1455` to the matching loopback listener instead of the MCP callback port
+`19876`. Cage also recognizes policy-approved global options before provider or
+selected MCP auth subcommands when deciding which fixed localhost-only callback
+ports to publish.
+
+### Public GHCR consumer gate
+
+No user configuration migration. After image promotion and before GitHub
+Release creation, the workflow now runs a `public-images` job for `base`,
+`claude-code`, `codex`, and `opencode`. For both the immutable version and
+`latest` tag, it requires the promoted digest, `linux/amd64` plus
+`linux/arm64`, and a literal pull under a fresh empty Docker credential
+directory with ambient credential variables removed.
+
+Maintainers must make each newly created GHCR package public once through its
+GitHub package settings and confirm its source-repository association. A public
+source repository does not set GHCR package visibility. If the consumer gate
+fails because a package is private, correct that package setting and rerun the
+failed job; never move an immutable version tag or create a replacement release
+for a visibility-only correction.
+
+## 0.28.0 — 2026-08-09
+
+### OpenCode container integration
 
 Who is affected: users who add an OpenCode auth block or preset, and maintainers
 of custom image, CI, registry, or release automation. Existing Claude and Codex
@@ -77,6 +114,8 @@ rollback. They are intentionally preserved and can be reused after reinstalling
 0.28.0. Host static configuration is never modified by OpenCode launch, and
 only the explicitly selected provider/MCP auth stores may have received normal
 credential rotation writeback.
+
+## 0.27.2 — 2026-08-05
 
 ### Maintainer release reliability and evidence
 

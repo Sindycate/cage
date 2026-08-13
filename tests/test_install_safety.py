@@ -57,6 +57,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "entrypoint.sh",
             "entrypoint-codex.sh",
             "entrypoint-opencode.sh",
+            "cage-user-remap.py",
         ]
         for name in required:
             path = release_root / name
@@ -350,6 +351,7 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue((install_dir / "cage_core" / "models.py").is_file())
             self.assertFalse((install_dir / "cage_core").is_symlink())
             self.assertTrue((install_dir / "Dockerfile.base").is_file())
+            self.assertTrue((install_dir / "cage-user-remap.py").is_file())
             self.assertTrue(os.access(install_dir / "cage-tui.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "cage-desktop.py", os.X_OK))
             self.assertTrue(os.access(install_dir / "codex-remote.py", os.X_OK))
