@@ -3,6 +3,25 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-17 — canonical publisher made the single release orchestrator
+
+The v0.28.1 and v0.28.2 publications proved that the maintainer publisher owns
+the complete ordinary flow: exact main push, exact-SHA CI wait, immutable tag,
+tag workflow, bounded retry, and fourteen independent public checks through
+`public_verified`. The two real runs completed in approximately 21m39s and
+20m00s respectively; most elapsed time was the required multi-architecture CI
+build, not maintainer interaction.
+
+The surrounding agent orchestration still spent unnecessary tool calls and
+tokens on a mandatory-style dry run, routine `gh` status queries, and duplicate
+progress narration while the publisher was already polling and journaling the
+same state. Canonical instructions now make the publisher the single controller
+across fresh contexts. Real mode runs once when state is clear; dry-run is
+diagnostic; healthy runs are not shadow-polled or reverified; terse heartbeats
+reuse the last publisher milestone; interrupted runs resume the same private
+journal and use targeted diagnostics only for the reported failure. A release
+supply-chain regression test preserves this efficiency contract.
+
 ## 2026-08-17 — release completion and product-owner handoff corrected
 
 A v0.28.1 candidate was incorrectly described as done while it existed only as

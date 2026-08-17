@@ -469,6 +469,21 @@ deliverable.
   It resumes automatically from the current phase; `--dry-run` shows the plan
   without mutating anything and `--json` emits one result object. Do not add it
   to the `cage` CLI or the release archive.
+- **Publisher orchestration discipline (including fresh contexts):** treat
+  `scripts/publish_release.py` as the single release orchestrator. Once a clean,
+  versioned commit is ready, run the real publisher once and leave it attached.
+  `--dry-run` is diagnostic, not a mandatory duplicate gate; use it only when
+  the release state or planned mutations are genuinely unclear. While the
+  publisher is healthy, do not duplicate its work with manual pushes, tags,
+  GitHub Release creation, routine `gh run view`/`watch` polling, registry
+  probes, installer checks, or a second public-verification pass. Use its own
+  milestone output and final schema-v2 JSON result. If the client requires a
+  heartbeat, report the last publisher milestone tersely without making another
+  external query. After interruption or failure, resume the same journaled
+  command; use targeted read-only diagnostics only for the failure it reports,
+  and never replace the canonical flow with manual mutations except under the
+  documented emergency-recovery rule. This minimizes wall time, tool calls, and
+  token use without weakening any release gate.
 - **Release completion and product-owner handoff:** local edits, commits, tests,
   worktrees, and Docker images are only a *prepared release candidate*. Do not
   report release-bound work as done, ask the product owner to test it, or hand

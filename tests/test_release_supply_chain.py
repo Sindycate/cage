@@ -59,6 +59,33 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         ):
             self.assertIn(fragment, workflow)
 
+    def test_publisher_is_the_single_release_orchestrator(self):
+        agent_instructions = re.sub(
+            r"\s+", " ", AGENT_INSTRUCTIONS.read_text(encoding="utf-8")
+        )
+        workflow = re.sub(
+            r"\s+", " ", HARDENING_WORKFLOW.read_text(encoding="utf-8")
+        )
+
+        for fragment in (
+            "as the single release orchestrator",
+            "`--dry-run` is diagnostic, not a mandatory duplicate gate",
+            "routine `gh run view`/`watch` polling",
+            "final schema-v2 JSON result",
+            "resume the same journaled command",
+            "minimizes wall time, tool calls, and token use",
+        ):
+            self.assertIn(fragment, agent_instructions)
+
+        for fragment in (
+            "is the single controller for an ordinary release",
+            "`--dry-run` is optional",
+            "without extra GitHub or registry queries",
+            "resume its private journal",
+            "do not reconstruct or manually replay its phases",
+        ):
+            self.assertIn(fragment, workflow)
+
     def test_all_remote_actions_are_pinned_to_full_commit_shas(self):
         for workflow in sorted(WORKFLOW_DIR.glob("*.y*ml")):
             text = workflow.read_text(encoding="utf-8")
@@ -886,15 +913,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.28.2\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.2^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.3\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.3^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.28.2\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.3\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.28.2\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.2^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.28.3\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.3^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -907,7 +934,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.28.2",
+                "GITHUB_REF": "refs/tags/v0.28.3",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -926,8 +953,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.28.2", output)
-        self.assertIn("tag=v0.28.2", output)
+        self.assertIn("version=0.28.3", output)
+        self.assertIn("tag=v0.28.3", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")

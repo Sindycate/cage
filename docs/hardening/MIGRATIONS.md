@@ -6,6 +6,21 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.28.3 — 2026-08-17
+
+### Maintainer publisher orchestration efficiency
+
+No user configuration migration. `scripts/publish_release.py` is now explicitly
+the single ordinary-release controller across fresh contexts and handoffs.
+Maintainers run real mode once for a clean prepared commit; `--dry-run` is
+optional for ambiguous state or mutation review rather than a mandatory second
+preflight. A healthy publisher owns push, exact-SHA CI waiting, immutable tag,
+release-workflow waiting, retries, and independent public verification. Do not
+duplicate those phases with manual mutations, routine `gh` polling, registry or
+installer probes, or another verification checklist. Resume its private journal
+after interruption and use targeted read-only diagnostics only for a reported
+failure.
+
 ## 0.28.2 — 2026-08-17
 
 ### Maintainer release handoff

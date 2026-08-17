@@ -3,6 +3,14 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.28.3 — 2026-08-17
+
+- designate the canonical publisher as the single ordinary-release
+  orchestrator across fresh contexts: avoid mandatory duplicate dry runs,
+  routine external workflow polling, manual release phases, and redundant
+  post-publication verification; resume its journal and use its milestone output
+  plus final schema-v2 evidence instead.
+
 ## 0.28.2 — 2026-08-17
 
 - make the maintainer handoff contract explicit: local validation produces only

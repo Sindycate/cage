@@ -106,6 +106,15 @@ Packet states are `pending`, `in progress`, `verification`, `complete`, or
   remote `main`, required CI succeeds, the immutable tag and GitHub Release are
   published, the canonical publisher reaches `public_verified`, and a fresh
   unauthenticated `curl` install reports the expected version.
+- `scripts/publish_release.py` is the single controller for an ordinary release.
+  Run its real mode once after the prepared commit; `--dry-run` is optional and
+  reserved for genuinely ambiguous state or mutation review. Do not duplicate a
+  healthy publisher with manual Git/GitHub mutations, routine workflow polling,
+  registry reads, installer runs, or another public-verification checklist. Use
+  publisher milestones and its final schema-v2 JSON. Required conversational
+  heartbeats report the last observed milestone without extra GitHub or registry
+  queries. On interruption or failure, resume its private journal and investigate
+  only the reported condition before resuming.
 
 ## Public evidence hygiene
 
@@ -178,6 +187,11 @@ After compaction or handoff, read these files before taking action:
 3. `docs/hardening/PROGRESS.md`
 4. `docs/hardening/MIGRATIONS.md`
 5. `git status -sb` and the current branch diff
+
+For an in-progress release, do not reconstruct or manually replay its phases
+after compaction. Invoke the canonical publisher from the matching clean
+worktree so it reconciles its private journal with authoritative remote state,
+then leave that single process attached through `public_verified`.
 
 Resume the first packet whose state is `in progress`, `verification`, or
 `pending`. Do not repeat completed proof-of-concept work. Update `PROGRESS.md`
