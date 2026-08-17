@@ -36,8 +36,8 @@ def trusted_install_root() -> Path:
     return root
 
 
-if sys.version_info < (3, 11):
-    raise SystemExit("ERROR: Cage requires Python 3.11 or newer.")
+if sys.version_info < (3, 12):
+    raise SystemExit("ERROR: Cage requires Python 3.12 or newer.")
 
 INSTALL_ROOT = trusted_install_root()
 sys.path.insert(0, str(INSTALL_ROOT))

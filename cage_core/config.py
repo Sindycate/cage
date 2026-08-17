@@ -34,7 +34,7 @@ from cage_core import codex_policy, codex_runtime
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - depends on host Python
-    print("ERROR: cage central config requires Python 3.11+ with tomllib.", file=sys.stderr)
+    print("ERROR: cage central config requires Python 3.12+.", file=sys.stderr)
     sys.exit(2)
 
 

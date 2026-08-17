@@ -8,6 +8,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -267,6 +268,58 @@ class LifecycleCoordinatorTests(unittest.TestCase):
 
 
 class IsolatedBootstrapTests(unittest.TestCase):
+    def test_python_311_is_rejected_before_core_execution(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as raw:
+            root = Path(raw)
+            binary = root / "bin"
+            binary.mkdir()
+            python = binary / "python3"
+            python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -I ] && [ \"$2\" = -c ]; then\n"
+                "  case \"$3\" in\n"
+                "    *'sys.version_info >= (3, 12)'*) exit 1 ;;\n"
+                "    *) printf 'unexpected Python version probe\\n' >&2; exit 97 ;;\n"
+                "  esac\n"
+                "fi\n"
+                "printf 'core executed unexpectedly\\n' >&2\n"
+                "exit 98\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary}{os.pathsep}{environment['PATH']}"
+            result = subprocess.run(
+                [str(CAGE), "--version"],
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires Python 3.12 or newer", result.stderr)
+        self.assertNotIn("unexpected Python version probe", result.stderr)
+        self.assertNotIn("core executed unexpectedly", result.stderr)
+
+    def test_python_entrypoint_independently_rejects_python_311(self):
+        code = (
+            "import runpy, sys; "
+            "sys.version_info = (3, 11, 15); "
+            f"runpy.run_path({str(ROOT / 'cage-main.py')!r}, run_name='cage_main_test')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires Python 3.12 or newer", result.stderr)
+
     def test_hostile_cwd_and_pythonpath_cannot_shadow_core(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as raw:
             root = Path(raw)
@@ -291,7 +344,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.28.3")
+        self.assertEqual(result.stdout.strip(), "cage 0.29.0")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):

@@ -1,6 +1,6 @@
 """Trusted host-side control plane for Cage.
 
-The package intentionally depends only on the Python 3.11 standard library.
+The package intentionally depends only on the Python 3.12 standard library.
 Frontends may import this package, but the core never imports a frontend.
 """
 

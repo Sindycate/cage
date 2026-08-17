@@ -20,8 +20,9 @@ FROM_SOURCE=0
 info()  { echo "  $*"; }
 error() { echo "ERROR: $*" >&2; exit 1; }
 
-command -v python3 >/dev/null 2>&1 || error "python3 3.11+ is required."
-python3 -I -c 'import tomllib' 2>/dev/null || error "python3 must be 3.11+ with tomllib support."
+command -v python3 >/dev/null 2>&1 || error "python3 3.12+ is required."
+python3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null || \
+    error "python3 3.12+ is required."
 
 # Validate the exact user input before command substitution can strip trailing
 # newlines or realpath can hide a symlink at the selected directory itself.

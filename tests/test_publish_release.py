@@ -19,6 +19,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -802,6 +803,27 @@ print(json.dumps({{'returncode': result.returncode, 'stdout': result.stdout, 'st
 
 
 class PreflightTests(PublishReleaseTestCase):
+    def test_python_311_fails_the_publisher_preflight(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        with (
+            patch.object(pr.sys, "version_info", (3, 11, 15)),
+            patch.object(pr.sys, "version", "3.11.15 (test)"),
+            self.assertRaises(pr.PreflightError) as ctx,
+        ):
+            orch._check_python()
+
+        self.assertIn("Python 3.12+ is required", str(ctx.exception))
+
+    def test_python_312_passes_the_publisher_preflight(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        with (
+            patch.object(pr.sys, "version_info", (3, 12, 0)),
+            patch.object(pr.sys, "version", "3.12.0 (test)"),
+        ):
+            self.assertEqual(orch._check_python(), "3.12.0")
+
     def test_baseline_preflight_passes_and_detects_local_ready(self):
         scenario = Scenario()  # ahead=1, clean, no tags, no release
         orch, *_ = make_orch(scenario)

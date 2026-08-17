@@ -22,7 +22,7 @@ credentials.
 
 - macOS or Linux (Ubuntu, etc.)
 - Docker + Docker Compose (macOS: [Colima](https://github.com/abiosoft/colima) or Docker Desktop)
-- Python 3.11+ (for central config parsing; also used by network gating)
+- Python 3.12+ (for the host control plane and network gating)
 - **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
 - **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
 - **OpenCode:** provider auth from the selected OpenCode XDG data directory, or provider environment variables
@@ -611,7 +611,7 @@ and retained only in the container's tmpfs-backed `/run` state. See
 
 ## How it works
 
-`cage` is a small Bash 3.2-compatible bootstrap around a Python 3.11
+`cage` is a small Bash 3.2-compatible bootstrap around a Python 3.12
 standard-library host core. The core parses a request, resolves central
 configuration, and validates an immutable launch plan before inspecting images,
 changing Docker state, starting bridges, or synchronizing persistent state.
@@ -704,7 +704,7 @@ python3 scripts/publish_release.py --json     # one JSON result object on stdout
 
 `scripts/publish_release.py` is maintainer tooling. It is not part of the
 end-user `cage` CLI and is excluded from the release archive. It uses only the
-Python 3.11 standard library and requires `git`, `gh`, `docker`, `curl`, and
+Python 3.12 standard library and requires `git`, `gh`, `docker`, `curl`, and
 `/bin/bash`. The script owns the only terminal read (the explicit confirmation):
 all child commands receive closed stdin in a new session with no controlling
 TTY, so a pseudo-TTY cannot open a nested Cage, credential, or editor prompt.

@@ -6,6 +6,38 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.29.0 — 2026-08-17
+
+### Python 3.12 host requirement
+
+Who is affected: users or custom automation that launch or install Cage with
+Python 3.11. Container images and their persistent volumes are not migrated.
+
+Previous behavior: the host launcher, installer, and maintainer publisher
+accepted Python 3.11 or newer, and normal Linux CI repeated the test and
+real-Docker suites under both Python 3.11 and 3.12.
+
+New behavior: Cage requires Python 3.12 or newer. CI has one Python 3.12 test
+lane and still runs the complete unit suite, real-Docker entrypoint suite,
+shared-base/Codex/OpenCode image builds, OpenCode container contracts, Desktop
+SSH smoke, syntax checks, and Compose validation. The macOS Bash 3.2 installer
+job and release package job remain pinned to the Python 3.12 minor series. Cage
+does not require one exact Python patch release.
+
+Migration and verification:
+
+1. Install a maintained Python 3.12 or newer interpreter and ensure `python3`
+   resolves to it in the environment that invokes Cage.
+2. Run `python3 --version`, then `cage --version`; both must succeed and the
+   Python version must be at least 3.12.
+3. Custom CI or packaging should remove Python 3.11 jobs and retain the Python
+   3.12 unit, Docker, Desktop, OpenCode, installer, archive, and supply-chain
+   gates represented by the shipped workflows.
+
+Rollback: install the previous Cage release to restore Python 3.11 support.
+Configuration, credentials, Docker volumes, images, and project state are
+unchanged by this migration.
+
 ## 0.28.3 — 2026-08-17
 
 ### Maintainer publisher orchestration efficiency

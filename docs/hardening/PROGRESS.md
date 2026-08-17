@@ -3,6 +3,27 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-17 — Python 3.12 host policy prepared for v0.29.0
+
+Cage now requires Python 3.12 or newer for host launch, installation, and the
+maintainer release publisher. The sole-user CI policy uses one Python 3.12 test
+lane instead of duplicating the suite on 3.11 and 3.12; all existing Docker,
+Desktop, OpenCode, macOS installer, release-package, and candidate gates remain
+in place. The policy intentionally sets a minor-version floor rather than an
+exact patch pin, so normal Python 3.12 security updates remain compatible.
+
+Behavioral regressions cover 3.11 rejection before Cage or installer side
+effects, publisher preflight rejection on 3.11 and acceptance on 3.12, and the
+single-lane CI topology. The complete supported-interpreter suite passed 515
+tests with 13 skips on Python 3.12.3. Fresh disposable images built from this
+worktree then passed all nine real Docker/Desktop smokes and all four OpenCode
+container contracts; the installed OpenCode binary also started successfully.
+Python compilation, Bash syntax, Compose rendering, and the real launcher
+version check passed. The initial Desktop smoke exposed a stale July 28 local
+test image; rebuilding that disposable image from current source resolved it
+without a source change. These checks were completed in the dedicated release
+worktree before publication; the main checkout remained untouched.
+
 ## 2026-08-17 — canonical publisher made the single release orchestrator
 
 The v0.28.1 and v0.28.2 publications proved that the maintainer publisher owns

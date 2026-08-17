@@ -146,7 +146,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 **`cage`** (host-side bootstrap, symlinked to `~/.local/bin/`):
 - Is a Bash 3.2-compatible bootstrap only: resolves its real installation
-  directory, validates Python 3.11+, exports the internal Cage version, and
+  directory, validates Python 3.12+, exports the internal Cage version, and
   `exec`s `python3 -I cage-main.py`. It contains no launch policy, Docker
   construction, heredocs, state reconciliation, or trap chains
 - `cage-main.py` rejects symlink/non-regular `cage_core` package entries before
@@ -186,9 +186,9 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   launch-only numbered prompt
 - Requires central config at `~/.config/cage/config.toml` for launches. It is
   parsed by `cage_core.config` (`cage-config.py` remains the compatibility
-  frontend; Python 3.11+ `tomllib`) and contains reusable `auth`, `identities`,
-  `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and `[projects]`
-  mappings. Project mappings use longest-prefix matching
+  frontend; Python 3.12+ standard library) and contains reusable `auth`,
+  `identities`, `mcp_packs`, `skill_packs`, `host_commands`, `presets`, and
+  `[projects]` mappings. Project mappings use longest-prefix matching
 - The optional top-level `[storage]` policy defaults to a 20 GiB warning/build
   floor, 5 GiB critical floor, two retained semantic versions per managed image
   role, and a 24-hour dangling-build minimum age. The TUI edits it through the
@@ -414,7 +414,7 @@ SBOM attestation separately. It is not part of the `cage` CLI and is excluded
 from the release archive.
 
 **`.github/workflows/ci.yml`**: In addition to the secret-scan, macOS Bash 3.2
-installer, and Python 3.11/3.12 test/Docker/Desktop gates, a `candidate` job
+installer, and Python 3.12 test/Docker/Desktop gates, a `candidate` job
 runs only on a `push` to `main` after every gate passes. It builds the shared
 base for `linux/amd64`+`linux/arm64`, publishes it as
 `ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds all three leaves from

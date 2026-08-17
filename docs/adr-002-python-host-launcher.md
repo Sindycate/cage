@@ -3,6 +3,13 @@
 Status: accepted
 Date: 2026-07-29
 
+Amended: 2026-08-17. Cage now requires Python 3.12 or newer and validates the
+host control plane in one Python 3.12 CI lane. This intentionally drops the
+Python 3.11 compatibility promise for the sole-user deployment while retaining
+all Docker, Desktop, OpenCode, installer, and release gates. No exact patch
+version is pinned; all other architecture and dependency decisions below are
+unchanged.
+
 ## Context
 
 The host-side `cage` launcher grew to 2,691 lines of Bash. It parsed the public
@@ -20,9 +27,9 @@ a launch before resources were created.
 ## Decision
 
 Keep `cage` as a Bash 3.2-compatible bootstrap and move host orchestration into
-a Python 3.11 standard-library-only package:
+a Python 3.12 standard-library-only package:
 
-- `cage` resolves its real installation directory, validates Python 3.11+, sets
+- `cage` resolves its real installation directory, validates Python 3.12+, sets
   the internal version, and executes `cage-main.py` with `python3 -I`;
 - `cage-main.py` rejects symlink or non-regular package entries, then adds only
   its resolved installation root to `sys.path`;
@@ -51,7 +58,7 @@ non-regular entries.
 ## Consequences
 
 The public CLI, config format, TUI flow, target behavior, state locations, and
-documented isolation model do not change. Python 3.11 remains a host
+documented isolation model do not change. Python 3.12 remains a host
 requirement. The Bash bootstrap is intentionally not a fallback launcher: if
 the installed package fails integrity or import validation, Cage refuses to
 run.

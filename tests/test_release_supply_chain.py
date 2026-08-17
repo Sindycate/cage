@@ -127,6 +127,24 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         # Candidate publication follows every gate in file order.
         self.assertLess(text.index("  test:"), text.index("  candidate:"))
 
+    def test_ci_uses_one_python_312_lane_and_preserves_all_smokes(self):
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertNotIn("matrix.python-version", text)
+        self.assertNotIn("python-version: ['3.11', '3.12']", text)
+        self.assertEqual(text.count("python-version: '3.12'"), 2)
+        for fragment in (
+            "python -m pytest -q",
+            "CAGE_RUN_DOCKER_SMOKE: '1'",
+            "Build shared base, Desktop Codex, and OpenCode smoke images",
+            "CAGE_RUN_OPENCODE_DOCKER_CONTRACT=1",
+            "Run Desktop SSH integration smoke test",
+            "CAGE_DESKTOP_SMOKE_IMAGE: codex:desktop-smoke",
+            "python -m compileall -q",
+            "Validate Compose configuration",
+        ):
+            self.assertIn(fragment, text)
+
     def test_ci_candidate_tags_use_full_sha_and_exact_base_digest(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('echo "SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"', text)
@@ -913,15 +931,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.28.3\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.3^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.29.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.29.0^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.28.3\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.29.0\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.28.3\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.3^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.29.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.29.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -934,7 +952,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.28.3",
+                "GITHUB_REF": "refs/tags/v0.29.0",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -953,8 +971,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.28.3", output)
-        self.assertIn("tag=v0.28.3", output)
+        self.assertIn("version=0.29.0", output)
+        self.assertIn("tag=v0.29.0", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")

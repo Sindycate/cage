@@ -52,9 +52,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11', '3.12']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,7 +59,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.12'
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -78,7 +75,6 @@ jobs:
         run: python -m pytest -q tests/test_docker_smoke.py
 
       - name: Build shared base, Desktop Codex, and OpenCode smoke images
-        if: matrix.python-version == '3.12'
         run: |
           docker build --build-arg CAGE_VERSION=ci -t cage-base:ci -f Dockerfile.base .
           docker build --build-arg CAGE_BASE=cage-base:ci --build-arg CAGE_VERSION=ci -t codex:desktop-smoke -f Dockerfile.codex .
@@ -87,7 +83,6 @@ jobs:
           CAGE_RUN_OPENCODE_DOCKER_CONTRACT=1 python3 -m pytest -q tests/test_opencode_proxy_contract.py
 
       - name: Run Desktop SSH integration smoke test
-        if: matrix.python-version == '3.12'
         env:
           CAGE_RUN_DOCKER_SMOKE: '1'
           CAGE_DESKTOP_SMOKE_IMAGE: codex:desktop-smoke

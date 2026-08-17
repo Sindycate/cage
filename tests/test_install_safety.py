@@ -14,6 +14,49 @@ SYSTEM_BASH = "/bin/bash"
 
 
 class InstallerSafetyTests(unittest.TestCase):
+    def test_installer_rejects_python_311_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            home = root / "home"
+            binary = root / "bin"
+            home.mkdir()
+            binary.mkdir()
+            python = binary / "python3"
+            python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -I ] && [ \"$2\" = -c ]; then\n"
+                "  case \"$3\" in\n"
+                "    *'sys.version_info >= (3, 12)'*) exit 1 ;;\n"
+                "    *) printf 'unexpected Python version probe\\n' >&2; exit 97 ;;\n"
+                "  esac\n"
+                "fi\n"
+                "exit 98\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            install_dir = root / "install"
+            environment = os.environ.copy()
+            environment.update(
+                HOME=str(home),
+                CAGE_INSTALL_DIR=str(install_dir),
+                CAGE_BIN_DIR=str(root / "launcher"),
+                PATH=f"{binary}{os.pathsep}{environment['PATH']}",
+            )
+            result = subprocess.run(
+                [SYSTEM_BASH, str(INSTALLER), "--from-source"],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("python3 3.12+ is required", result.stderr)
+        self.assertNotIn("unexpected Python version probe", result.stderr)
+        self.assertFalse(install_dir.exists())
+
     def run_uninstall(self, home: pathlib.Path, install_dir: pathlib.Path):
         env = os.environ.copy()
         env.update(

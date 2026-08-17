@@ -10,7 +10,7 @@ It is maintainer tooling only. It is intentionally not part of the end-user
 ``cage`` CLI and is excluded from the release archive (``scripts/`` is not in
 the archive payload).
 
-Standard library only; requires Python 3.11+.
+Standard library only; requires Python 3.12+.
 """
 
 from __future__ import annotations
@@ -264,7 +264,7 @@ def safe_extract_tar(archive_path: Path, dest: Path) -> None:
     traversal, symlinks/hardlinks, and special files are rejected; only regular
     files and directories are permitted, and each resolved target must stay within
     ``dest``. This replaces reliance on ``tarfile``'s ``filter`` argument so the
-    safety behavior is identical on every supported Python 3.11+ interpreter and
+    safety behavior is identical on every supported Python 3.12+ interpreter and
     never falls back to an unfiltered extraction.
     """
     import tarfile
@@ -928,9 +928,9 @@ class Orchestrator:
         self._abort_if_failed()
 
     def _check_python(self) -> str:
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 12):
             raise PreflightError(
-                f"Python 3.11+ is required (have {sys.version.split()[0]})"
+                f"Python 3.12+ is required (have {sys.version.split()[0]})"
             )
         return sys.version.split()[0]
 

@@ -3,6 +3,13 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.29.0 — 2026-08-17
+
+- require Python 3.12 or newer for the host control plane and maintainer
+  publisher, replace the Python 3.11/3.12 CI matrix with one Python 3.12 lane,
+  and retain the complete Docker, Desktop SSH, OpenCode, installer, packaging,
+  and release-validation gates without pinning an exact Python patch version.
+
 ## 0.28.3 — 2026-08-17
 
 - designate the canonical publisher as the single ordinary-release
