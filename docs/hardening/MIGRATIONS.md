@@ -6,6 +6,18 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.28.2 — 2026-08-17
+
+### Maintainer release handoff
+
+No user configuration migration. Local edits, commits, tests, worktrees, and
+images are now explicitly classified as a prepared release candidate rather
+than a completed handoff. Agents own pre-release validation and publication.
+Product-owner acceptance starts from a fresh unauthenticated `curl`
+installation only after the exact commit is on remote `main`, required CI
+succeeds, the immutable tag and GitHub Release exist, and the canonical
+publisher reaches `public_verified`.
+
 ## 0.28.1 — 2026-08-13
 
 ### Collision-safe container identity remapping

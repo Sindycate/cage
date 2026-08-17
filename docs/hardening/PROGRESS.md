@@ -3,6 +3,24 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-17 — release completion and product-owner handoff corrected
+
+A v0.28.1 candidate was incorrectly described as done while it existed only as
+an unpushed local commit. The standing hardening-workflow authorization already
+covers pushes, tags, and intermediate releases; stopping for another approval
+shifted the normal pre-release burden to the product owner and contradicted the
+established public-verification completion gate.
+
+The canonical agent and workflow rules now distinguish a local `prepared`
+candidate from completion. Agents own local, Docker, CI, publication, and
+anonymous-consumer checks. Release-bound work is handed off only after the exact
+commit is on remote `main`, required CI succeeds, the immutable tag and GitHub
+Release exist, the canonical publisher reaches `public_verified`, and a fresh
+unauthenticated `curl` installation reports the expected version. The product
+owner tests that installed public release; local `main`, agent worktrees, local
+commits, and local images are not product-owner test targets unless explicitly
+requested. A supply-chain regression test preserves this contract.
+
 ## 2026-08-13 — OpenCode callback publication and routing correction
 
 An independent OpenCode parity audit found two OAuth callback regressions. The

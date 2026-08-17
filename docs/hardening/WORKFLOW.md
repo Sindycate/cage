@@ -25,6 +25,10 @@ after context compaction, a new agent session, or a maintainer handoff.
 - Breaking changes are allowed when migration instructions are complete.
 - Intermediate versions may be published. Every pushed commit must have its own
   version and tag, as required by `AGENTS.md`.
+- Agents own local, Docker, CI, publication, and anonymous-consumer validation.
+  The product owner does not test local `main`, agent worktrees, local commits,
+  or locally built images as the normal release gate. Product-owner acceptance
+  starts from a fresh `curl` installation only after the new version is public.
 - Security claims must describe effective behavior, not intended behavior.
 
 ## Trust model decision
@@ -97,6 +101,11 @@ Packet states are `pending`, `in progress`, `verification`, `complete`, or
   Compose validation, diff review, and any available focused integration tests.
 - External publication is recorded only after commit, push, tag, and workflow
   status are verified.
+- A local checkpoint is described as `prepared` or `release candidate`, never
+  `done`. Release-bound work reaches handoff only after the exact commit is on
+  remote `main`, required CI succeeds, the immutable tag and GitHub Release are
+  published, the canonical publisher reaches `public_verified`, and a fresh
+  unauthenticated `curl` install reports the expected version.
 
 ## Public evidence hygiene
 
@@ -136,6 +145,10 @@ The exact versions may change after integration review.
 
 - Local edits, tests, commits, pushes, tags, and intermediate releases are
   authorized by the product owner for this workflow.
+- This is standing publication authorization, not an invitation to stop for a
+  second approval. Use the canonical publisher and its exact confirmation as
+  the mutation guard; if it cannot reach public verification, leave the release
+  pending or blocked rather than handing a local candidate to the product owner.
 - GitHub CLI authentication was invalid at workflow start. Local work may
   continue, but GitHub publication must not be reported as successful until
   authentication and remote state are verified.
@@ -152,7 +165,9 @@ The workflow is done when:
 4. documentation matches effective trust boundaries;
 5. release artifacts and source revisions are auditable and reproducible enough
    for the documented support level;
-6. the final residual-risk register is reviewed with the product owner.
+6. the final residual-risk register is reviewed with the product owner;
+7. any release-bound completion claim is backed by the remote-main, CI, tag,
+   GitHub Release, `public_verified`, and fresh public-installer evidence above.
 
 ## Compaction and resume instructions
 

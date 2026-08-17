@@ -3,6 +3,14 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.28.2 — 2026-08-17
+
+- make the maintainer handoff contract explicit: local validation produces only
+  a prepared release candidate, while completion requires the exact remote-main
+  commit, successful CI, immutable tag and GitHub Release, independent public
+  verification, and a fresh unauthenticated `curl` install before product-owner
+  acceptance testing begins.
+
 ## 0.28.1 — 2026-08-13
 
 - make container UID/GID remapping collision-safe and fail closed for Claude,

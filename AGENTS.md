@@ -469,6 +469,22 @@ deliverable.
   It resumes automatically from the current phase; `--dry-run` shows the plan
   without mutating anything and `--json` emits one result object. Do not add it
   to the `cage` CLI or the release archive.
+- **Release completion and product-owner handoff:** local edits, commits, tests,
+  worktrees, and Docker images are only a *prepared release candidate*. Do not
+  report release-bound work as done, ask the product owner to test it, or hand
+  it off as complete until the exact commit is on remote `main`, its required CI
+  run succeeds, the immutable annotated version tag and GitHub Release exist,
+  the canonical publisher reaches `public_verified`, and a fresh unauthenticated
+  `curl` installation of the public release reports the expected `cage
+  --version`. Agents own pre-release local and CI validation. The product owner
+  tests the installed public release after this gate; never ask them to check
+  out or locally test repository `main`, an agent worktree, a local commit, or a
+  locally built image unless they explicitly request pre-release testing.
+- The active hardening workflow's standing publication authorization is
+  sufficient for its in-scope releases. Do not pause for a redundant push/tag/
+  release approval; the canonical publisher's exact confirmation is the
+  mutation guard. If authentication, CI, publication, or public verification
+  cannot complete, report the release as pending or blocked, never done.
 - **Emergency recovery only:** manual `git push` → `git tag v{version}` →
   `git push origin v{version}` → `gh release create`. The release workflow's
   exact-commit gate still protects manual tag pushes. Never skip tagging —

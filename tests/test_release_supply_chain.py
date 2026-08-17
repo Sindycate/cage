@@ -19,6 +19,8 @@ PACKAGER = ROOT / "scripts" / "build-release.py"
 GITLEAKS_CONFIG = ROOT / ".gitleaks.toml"
 GITLEAKS_IGNORE = ROOT / ".gitleaksignore"
 GITLEAKS_INSTALLER = ROOT / ".github" / "scripts" / "install-gitleaks.sh"
+AGENT_INSTRUCTIONS = ROOT / "AGENTS.md"
+HARDENING_WORKFLOW = ROOT / "docs" / "hardening" / "WORKFLOW.md"
 ACTION_REF_RE = re.compile(r"^\s*(?:-\s+)?uses:\s+([^@\s]+)@([^\s#]+)", re.MULTILINE)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 PRIVATE_MACOS_HOME_RE = re.compile(
@@ -30,6 +32,33 @@ GENERATED_TARGET_RE = re.compile(
 
 
 class ReleaseSupplyChainTests(unittest.TestCase):
+    def test_release_handoff_requires_public_install_before_owner_testing(self):
+        agent_instructions = re.sub(
+            r"\s+", " ", AGENT_INSTRUCTIONS.read_text(encoding="utf-8")
+        )
+        workflow = re.sub(
+            r"\s+", " ", HARDENING_WORKFLOW.read_text(encoding="utf-8")
+        )
+
+        for fragment in (
+            "only a *prepared release candidate*",
+            "the exact commit is on remote `main`",
+            "the canonical publisher reaches `public_verified`",
+            "fresh unauthenticated",
+            "never ask them to check out or locally test repository `main`",
+            "Do not pause for a redundant push/tag/",
+        ):
+            self.assertIn(fragment, agent_instructions)
+
+        for fragment in (
+            "The product owner does not test local `main`",
+            "Product-owner acceptance starts from a fresh `curl` installation",
+            "A local checkpoint is described as `prepared` or `release candidate`",
+            "This is standing publication authorization",
+            "any release-bound completion claim is backed by the remote-main",
+        ):
+            self.assertIn(fragment, workflow)
+
     def test_all_remote_actions_are_pinned_to_full_commit_shas(self):
         for workflow in sorted(WORKFLOW_DIR.glob("*.y*ml")):
             text = workflow.read_text(encoding="utf-8")
@@ -857,15 +886,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.28.1\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.1^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.2\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.2^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.28.1\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.28.2\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.28.1\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.28.1^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.28.2\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.28.2^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -878,7 +907,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.28.1",
+                "GITHUB_REF": "refs/tags/v0.28.2",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -897,8 +926,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.28.1", output)
-        self.assertIn("tag=v0.28.1", output)
+        self.assertIn("version=0.28.2", output)
+        self.assertIn("tag=v0.28.2", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")
