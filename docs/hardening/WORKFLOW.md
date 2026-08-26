@@ -29,6 +29,11 @@ after context compaction, a new agent session, or a maintainer handoff.
   The product owner does not test local `main`, agent worktrees, local commits,
   or locally built images as the normal release gate. Product-owner acceptance
   starts from a fresh `curl` installation only after the new version is public.
+- Every tracked in-scope change is release-bound by default, including
+  documentation and tests. “Test first” means validate the public release; it
+  does not stop the flow before publication. Stop at a prepared local
+  checkpoint only for an explicit user request to keep the work local or not
+  publish yet.
 - Security claims must describe effective behavior, not intended behavior.
 
 ## Trust model decision

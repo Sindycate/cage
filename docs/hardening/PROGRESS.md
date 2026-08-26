@@ -3,6 +3,20 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-26 — v0.30.2 AWS CLI settings moved to reusable presets for the TUI
+
+Moved profile-pinned AWS CLI editing to reusable presets so `Authentication
+profiles` remain focused on tool/provider auth. Preset-level `aws_access` and
+`aws_profile` values take precedence; auth-level values remain a compatibility
+fallback for existing configurations and Claude Bedrock retains its auth-level
+AWS settings. The TUI now edits and displays the effective preset-level relay.
+
+Verification: focused resolver/TUI suite `94 passed`; complete suite `540
+passed, 13 skipped`; Python compilation, shell syntax, Compose rendering, and
+`git diff --check` passed. This versioned release checkpoint is the clean input
+to the canonical publisher; handoff remains pending until it reaches
+`public_verified`.
+
 ## 2026-08-26 — v0.30.0 CI caught upstream OpenCode contract drift; v0.30.1 prepared
 
 The v0.30.0 commit was pushed by the canonical publisher, but both allowed CI

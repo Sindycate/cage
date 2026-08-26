@@ -3,6 +3,14 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## Unreleased
+
+## 0.30.2 — 2026-08-26
+
+- make profile-pinned AWS CLI settings first-class reusable-preset and TUI
+  fields; legacy auth-level AWS settings remain a compatibility fallback, and
+  Claude Bedrock auth retains its own AWS profile/region settings.
+
 ## 0.30.1 — 2026-08-26
 
 - refresh the OpenCode image contract for the current upstream binary minifier,

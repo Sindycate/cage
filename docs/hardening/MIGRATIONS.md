@@ -4,6 +4,18 @@ This file records user-visible and configuration migrations introduced by the
 hardening workflow. Entries move from **Unreleased** to a concrete version only
 when that version is committed and tagged.
 
+## Unreleased
+
+## 0.30.2 — 2026-08-26
+
+### AWS CLI settings belong to reusable presets
+
+New TUI configurations set `aws_access = "host-cli"` and `aws_profile` on the
+reusable preset. Existing configurations with these values on an auth block
+continue to work as a compatibility fallback, but preset values take
+precedence. Claude Bedrock's own `aws_profile` and `aws_region` remain valid
+auth-profile settings.
+
 ## 0.30.1 — 2026-08-26
 
 ### OpenCode image contract refresh
@@ -18,9 +30,11 @@ callback, isolation, or `--pure` contracts.
 ### Profile-pinned host AWS CLI access
 
 Container presets can opt into a host-side AWS CLI relay with
-`aws_access = "host-cli"` and a non-empty `aws_profile` (on the selected auth
-block or directly on the preset). Cage creates a reserved `aws` shim in the
-container and invokes the host-installed AWS CLI with the selected profile.
+`aws_access = "host-cli"` and a non-empty `aws_profile` directly on the
+selected preset. Cage creates a reserved `aws` shim in the container and
+invokes the host-installed AWS CLI with the selected profile. Older
+configurations with these values on the selected auth block continue to work
+as a compatibility fallback, but preset values take precedence.
 The host AWS configuration, SSO cache, keychain integration, and browser flow
 remain on the host; no AWS credential directory or ambient AWS credential
 environment variables are mounted for this relay. Use separate presets when

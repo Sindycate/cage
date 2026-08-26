@@ -36,9 +36,9 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
     "auth": [
         ("tool", "Tool", "tool"), ("mode", "Claude auth mode", "auth_mode"),
         ("env", "Environment variable names", "list"),
-        ("aws_profile", "AWS profile", "text"),
-        ("aws_access", "AWS access", "aws_access"),
-        ("aws_region", "AWS region", "text"),
+        ("aws_profile", "AWS profile (Claude Bedrock / legacy)", "text"),
+        ("aws_access", "Legacy AWS CLI access (prefer preset)", "aws_access"),
+        ("aws_region", "AWS region (Claude Bedrock)", "text"),
         ("host_codex_dir", "Host Codex directory", "text"),
         ("host_opencode_config_dir", "Host OpenCode config directory", "text"),
         ("host_opencode_data_dir", "Host OpenCode data directory", "text"),
@@ -971,6 +971,14 @@ class CursesView:
             return None
         return "" if choice == "__none" else choice
 
+    def _aws_setting(self, preset: dict[str, Any], key: str) -> tuple[str, str]:
+        if preset.get(key):
+            return str(preset[key]), "preset"
+        auth = self.controller.data.get("auth", {}).get(preset.get("auth", ""), {})
+        if isinstance(auth, dict) and auth.get(key):
+            return str(auth[key]), "auth"
+        return "", "unset"
+
     def edit_preset(self, preset: dict[str, Any]) -> dict[str, Any] | None:
         value = dict(preset)
         value["tool"] = self.controller.tool_override or value.get("tool", "codex")
@@ -998,11 +1006,25 @@ class CursesView:
             target_label = execution_target_label(str(target_value))
             if self.controller.target_override:
                 target_label += " (command override)"
+            aws_access, aws_access_source = self._aws_setting(value, "aws_access")
+            aws_profile, aws_profile_source = self._aws_setting(value, "aws_profile")
+            aws_access_label = (
+                f"{aws_access} (from {aws_access_source})"
+                if aws_access
+                else "disabled"
+            )
+            aws_profile_label = (
+                f"{aws_profile} (from {aws_profile_source})"
+                if aws_profile
+                else "unset"
+            )
             rows = [
                 ("tool", f"Tool: {value.get('tool', 'codex')}"),
                 ("target", f"Execution: {target_label}"),
                 ("profile", f"Codex profile: {value.get('codex_profile', 'base config')}"),
                 ("auth", f"Auth: {value.get('auth', 'none')}"),
+                ("aws_access", f"AWS CLI access: {aws_access_label}"),
+                ("aws_profile", f"AWS profile: {aws_profile_label}"),
                 ("identity", f"Identity: {value.get('identity', 'none')}"),
                 ("mcp", f"MCP packs (selected packs only): {', '.join(value.get('mcp_packs', [])) or 'none'}"),
                 ("skills", f"Skill packs: {', '.join(value.get('skill_packs', [])) or 'none'}"),
@@ -1108,6 +1130,28 @@ class CursesView:
                     value[choice] = selected
                     if not selected:
                         value.pop(choice, None)
+            elif choice == "aws_access":
+                selected = self.select_value(
+                    "AWS CLI access",
+                    ["host-cli"],
+                    aws_access,
+                )
+                if selected is not None:
+                    if selected:
+                        value["aws_access"] = selected
+                    else:
+                        value.pop("aws_access", None)
+            elif choice == "aws_profile":
+                raw = self.prompt(
+                    "AWS profile",
+                    "Host AWS profile for the fixed AWS CLI relay. Erase all text to clear.",
+                    aws_profile,
+                )
+                if raw is not None:
+                    if raw in ("", "-"):
+                        value.pop("aws_profile", None)
+                    else:
+                        value["aws_profile"] = raw
             elif choice in ("mcp", "skills", "commands"):
                 key, collection = {
                     "mcp": ("mcp_packs", "mcp_packs"),
@@ -1335,8 +1379,7 @@ class CursesView:
                 else:
                     cursor = "new"
 
-    @staticmethod
-    def _preset_summary(preset: dict[str, Any]) -> list[str]:
+    def _preset_summary(self, preset: dict[str, Any]) -> list[str]:
         sync = (
             "default" if "session_sync" not in preset
             else "on" if preset.get("session_sync") is True
@@ -1352,11 +1395,15 @@ class CursesView:
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
-        if preset.get("aws_access") == "host-cli":
+        aws_access, _ = self._aws_setting(preset, "aws_access")
+        aws_profile, _ = self._aws_setting(preset, "aws_profile")
+        if aws_access == "host-cli":
             lines.append(
                 "AWS host CLI: enabled "
-                f"(profile {preset.get('aws_profile', '(from auth)')}; bypasses Netgate)"
+                f"(profile {aws_profile or '(missing)'}; bypasses Netgate)"
             )
+        elif aws_profile:
+            lines.append(f"AWS profile: {aws_profile}")
         if preset.get("tool") == "opencode":
             lines.append(
                 "OpenCode plugins: "
@@ -1878,6 +1925,13 @@ class CursesView:
                     f"Yolo: {'on' if shown_yolo else 'off'}"
                     + (" (command override)" if self.controller.yolo_override else ""),
                 ]
+                if effective.get("aws_access") == "host-cli":
+                    details.append(
+                        "AWS host CLI: enabled "
+                        f"(profile {effective.get('aws_profile') or '(missing)'}; bypasses Netgate)"
+                    )
+                elif effective.get("aws_profile"):
+                    details.append(f"AWS profile: {effective['aws_profile']}")
                 if self.controller.tool_override and effective.get("tool") != self.controller.tool_override:
                     details.append(
                         f"Command requires {self.controller.tool_override}; customize or choose a matching saved configuration."

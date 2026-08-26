@@ -1104,21 +1104,34 @@ def resolve_config(
         raise ConfigError(f"identity {identity_name!r} must be a table")
     resolved.identity_name = identity_name or ""
 
-    aws_profile = auth.get("aws_profile") or preset.get("aws_profile") or ""
-    aws_access = auth.get("aws_access") or preset.get("aws_access") or ""
+    # AWS CLI access is a launch capability, so a preset is authoritative when
+    # it specifies one. Keep auth-level values as a compatibility fallback for
+    # older configurations and for Claude Bedrock auth profiles.
+    aws_profile = preset.get("aws_profile") or auth.get("aws_profile") or ""
+    aws_access = preset.get("aws_access") or auth.get("aws_access") or ""
+    aws_profile_label = (
+        f"presets.{preset_name}.aws_profile"
+        if preset.get("aws_profile")
+        else f"auth.{auth_name or preset_name}.aws_profile"
+    )
+    aws_access_label = (
+        f"presets.{preset_name}.aws_access"
+        if preset.get("aws_access")
+        else f"auth.{auth_name or preset_name}.aws_access"
+    )
     if not isinstance(aws_profile, str):
         raise ConfigError(
-            f"auth.{auth_name or preset_name}.aws_profile must be a string"
+            f"{aws_profile_label} must be a string"
         )
     if not isinstance(aws_access, str):
         raise ConfigError(
-            f"auth.{auth_name or preset_name}.aws_access must be a string"
+            f"{aws_access_label} must be a string"
         )
     if aws_profile:
         try:
             bridge_policy.validate_aws_profile(
                 aws_profile,
-                f"auth.{auth_name or preset_name}.aws_profile",
+                aws_profile_label,
             )
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc

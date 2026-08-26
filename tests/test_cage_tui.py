@@ -219,6 +219,33 @@ extra_mounts = [{ path = "/tmp/output", mode = "rw" }]
             self.assertTrue(any("bypasses Cage's Netgate" in item for item in risks))
             self.assertTrue(any("aws command not found" in item for item in warnings))
 
+    def test_preset_summary_discloses_inherited_aws_host_cli(self):
+        controller = StubController()
+        controller.data["auth"]["codex"] = {
+            "tool": "codex",
+            "aws_profile": "lounge-test.ReadOnly",
+            "aws_access": "host-cli",
+        }
+        view = cage_tui.CursesView(FakeScreen(), controller)
+
+        summary = view._preset_summary({"tool": "codex", "auth": "codex"})
+
+        combined = " ".join(summary)
+        self.assertIn("AWS host CLI: enabled", combined)
+        self.assertIn("lounge-test.ReadOnly", combined)
+
+    def test_edit_preset_writes_aws_settings_directly_on_preset(self):
+        controller = StubController()
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        choices = iter(["aws_access", "host-cli", "aws_profile", "done"])
+        view.menu = lambda *_args, **_kwargs: next(choices)
+        view.prompt = lambda *_args, **_kwargs: "lounge-test.Manual"
+
+        edited = view.edit_preset({"tool": "codex"})
+
+        self.assertEqual(edited["aws_access"], "host-cli")
+        self.assertEqual(edited["aws_profile"], "lounge-test.Manual")
+
     def test_prompt_escape_cancels_without_enter(self):
         view = cage_tui.CursesView(FakeScreen(["\x1b"]), StubController())
 

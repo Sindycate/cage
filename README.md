@@ -432,12 +432,16 @@ host-command definition, but `cage config doctor` warns about that compatibility
 path so the definition can be simplified.
 
 The built-in AWS host CLI relay is separate from generic `host_commands`. Set
-`aws_access = "host-cli"` together with one `aws_profile` on the auth block or
-preset; Cage adds a reserved `aws` shim automatically and starts the same
-authenticated host bridge. Do not define a generic host command named `aws` in
-that preset. The bridge uses the host AWS executable and host browser/SSO state,
-so it is intentionally disclosed as a host-integrated authority and bypasses
-Netgate. It is unavailable with `--net off` and with host-native Codex targets.
+`aws_access = "host-cli"` together with one `aws_profile` directly on the
+reusable preset; Cage adds a reserved `aws` shim automatically and starts the
+same authenticated host bridge. Do not define a generic host command named
+`aws` in that preset. Older configurations may keep these values on an auth
+block as a compatibility fallback, but preset values take precedence. The TUI
+edits the relay settings on the reusable preset; auth profiles remain for tool
+authentication, except for Claude Bedrock's own AWS settings. The bridge uses
+the host AWS executable and host browser/SSO state, so it is intentionally
+disclosed as a host-integrated authority and bypasses Netgate. It is unavailable
+with `--net off` and with host-native Codex targets.
 
 For Claude OAuth MCP servers, select the same central MCP pack from a Claude
 preset and authenticate inside the cage session with Claude's `/mcp` command.

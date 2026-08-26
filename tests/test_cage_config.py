@@ -125,6 +125,26 @@ class CageConfigTests(unittest.TestCase):
         self.assertIn("AWS host CLI enabled", resolved.warnings[0])
         self.assertEqual(resolved.public_dict()["auth"]["aws_access"], "host-cli")
 
+    def test_preset_aws_settings_override_legacy_auth_values(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"].update(
+            {
+                "aws_profile": "aws-staging.ReadOnly",
+                "aws_access": "host-cli",
+            }
+        )
+        data["presets"]["codex-main"].update(
+            {
+                "aws_profile": "aws-staging.Manual",
+                "aws_access": "host-cli",
+            }
+        )
+
+        resolved = self.resolve(data)
+
+        self.assertEqual(resolved.aws_profile, "aws-staging.Manual")
+        self.assertEqual(resolved.aws_access, "host-cli")
+
     def test_aws_host_cli_access_requires_profile_and_container_target(self):
         data = self.base_config()
         data["auth"]["codex-oauth"]["aws_access"] = "host-cli"
