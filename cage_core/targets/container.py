@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .. import config, opencode_policy, storage
+from .. import bridge as bridge_policy, config, opencode_policy, storage
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -199,6 +199,24 @@ def _temporary_path(
 def _validate_before_effects(runtime: ContainerRuntime) -> None:
     plan = runtime.plan
     resolved = runtime.resolved
+    if resolved.aws_access:
+        if resolved.aws_access != bridge_policy.AWS_ACCESS_HOST_CLI:
+            raise ContainerTargetError(
+                f"unsupported AWS access mode: {resolved.aws_access}"
+            )
+        if not resolved.aws_profile:
+            raise ContainerTargetError(
+                "AWS host CLI access requires a selected AWS profile"
+            )
+        if plan.network == "off":
+            raise ContainerTargetError(
+                'aws_access = "host-cli" cannot be combined with --net off'
+            )
+        if shutil.which(bridge_policy.AWS_COMMAND_NAME) is None:
+            raise ContainerTargetError(
+                "AWS host CLI access was selected, but the host 'aws' command "
+                "was not found in PATH"
+            )
     if plan.tool == "claude":
         mode = resolved.claude_auth or "bedrock"
         if mode == "api-key" and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -624,8 +642,26 @@ def _start_bridge(
     kind: str,
     definitions: list[dict[str, str]],
     already_has_host_gateway: bool,
+    aws_profile: str = "",
 ) -> BridgeResult | None:
-    if not definitions:
+    selected_definitions = list(definitions)
+    if aws_profile:
+        if kind != "host-command":
+            raise ContainerTargetError(
+                "AWS host CLI access requires the host-command bridge"
+            )
+        if any(
+            str(item.get("name", "")).upper()
+            == bridge_policy.AWS_COMMAND_NAME.upper()
+            for item in selected_definitions
+        ):
+            raise ContainerTargetError(
+                "host command name 'aws' is reserved for AWS host CLI access"
+            )
+        selected_definitions.append(
+            {"name": bridge_policy.AWS_COMMAND_NAME, "command": "aws"}
+        )
+    if not selected_definitions:
         return None
     if runtime.plan.network == "off":
         noun = "stdio MCP servers" if kind == "mcp" else "host commands"
@@ -638,13 +674,17 @@ def _start_bridge(
     for root in runtime.writable_roots:
         bridge_args.extend(("--deny-executable-root", root))
     for name in runtime.resolved.extra_env:
+        if runtime.resolved.aws_access and name.startswith("AWS_"):
+            continue
         bridge_args.extend(("--pass-env", name))
     option = "--server" if kind == "mcp" else "--command"
     value_key = "command"
-    for definition in definitions:
+    for definition in selected_definitions:
         bridge_args.extend(
             (option, definition["name"], definition[value_key])
         )
+    if aws_profile:
+        bridge_args.extend(("--aws-profile", aws_profile))
     output_path = _temporary_path(
         runtime, prefix=f"cage-{kind}-bridge-output-"
     )
@@ -672,7 +712,7 @@ def _start_bridge(
     )
     prefix = "SERVER" if kind == "mcp" else "COMMAND"
     ports = _parse_bridge_ports(output_path, prefix)
-    if len(ports) != len(definitions):
+    if len(ports) != len(selected_definitions):
         raise ContainerTargetError(f"{display} returned an invalid port map")
     docker_arguments: list[str] = []
     for name, port in ports:
@@ -724,7 +764,7 @@ def _start_bridge(
             "CAGE_HOST_COMMANDS",
             " ".join(names),
         )
-        label = " [HOST-CMD]"
+        label = " [HOST-CMD + AWS]" if aws_profile else " [HOST-CMD]"
         runtime.host_command_label = label
     if not already_has_host_gateway:
         docker_arguments.extend(
@@ -898,7 +938,11 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
                     "CAGE_DESKTOP_REMOTE=1",
                     "-e",
                     "CAGE_DESKTOP_ENV_NAMES="
-                    + " ".join(resolved.extra_env),
+                    + " ".join(
+                        name
+                        for name in resolved.extra_env
+                        if not resolved.aws_access or not name.startswith("AWS_")
+                    ),
                     "-v",
                     os.environ["CAGE_DESKTOP_PUBLIC_KEY"]
                     + ":/cage-desktop/client.pub:ro",
@@ -972,6 +1016,8 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
             runtime, arguments, "SSH_HOST", resolved.ssh_host
         )
     for name in resolved.extra_env:
+        if resolved.aws_access and name.startswith("AWS_"):
+            continue
         value = os.environ.get(name)
         if value:
             _append_environment_argument(runtime, arguments, name, value)
@@ -1209,6 +1255,11 @@ def run_container_target(
             definitions=runtime.resolved.host_commands,
             already_has_host_gateway=(
                 prepared.plan.network == "gate" or mcp is not None
+            ),
+            aws_profile=(
+                runtime.resolved.aws_profile
+                if runtime.resolved.aws_access == bridge_policy.AWS_ACCESS_HOST_CLI
+                else ""
             ),
         )
         if runtime.resolved.remote_mcp and not runtime.mcp_label:

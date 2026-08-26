@@ -3,6 +3,23 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-26 — profile-pinned host AWS CLI relay prepared for v0.30.0
+
+Added an additive `aws_access = "host-cli"` capability for container and
+Desktop Codex launches plus Claude/OpenCode container launches. Cage selects a
+fixed `aws_profile`, starts the existing authenticated host-command bridge, and
+creates an in-container `aws` shim; the host AWS CLI retains its normal SSO,
+browser, config, and cache behavior. The relay rejects profile/configuration/
+debug overrides, `configure`, and `sso logout`, scrubs ambient `AWS_*` values,
+and remains explicitly outside Netgate. IAM policy remains the permission
+boundary; `--net off` and host-native execution fail closed.
+
+Added resolver, plan, bridge, launcher, TUI, migration, and security coverage.
+Verification: complete suite `523 passed, 15 skipped`; Python compilation,
+shell syntax, and `git diff --check` passed. At checkpoint creation, no commit,
+push, tag, release, or registry mutation had occurred; the clean versioned
+commit is the input to the canonical publisher.
+
 ## 2026-08-17 — Python 3.12 host policy prepared for v0.29.0
 
 Cage now requires Python 3.12 or newer for host launch, installation, and the

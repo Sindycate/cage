@@ -182,6 +182,43 @@ extra_mounts = [{ path = "/tmp/output", mode = "rw" }]
             self.assertTrue(any("GitHub credentials" in item for item in risks))
             self.assertTrue(any("MCP integration" in item for item in risks))
 
+    def test_controller_discloses_profile_pinned_aws_host_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            result = root / "result.json"
+            result.touch(mode=0o600)
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        'default_preset = "main"',
+                        "[auth.codex]",
+                        'tool = "codex"',
+                        'aws_profile = "aws-staging.ReadOnly"',
+                        'aws_access = "host-cli"',
+                        "[presets.main]",
+                        'tool = "codex"',
+                        'auth = "codex"',
+                        'net = "gate"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            controller = cage_tui.Controller(ROOT / "cage-config.py", config, root, result)
+
+            _name, preset = controller.effective_preset()
+            risks = controller.risks(preset)
+            with patch.object(cage_tui.shutil, "which", return_value=None):
+                warnings = controller.preflight(preset)
+
+            self.assertEqual(controller.snapshot["effective"]["aws_profile"], "aws-staging.ReadOnly")
+            self.assertEqual(controller.snapshot["effective"]["aws_access"], "host-cli")
+            self.assertTrue(any("fixed profile aws-staging.ReadOnly" in item for item in risks))
+            self.assertTrue(any("bypasses Cage's Netgate" in item for item in risks))
+            self.assertTrue(any("aws command not found" in item for item in warnings))
+
     def test_prompt_escape_cancels_without_enter(self):
         view = cage_tui.CursesView(FakeScreen(["\x1b"]), StubController())
 

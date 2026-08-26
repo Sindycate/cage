@@ -51,6 +51,94 @@ BASE_ENV_NAMES = (
     "__CF_USER_TEXT_ENCODING",
 )
 
+AWS_COMMAND_NAME = "aws"
+AWS_ACCESS_HOST_CLI = "host-cli"
+AWS_PROFILE_MAX_LENGTH = 256
+AWS_PROFILE_ENV_NAMES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CA_BUNDLE",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+}
+AWS_BLOCKED_ARGUMENTS = {
+    "--debug",
+    "--no-verify-ssl",
+    "--profile",
+    "--endpoint-url",
+    "--ca-bundle",
+    "--cli-config-file",
+}
+AWS_BLOCKED_PREFIXES = (
+    "--debug=",
+    "--no-verify-ssl=",
+    "--profile=",
+    "--endpoint-url=",
+    "--ca-bundle=",
+    "--cli-config-file=",
+)
+
+
+def validate_aws_profile(value: object, label: str = "AWS profile") -> str:
+    """Validate one profile name before it enters a host-side argv list."""
+
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    if len(value) > AWS_PROFILE_MAX_LENGTH:
+        raise ValueError(
+            f"{label} must be at most {AWS_PROFILE_MAX_LENGTH} characters"
+        )
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise ValueError(f"{label} must not contain NUL or newline characters")
+    return value
+
+
+def scrub_aws_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Remove ambient AWS identity/configuration overrides for one host call."""
+
+    sanitized = dict(environment)
+    for name in list(sanitized):
+        if name in AWS_PROFILE_ENV_NAMES or name.startswith("AWS_"):
+            sanitized.pop(name, None)
+    return sanitized
+
+
+def validate_aws_client_arguments(arguments: list[str]) -> None:
+    """Reject arguments that could escape the selected host AWS profile.
+
+    The host CLI is deliberately still a broad AWS capability: IAM policy is
+    the authority for which AWS actions succeed. Cage does, however, keep the
+    selected profile and host credential/configuration sources fixed, and
+    blocks debug/configuration options that could expose or redirect them.
+    """
+
+    for argument in arguments:
+        if argument in AWS_BLOCKED_ARGUMENTS or argument.startswith(
+            AWS_BLOCKED_PREFIXES
+        ):
+            raise ValueError(
+                f"AWS argument {argument!r} is managed or blocked by Cage"
+            )
+    if "configure" in arguments:
+        raise ValueError(
+            "AWS configure commands are blocked by Cage; use the host AWS CLI"
+        )
+    for first, second in zip(arguments, arguments[1:]):
+        if first == "sso" and second == "logout":
+            raise ValueError(
+                "AWS SSO logout is blocked by Cage; use the host AWS CLI"
+            )
+
 
 class BridgeRuntime:
     """Track connections and process groups for fail-closed shutdown."""

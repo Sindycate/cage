@@ -26,6 +26,8 @@ credentials.
 - **Claude Code:** `ANTHROPIC_API_KEY` env var, or AWS Bedrock credentials in `~/.aws/credentials`
 - **Codex CLI:** Codex auth on host (`~/.codex/`) or `OPENAI_API_KEY` env var
 - **OpenCode:** provider auth from the selected OpenCode XDG data directory, or provider environment variables
+- **Optional AWS host CLI access:** the host AWS CLI (`aws`) installed and already
+  able to use the selected profile; browser-backed SSO remains a host-side flow
 
 Start Colima with enough memory (macOS, Claude Code needs 4GB+):
 
@@ -429,6 +431,14 @@ Cage still de-duplicates an exact caller suffix already embedded in a legacy
 host-command definition, but `cage config doctor` warns about that compatibility
 path so the definition can be simplified.
 
+The built-in AWS host CLI relay is separate from generic `host_commands`. Set
+`aws_access = "host-cli"` together with one `aws_profile` on the auth block or
+preset; Cage adds a reserved `aws` shim automatically and starts the same
+authenticated host bridge. Do not define a generic host command named `aws` in
+that preset. The bridge uses the host AWS executable and host browser/SSO state,
+so it is intentionally disclosed as a host-integrated authority and bypasses
+Netgate. It is unavailable with `--net off` and with host-native Codex targets.
+
 For Claude OAuth MCP servers, select the same central MCP pack from a Claude
 preset and authenticate inside the cage session with Claude's `/mcp` command.
 No container port publishing is required for this first version; if the browser
@@ -479,6 +489,55 @@ host_codex_dir = "~/.codex-company"
 copy_auth = false
 env = ["COMPANY_OPENAI_API_KEY", "OPENAI_BASE_URL"]
 ```
+
+### AWS CLI access from a cage session
+
+When an agent needs the AWS CLI, use a profile-pinned host relay. This keeps the
+host AWS CLI, its `~/.aws/config`, SSO cache, keychain integration, and browser
+flow on the host; Cage does not mount the AWS configuration or forward ambient
+AWS credential variables into the container.
+This describes the relay; Claude's separate `mode = "bedrock"` authentication
+still uses its existing read-only `~/.aws/credentials` mount.
+
+```toml
+[presets.aws-prod-readonly]
+tool = "codex"
+aws_profile = "aws-prod.ReadOnly"
+aws_access = "host-cli"
+net = "gate"
+
+[presets.aws-staging-readonly]
+tool = "codex"
+aws_profile = "aws-staging.ReadOnly"
+aws_access = "host-cli"
+net = "gate"
+
+[presets.aws-staging-manual]
+tool = "codex"
+aws_profile = "aws-staging.Manual"
+aws_access = "host-cli"
+net = "gate"
+```
+
+Use one preset per profile and relaunch Cage to switch profiles. Inside the
+session, the existing host AWS CLI is available as `aws`; for example:
+
+```bash
+aws sso login
+aws sts get-caller-identity
+```
+
+The SSO browser opens on the host. If the relay cannot open a browser in a
+particular desktop setup, run `aws sso login --profile PROFILE` on the host
+before launching the session. `aws --profile ...`, `aws configure`, `aws sso
+logout`, endpoint/config-file overrides, and debug options are blocked so the
+agent cannot switch the selected profile or redirect the host CLI's credential
+sources. The selected profile's IAM policy is still the authority: names such
+as `ReadOnly` and `Manual` are not Cage-enforced permissions. Because this is a
+host-integrated capability, AWS CLI traffic bypasses Netgate and `--net off` is
+not allowed with `aws_access = "host-cli"`. The host process still runs as the
+host user, so this is not a separate filesystem sandbox: review commands that
+name local files or write AWS resources.
 
 ### Named Codex profiles and providers
 
@@ -553,8 +612,9 @@ Host execution is **Codex-only** and provides:
   rewritten.
 - Pinned Codex executable — rejected if inside the repository.
 
-Unsupported in host mode (fail closed): host command bridges, extra mounts,
-custom `host_agents_dir`/skill-pack sources, and `ssh_host` aliases.
+Unsupported in host mode (fail closed): host command bridges, profile-pinned AWS
+host CLI access, extra mounts, custom `host_agents_dir`/skill-pack sources, and
+`ssh_host` aliases.
 
 ## ChatGPT Desktop via Cage
 
@@ -659,6 +719,12 @@ Unlisted host paths are not directly mounted. Selected host commands/MCP bridges
 can still access the host with the configured command's authority, credentials
 can be used from inside the container, and enabled session/OAuth synchronization
 writes selected state back outside the repository. See [SECURITY.md](SECURITY.md).
+
+When `aws_access = "host-cli"` is selected, the container gets an `aws` shim
+that relays to the profile-pinned host AWS CLI. No `~/.aws` directory or AWS
+credential environment variables are mounted for that relay; the host CLI uses
+its own browser/SSO and credential state. This is a deliberate host-integrated
+escape from the container's Netgate path, not an AWS read-only sandbox.
 
 On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials in `.credentials.json` are synchronized by the host launcher before and after the run so refresh-token rotation persists outside the container volume.
 
@@ -967,6 +1033,7 @@ not enforced egress isolation: code can ignore the proxy environment variables.
 - Network gating dialogs use native macOS popups (`osascript`); on Linux, prompts appear in the terminal
 - Network gating only covers HTTP/HTTPS via proxy env vars — raw TCP, SSH, and DNS bypass the proxy
 - The per-launch proxy credential prevents unrelated local/LAN clients from using Netgate, but any process in the selected container can read and use that credential
+- Profile-pinned AWS host CLI access is intentionally outside the container and bypasses Netgate; IAM policy, not the profile name or Cage, determines whether an AWS action is allowed
 - The repository, including `.git`, ignored files, and untracked files, is fully writable; `git checkout .` is not a complete recovery mechanism
 - Read-only credential mounts prevent modification, not reading, use, copying, or exfiltration
 - MCP/host-command bridges and external connector actions extend the blast radius beyond local files

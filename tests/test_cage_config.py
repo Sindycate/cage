@@ -109,6 +109,64 @@ class CageConfigTests(unittest.TestCase):
         self.assertEqual(resolved.storage_policy.warn_free_gib, 20)
         self.assertEqual(resolved.storage_policy.critical_free_gib, 5)
 
+    def test_resolves_profile_pinned_host_aws_cli_access(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"].update(
+            {
+                "aws_profile": "aws-staging.ReadOnly",
+                "aws_access": "host-cli",
+            }
+        )
+
+        resolved = self.resolve(data)
+
+        self.assertEqual(resolved.aws_profile, "aws-staging.ReadOnly")
+        self.assertEqual(resolved.aws_access, "host-cli")
+        self.assertIn("AWS host CLI enabled", resolved.warnings[0])
+        self.assertEqual(resolved.public_dict()["auth"]["aws_access"], "host-cli")
+
+    def test_aws_host_cli_access_requires_profile_and_container_target(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"]["aws_access"] = "host-cli"
+        with self.assertRaisesRegex(cage_config.ConfigError, "requires an aws_profile"):
+            self.resolve(data)
+
+        data = self.base_config()
+        data["auth"]["codex-oauth"].update(
+            {"aws_profile": "aws-staging.ReadOnly", "aws_access": "host-cli"}
+        )
+        data["presets"]["codex-main"]["target"] = "host"
+        with self.assertRaisesRegex(cage_config.ConfigError, "requires container execution"):
+            self.resolve(data)
+
+    def test_non_claude_aws_profile_requires_explicit_host_cli_access(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"]["aws_profile"] = "aws-staging.ReadOnly"
+        with self.assertRaisesRegex(cage_config.ConfigError, "requires.*aws_access"):
+            self.resolve(data)
+
+    def test_aws_host_cli_reserves_aws_host_command_name(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"].update(
+            {"aws_profile": "aws-staging.ReadOnly", "aws_access": "host-cli"}
+        )
+        data["host_commands"]["aws"] = {"command": "aws"}
+        data["presets"]["codex-main"]["host_commands"] = ["aws"]
+        with self.assertRaisesRegex(cage_config.ConfigError, "reserved"):
+            self.resolve(data)
+
+    def test_aws_host_cli_rejects_forwarded_aws_environment_names(self):
+        data = self.base_config()
+        data["auth"]["codex-oauth"].update(
+            {
+                "aws_profile": "aws-staging.ReadOnly",
+                "aws_access": "host-cli",
+                "env": ["AWS_PROFILE"],
+            }
+        )
+        with self.assertRaisesRegex(cage_config.ConfigError, "cannot forward AWS"):
+            self.resolve(data)
+
     def test_storage_policy_is_strict_and_resolved(self):
         data = self.base_config()
         data["storage"] = {

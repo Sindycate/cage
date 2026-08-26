@@ -126,6 +126,31 @@ def send_error(conn, lock, message):
         pass
 
 
+def finish_rejected_connection(conn):
+    """Gracefully finish a request rejected before a child process starts.
+
+    The relay sends stdin EOF immediately after its argv frame. Draining that
+    pending input before closing prevents macOS from turning a close with
+    unread peer data into a TCP reset, which could hide the explicit exit code.
+    """
+
+    try:
+        conn.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    try:
+        conn.settimeout(0.25)
+        while conn.recv(BUFSIZE):
+            pass
+    except (OSError, TimeoutError):
+        pass
+    finally:
+        try:
+            conn.settimeout(None)
+        except OSError:
+            pass
+
+
 def parse_client_argv(payload):
     try:
         value = json.loads(payload.decode("utf-8"))
@@ -146,7 +171,7 @@ def parse_client_argv(payload):
     return value
 
 
-def effective_command_argv(base_argv, client_argv):
+def effective_command_argv(base_argv, client_argv, aws_profile=""):
     """Append caller arguments except for the exact legacy duplicate case.
 
     Before Cage 0.23.0, host-command shims did not forward caller arguments, so
@@ -156,6 +181,11 @@ def effective_command_argv(base_argv, client_argv):
     execute the arguments twice and make authentication fail. Preserve general
     argument forwarding while de-duplicating only that exact compatibility case.
     """
+    if aws_profile:
+        bridge_common.validate_aws_profile(aws_profile)
+        bridge_common.validate_aws_client_arguments(client_argv)
+        return list(base_argv) + ["--profile", aws_profile] + list(client_argv)
+
     fixed_arguments = base_argv[1:]
     if fixed_arguments and client_argv == fixed_arguments:
         return list(base_argv)
@@ -174,17 +204,43 @@ def status_code(returncode):
     return min(255, returncode)
 
 
-def run_command(conn, base_argv, client_argv, cwd, child_env, runtime, limits):
+def run_command(
+    conn,
+    base_argv,
+    client_argv,
+    cwd,
+    child_env,
+    runtime,
+    limits,
+    aws_profile="",
+):
     process_timeout, max_input, max_output = limits
     send_lock = threading.Lock()
     try:
+        command_argv = effective_command_argv(
+            base_argv, client_argv, aws_profile=aws_profile
+        )
+    except ValueError as exc:
+        send_error(conn, send_lock, str(exc))
+        try:
+            send_frame(conn, send_lock, FRAME_EXIT, b'{"code":126}')
+        except (OSError, TimeoutError):
+            pass
+        finish_rejected_connection(conn)
+        return
+    try:
+        command_env = (
+            bridge_common.scrub_aws_environment(child_env)
+            if aws_profile
+            else child_env
+        )
         proc = subprocess.Popen(
-            effective_command_argv(base_argv, client_argv),
+            command_argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
-            env=child_env,
+            env=command_env,
             shell=False,
             start_new_session=True,
         )
@@ -194,6 +250,7 @@ def run_command(conn, base_argv, client_argv, cwd, child_env, runtime, limits):
             send_frame(conn, send_lock, FRAME_EXIT, b'{"code":126}')
         except (OSError, TimeoutError):
             pass
+        finish_rejected_connection(conn)
         return
 
     runtime.add_process(proc)
@@ -317,7 +374,16 @@ def run_command(conn, base_argv, client_argv, cwd, child_env, runtime, limits):
     runtime.remove_process(proc)
 
 
-def serve_one(server_sock, base_argv, token, cwd, child_env, runtime, limits):
+def serve_one(
+    server_sock,
+    base_argv,
+    token,
+    cwd,
+    child_env,
+    runtime,
+    limits,
+    aws_profile="",
+):
     while not runtime.shutdown.is_set():
         try:
             server_sock.settimeout(0.5)
@@ -344,7 +410,16 @@ def serve_one(server_sock, base_argv, token, cwd, child_env, runtime, limits):
                 continue
             finally:
                 conn.settimeout(None)
-            run_command(conn, base_argv, client_argv, cwd, child_env, runtime, limits)
+            run_command(
+                conn,
+                base_argv,
+                client_argv,
+                cwd,
+                child_env,
+                runtime,
+                limits,
+                aws_profile=aws_profile,
+            )
         finally:
             runtime.remove_connection(conn)
             try:
@@ -396,6 +471,11 @@ def main():
         default=DEFAULT_MAX_OUTPUT_BYTES,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--aws-profile",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     token = os.environ.get("CAGE_BRIDGE_AUTH_TOKEN", "")
@@ -409,6 +489,19 @@ def main():
         child_env = build_child_environment(args.pass_env)
         sanitize_child_path(child_env, denied_roots)
         commands = parse_named_commands(args.command)
+        aws_profile = (
+            bridge_common.validate_aws_profile(args.aws_profile)
+            if args.aws_profile
+            else ""
+        )
+        if aws_profile:
+            if not any(
+                name.casefold() == bridge_common.AWS_COMMAND_NAME.casefold()
+                for name, _ in commands
+            ):
+                raise ValueError(
+                    "--aws-profile requires a command named 'aws'"
+                )
         commands = [
             (name, pin_executable(argv, cwd, child_env, denied_roots))
             for name, argv in commands
@@ -435,7 +528,20 @@ def main():
         )
         thread = threading.Thread(
             target=serve_one,
-            args=(sock, argv, token, cwd, child_env, runtime, limits),
+            args=(
+                sock,
+                argv,
+                token,
+                cwd,
+                child_env,
+                runtime,
+                limits,
+                (
+                    aws_profile
+                    if name.casefold() == bridge_common.AWS_COMMAND_NAME.casefold()
+                    else ""
+                ),
+            ),
             daemon=True,
         )
         thread.start()

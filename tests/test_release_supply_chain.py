@@ -931,15 +931,15 @@ git() {
   if [ "$1" = "ls-remote" ]; then
     case "${TAG_STUB_MODE}" in
       annotated)
-        printf '%s\trefs/tags/v0.29.0\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.29.0^{}\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.30.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.30.0^{}\n' "${GITHUB_SHA}"
         ;;
       lightweight)
-        printf '%s\trefs/tags/v0.29.0\n' "${GITHUB_SHA}"
+        printf '%s\trefs/tags/v0.30.0\n' "${GITHUB_SHA}"
         ;;
       mismatch)
-        printf '%s\trefs/tags/v0.29.0\n' "${TAG_OBJECT}"
-        printf '%s\trefs/tags/v0.29.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
+        printf '%s\trefs/tags/v0.30.0\n' "${TAG_OBJECT}"
+        printf '%s\trefs/tags/v0.30.0^{}\n' "cccccccccccccccccccccccccccccccccccccccc"
         ;;
     esac
     return 0
@@ -952,7 +952,7 @@ git() {
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.29.0",
+                "GITHUB_REF": "refs/tags/v0.30.0",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -971,8 +971,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.29.0", output)
-        self.assertIn("tag=v0.29.0", output)
+        self.assertIn("version=0.30.0", output)
+        self.assertIn("tag=v0.30.0", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")

@@ -4,7 +4,36 @@ This file records user-visible and configuration migrations introduced by the
 hardening workflow. Entries move from **Unreleased** to a concrete version only
 when that version is committed and tagged.
 
-## Unreleased
+## 0.30.0 — 2026-08-26
+
+### Profile-pinned host AWS CLI access
+
+Container presets can opt into a host-side AWS CLI relay with
+`aws_access = "host-cli"` and a non-empty `aws_profile` (on the selected auth
+block or directly on the preset). Cage creates a reserved `aws` shim in the
+container and invokes the host-installed AWS CLI with the selected profile.
+The host AWS configuration, SSO cache, keychain integration, and browser flow
+remain on the host; no AWS credential directory or ambient AWS credential
+environment variables are mounted for this relay. Use separate presets when
+switching between profiles such as `aws-prod.ReadOnly`,
+`aws-staging.ReadOnly`, and `aws-staging.Manual`.
+
+This is an additive host-integrated capability, not a read-only AWS sandbox:
+the selected profile's IAM permissions remain authoritative, and the host CLI
+bypasses Netgate. `--net off` and host-native Codex targets are incompatible.
+The relay fixes the profile and rejects profile/configuration/debug overrides,
+`aws configure`, and `aws sso logout`; `aws sso login` remains available and
+uses the host browser flow. Existing Claude Bedrock `aws_profile` behavior is
+unchanged unless `aws_access` is also selected.
+
+When this capability is enabled, `AWS_*` names are not allowed in the selected
+preset/auth `env` lists; pass non-secret CLI settings as AWS CLI arguments or
+keep them in the host profile instead.
+
+If a non-Claude auth block or preset already contains an `aws_profile` value,
+add `aws_access = "host-cli"` to opt into the new behavior, or remove the
+unused value; non-Claude `aws_profile` without an access mode now fails closed
+instead of being silently ignored.
 
 ## 0.29.0 — 2026-08-17
 

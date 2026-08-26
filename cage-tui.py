@@ -36,7 +36,9 @@ FIELD_SPECS: dict[str, list[tuple[str, str, str]]] = {
     "auth": [
         ("tool", "Tool", "tool"), ("mode", "Claude auth mode", "auth_mode"),
         ("env", "Environment variable names", "list"),
-        ("aws_profile", "AWS profile", "text"), ("aws_region", "AWS region", "text"),
+        ("aws_profile", "AWS profile", "text"),
+        ("aws_access", "AWS access", "aws_access"),
+        ("aws_region", "AWS region", "text"),
         ("host_codex_dir", "Host Codex directory", "text"),
         ("host_opencode_config_dir", "Host OpenCode config directory", "text"),
         ("host_opencode_data_dir", "Host OpenCode data directory", "text"),
@@ -359,6 +361,19 @@ class Controller:
     def risks(self, preset: dict[str, Any]) -> list[str]:
         risks: list[str] = []
         target, yolo, net = self.effective_exec_state(preset)
+        auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
+        auth = auth if isinstance(auth, dict) else {}
+        aws_access = preset.get("aws_access") or auth.get("aws_access")
+        aws_profile = preset.get("aws_profile") or auth.get("aws_profile")
+        if aws_access == "host-cli":
+            risks.append(
+                "AWS commands run through the host AWS CLI with the fixed profile "
+                f"{aws_profile or '(missing)'}; IAM permissions remain authoritative."
+            )
+            risks.append(
+                "AWS host CLI traffic bypasses Cage's Netgate network policy and "
+                "uses host browser/SSO state."
+            )
         if target == "host":
             risks.append("Execution runs directly on the host — NO Docker isolation boundary.")
             risks.append("Host execution has unrestricted networking; Cage enforces no network policy.")
@@ -420,8 +435,16 @@ class Controller:
             return ["This identity forwards GitHub credentials into the container."]
         if collection == "host_commands" and value.get("command"):
             return ["This command can execute with full host-user authority."]
-        if collection == "auth" and value.get("copy_auth") is True:
-            return ["This profile copies the main tool login into project containers."]
+        if collection == "auth":
+            risks: list[str] = []
+            if value.get("copy_auth") is True:
+                risks.append("This profile copies the main tool login into project containers.")
+            if value.get("aws_access") == "host-cli":
+                risks.append(
+                    "This profile enables a profile-pinned host AWS CLI relay; "
+                    "traffic bypasses Netgate and uses host browser/SSO state."
+                )
+            return risks
         if collection == "mcp_packs":
             authenticated = [
                 str(server.get("name", "unnamed")) for server in value.get("servers", [])
@@ -436,6 +459,30 @@ class Controller:
     def preflight(self, preset: dict[str, Any]) -> list[str]:
         warnings: list[str] = []
         target, _yolo, effective_net = self.effective_exec_state(preset)
+        auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
+        auth = auth if isinstance(auth, dict) else {}
+        aws_access = preset.get("aws_access") or auth.get("aws_access")
+        aws_profile = preset.get("aws_profile") or auth.get("aws_profile")
+        if aws_access == "host-cli":
+            if not aws_profile:
+                warnings.append("AWS host CLI access requires an AWS profile.")
+            if target == "host":
+                warnings.append(
+                    "AWS host CLI access is for container execution; host-native Codex "
+                    "already runs directly on the host."
+                )
+            if effective_net == "off":
+                warnings.append(
+                    "AWS host CLI access requires host outbound networking and cannot "
+                    "be combined with --net off."
+                )
+            if shutil.which("aws") is None:
+                warnings.append("aws command not found in PATH (required for AWS host CLI access).")
+            else:
+                warnings.append(
+                    "AWS host CLI traffic bypasses Netgate and uses the host's "
+                    "browser/SSO session."
+                )
         if target == "host":
             if (self.tool_override or preset.get("tool", "codex")) != "codex":
                 warnings.append("Host execution is only supported for Codex.")
@@ -450,8 +497,7 @@ class Controller:
                     f"Network mode '{effective_net}' cannot be enforced without a container. "
                     "Use --net open explicitly or switch to container execution."
                 )
-            auth = self.data.get("auth", {}).get(preset.get("auth", ""), {})
-            if isinstance(auth, dict) and auth.get("host_agents_dir"):
+            if auth.get("host_agents_dir"):
                 agents_dir = str(auth["host_agents_dir"])
                 default_agents = str(Path.home() / ".agents")
                 resolved = str(Path(agents_dir).expanduser())
@@ -1306,6 +1352,11 @@ class CursesView:
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
+        if preset.get("aws_access") == "host-cli":
+            lines.append(
+                "AWS host CLI: enabled "
+                f"(profile {preset.get('aws_profile', '(from auth)')}; bypasses Netgate)"
+            )
         if preset.get("tool") == "opencode":
             lines.append(
                 "OpenCode plugins: "
@@ -1395,8 +1446,14 @@ class CursesView:
             if kind == "bool":
                 value[key] = not bool(value.get(key, False))
                 continue
-            if kind in ("tool", "auth_mode"):
-                values = ["codex", "claude", "opencode"] if kind == "tool" else ["bedrock", "api-key"]
+            if kind in ("tool", "auth_mode", "aws_access"):
+                values = (
+                    ["codex", "claude", "opencode"]
+                    if kind == "tool"
+                    else ["bedrock", "api-key"]
+                    if kind == "auth_mode"
+                    else ["host-cli"]
+                )
                 selected = self.select_value(label, values, str(value.get(key, "")))
                 if selected is not None:
                     if selected: value[key] = selected

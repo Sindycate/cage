@@ -27,7 +27,7 @@ from cage_core.models import (
     LaunchRequest,
     ResolvedConfig,
 )
-from cage_core.planning import build_launch_plan
+from cage_core.planning import PlanError, build_launch_plan
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +47,8 @@ class LaunchPlanContractTests(unittest.TestCase):
             preset_source="flag",
             tool="codex",
             target="container",
+            aws_profile="aws-staging.ReadOnly",
+            aws_access="host-cli",
             extra_env=["TOKEN_NAME"],
             stdio_mcp=[
                 {
@@ -89,6 +91,7 @@ class LaunchPlanContractTests(unittest.TestCase):
             serialized = json.dumps(payload, sort_keys=True)
         self.assertEqual(payload["schema"], "cage.launch-plan")
         self.assertEqual(payload["schema_version"], 2)
+        self.assertIn("aws-host-cli", payload["selected_capabilities"]["runtime"])
         self.assertEqual(
             payload["storage"],
             {
@@ -143,6 +146,33 @@ class LaunchPlanContractTests(unittest.TestCase):
         first = plan.runtime_config.stdio_mcp
         first[0]["name"] = "mutated"
         self.assertEqual(plan.runtime_config.stdio_mcp[0]["name"], "local")
+
+    def test_profile_pinned_aws_host_cli_requires_network(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            config_root = root / "config"
+            repo.mkdir()
+            config_root.mkdir()
+            resolved = ResolvedConfig(
+                config_path=config_root / "config.toml",
+                repo_path=str(repo),
+                preset_name="aws",
+                preset_source="test",
+                tool="codex",
+                target="container",
+                net="off",
+                aws_profile="aws-prod.ReadOnly",
+                aws_access="host-cli",
+            )
+            with self.assertRaisesRegex(PlanError, "--net off"):
+                build_launch_plan(
+                    LaunchRequest(repo_operand=str(repo)),
+                    resolved,
+                    cage_version="0.30.0",
+                    config_root=config_root,
+                    install_root=ROOT,
+                )
 
 
 class LifecycleCoordinatorTests(unittest.TestCase):
@@ -344,7 +374,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.29.0")
+        self.assertEqual(result.stdout.strip(), "cage 0.30.0")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):

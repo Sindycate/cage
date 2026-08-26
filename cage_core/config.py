@@ -29,7 +29,7 @@ if str(_INSTALL_ROOT) not in sys.path:
     sys.path.insert(0, str(_INSTALL_ROOT))
 
 from cage_core.models import ContractError, ResolvedConfig, StoragePolicy
-from cage_core import codex_policy, codex_runtime
+from cage_core import bridge as bridge_policy, codex_policy, codex_runtime
 
 try:
     import tomllib
@@ -81,6 +81,7 @@ AUTH_KEYS = {
     "env",
     "mode",
     "aws_profile",
+    "aws_access",
     "aws_region",
     "host_codex_dir",
     "host_opencode_config_dir",
@@ -126,6 +127,7 @@ PRESET_KEYS = {
     "extra_env",
     "claude_auth",
     "aws_profile",
+    "aws_access",
     "aws_region",
     "mcp_packs",
     "skill_packs",
@@ -345,6 +347,26 @@ def validate_schema(data: dict[str, Any]) -> None:
     host_commands = validate_named_table(data, "host_commands", HOST_COMMAND_KEYS)
     presets = validate_named_table(data, "presets", PRESET_KEYS)
     as_table(data, "projects")
+
+    for table_name, table in (("auth", as_table(data, "auth")), ("presets", presets)):
+        for name, value in table.items():
+            label = f"{table_name}.{name}"
+            for key in ("aws_profile", "aws_access"):
+                if key in value and not isinstance(value[key], str):
+                    raise ConfigError(f"{label}.{key} must be a string")
+            profile = value.get("aws_profile", "")
+            if profile:
+                try:
+                    bridge_policy.validate_aws_profile(
+                        profile, f"{label}.aws_profile"
+                    )
+                except ValueError as exc:
+                    raise ConfigError(str(exc)) from exc
+            access = value.get("aws_access", "")
+            if access not in ("", bridge_policy.AWS_ACCESS_HOST_CLI):
+                raise ConfigError(
+                    f"{label}.aws_access must be {bridge_policy.AWS_ACCESS_HOST_CLI!r}"
+                )
 
     for pack_name, pack in mcp_packs.items():
         for index, server in enumerate(as_list(pack.get("servers"), f"mcp_packs.{pack_name}.servers")):
@@ -1082,6 +1104,54 @@ def resolve_config(
         raise ConfigError(f"identity {identity_name!r} must be a table")
     resolved.identity_name = identity_name or ""
 
+    aws_profile = auth.get("aws_profile") or preset.get("aws_profile") or ""
+    aws_access = auth.get("aws_access") or preset.get("aws_access") or ""
+    if not isinstance(aws_profile, str):
+        raise ConfigError(
+            f"auth.{auth_name or preset_name}.aws_profile must be a string"
+        )
+    if not isinstance(aws_access, str):
+        raise ConfigError(
+            f"auth.{auth_name or preset_name}.aws_access must be a string"
+        )
+    if aws_profile:
+        try:
+            bridge_policy.validate_aws_profile(
+                aws_profile,
+                f"auth.{auth_name or preset_name}.aws_profile",
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    if aws_access not in ("", bridge_policy.AWS_ACCESS_HOST_CLI):
+        raise ConfigError(
+            f"auth.{auth_name or preset_name}.aws_access must be "
+            f"{bridge_policy.AWS_ACCESS_HOST_CLI!r}"
+        )
+    if aws_access and not aws_profile:
+        raise ConfigError(
+            "aws_access = \"host-cli\" requires an aws_profile"
+        )
+    if aws_access and target == "host":
+        raise ConfigError(
+            "aws_access = \"host-cli\" requires container execution; "
+            "host-native Codex already runs on the host"
+        )
+    if aws_profile and tool != "claude" and not aws_access:
+        raise ConfigError(
+            "aws_profile on non-Claude presets requires "
+            "aws_access = \"host-cli\""
+        )
+    resolved.aws_profile = aws_profile
+    resolved.aws_access = aws_access
+    resolved.aws_region = str(
+        auth.get("aws_region") or preset.get("aws_region") or ""
+    )
+    if aws_access:
+        resolved.warnings.append(
+            f"AWS host CLI enabled for profile {aws_profile!r}; the selected "
+            "host AWS CLI runs outside Cage network enforcement"
+        )
+
     env: list[str] = []
     collect_env(env, auth.get("env"), f"auth.{auth_name}.env")
     collect_env(env, preset.get("env"), f"presets.{preset_name}.env")
@@ -1092,8 +1162,6 @@ def resolve_config(
         if mode not in {"bedrock", "api-key"}:
             raise ConfigError(f"unsupported Claude auth mode for {auth_name or preset_name!r}: {mode}")
         resolved.claude_auth = mode
-        resolved.aws_profile = str(auth.get("aws_profile") or preset.get("aws_profile") or "")
-        resolved.aws_region = str(auth.get("aws_region") or preset.get("aws_region") or "")
     elif tool == "codex":
         if auth.get("host_codex_dir"):
             resolved.host_codex_dir = expand_path_string(str(auth["host_codex_dir"]))
@@ -1313,6 +1381,14 @@ def resolve_config(
             raise ConfigError(f"host command {name!r} command cannot contain newlines")
         if name in seen_host_commands:
             raise ConfigError(f"duplicate host command in preset {preset_name!r}: {name}")
+        if (
+            resolved.aws_access
+            and transport_key(name) == transport_key(bridge_policy.AWS_COMMAND_NAME)
+        ):
+            raise ConfigError(
+                "host command name 'aws' is reserved when "
+                "aws_access = \"host-cli\" is enabled"
+            )
         seen_host_commands.add(name)
         normalized_name = transport_key(name)
         if normalized_name in seen_host_command_keys:
@@ -1363,6 +1439,16 @@ def resolve_config(
         )
 
     resolved.extra_env = dedupe(env)
+    if resolved.aws_access:
+        ambient_aws_names = [
+            name for name in resolved.extra_env if name.startswith("AWS_")
+        ]
+        if ambient_aws_names:
+            raise ConfigError(
+                "aws_access = \"host-cli\" cannot forward AWS_* environment "
+                "names into the container: "
+                + ", ".join(ambient_aws_names)
+            )
     return resolved
 
 
@@ -1791,6 +1877,12 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print(f"Yolo:   {'enabled' if resolved.yolo == '1' else 'disabled'}")
     if resolved.auth_name:
         print(f"Auth:   {resolved.auth_name}")
+    if resolved.aws_profile:
+        print(f"AWS profile: {resolved.aws_profile}")
+    if resolved.aws_access:
+        print(
+            "AWS host CLI: enabled (profile-pinned; browser/SSO auth stays on host)"
+        )
     if resolved.identity_name:
         print(f"Identity: {resolved.identity_name}")
     if resolved.mcp_pack_names:
@@ -1868,9 +1960,13 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("  - credentials: host Codex auth.json copy disabled")
     else:
         print("  - credentials: automated host Codex state/auth reuse")
+    if resolved.aws_access:
+        print(
+            "  - AWS: profile-pinned host CLI relay (host-integrated; bypasses Netgate)"
+        )
     if resolved.target == "host" and resolved.stdio_mcp:
         print("  - host execution: selected stdio MCP servers run directly on the host")
-    elif resolved.stdio_mcp or resolved.host_commands:
+    elif resolved.stdio_mcp or resolved.host_commands or resolved.aws_access:
         print("  - host execution: enabled by selected bridge integrations")
     else:
         print("  - host execution: no selected bridge integrations")
@@ -1964,6 +2060,27 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
             ) / "cage" / "desktop" / "setup.json"
         if not setup.is_file():
             warnings.append("desktop SSH setup is missing; run `cage desktop setup`")
+    if resolved.aws_access:
+        if resolved.target == "host":
+            errors.append(
+                'aws_access = "host-cli" requires container execution; '
+                "host-native Codex already runs on the host"
+            )
+        if effective_exec_state(resolved)["net"] == "off":
+            errors.append(
+                'aws_access = "host-cli" cannot be combined with --net off; '
+                "the host AWS CLI must make outbound connections"
+            )
+        if shutil.which("aws") is None:
+            errors.append(
+                "AWS host CLI access was selected, but the host 'aws' command "
+                "was not found in PATH"
+            )
+        else:
+            warnings.append(
+                "AWS host CLI runs outside the container and bypasses Netgate; "
+                "IAM permissions for the selected profile remain authoritative"
+            )
     if resolved.tool == "codex" and resolved.target in {"container", "desktop"}:
         try:
             validate_codex_layers(
@@ -2223,6 +2340,14 @@ copy_auth = true
 tool = "codex"
 auth = "codex-local"
 net = "gate"
+
+# Optional profile-pinned AWS CLI relay. The host AWS CLI and browser/SSO state
+# stay on the host; use one preset per AWS profile and relaunch to switch.
+# [presets.aws-staging-readonly]
+# tool = "codex"
+# aws_profile = "aws-staging.ReadOnly"
+# aws_access = "host-cli"
+# net = "gate"
 
 [projects]
 # "/Users/me/code/project-a" = "codex-local"
@@ -2774,6 +2899,8 @@ def ui_summary(data: dict[str, Any], config_path: Path, repo: str) -> dict[str, 
             "target": eff["target"],
             "codex_profile": resolved.codex_profile,
             "auth": resolved.auth_name,
+            "aws_profile": resolved.aws_profile,
+            "aws_access": resolved.aws_access,
             "identity": resolved.identity_name,
             "net": eff["net"],
             "yolo": eff["yolo"] == "1",

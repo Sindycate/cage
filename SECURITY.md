@@ -99,6 +99,19 @@ resources outside the repository. They are explicit trust extensions, not part
 of the container boundary. Treat packages and command definitions used by those
 integrations as host software.
 
+The built-in profile-pinned AWS CLI capability is one such trust extension.
+`aws_access = "host-cli"` creates a reserved `aws` relay that invokes the
+host-installed AWS CLI with the configured `aws_profile`. The host AWS config,
+SSO cache, browser, keychain integration, and credential providers remain on
+the host; Cage does not mount them or forward ambient AWS credential variables
+into the AWS child process. The relay blocks profile/configuration/debug
+overrides, `configure`, and `sso logout`, but it is not an AWS action allowlist:
+the selected profile's IAM policy remains the authority. Host AWS traffic
+bypasses Netgate, and the capability is rejected with `--net off` or host-native
+Codex execution. The host process still has the host user's filesystem
+authority for local paths supplied to AWS CLI operations; this is not a second
+filesystem sandbox.
+
 Cage resolves each selected bridge executable once at launch, removes the
 repository and explicit read-write mounts from its child `PATH`, and refuses an
 executable located under those writable roots. A deliberately configured trusted

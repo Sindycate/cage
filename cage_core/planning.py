@@ -160,6 +160,10 @@ def _target_error_checks(
         )
     if target == "host":
         errors: list[str] = []
+        if resolved.aws_access:
+            errors.append(
+                'aws_access = "host-cli" requires container execution'
+            )
         if resolved.host_commands:
             errors.append(
                 "host command bridges require container execution "
@@ -187,6 +191,11 @@ def _target_error_checks(
                 )
         if errors:
             raise PlanError("\n".join(errors))
+    if resolved.aws_access and network == "off":
+        raise PlanError(
+            'aws_access = "host-cli" cannot be combined with --net off; '
+            "the host AWS CLI must make outbound connections"
+        )
     if target == "desktop":
         if resolved.preset_source == "tui:launch-once" or not resolved.preset_name:
             raise PlanError("desktop targets require a saved or project-owned preset")
@@ -298,6 +307,8 @@ def build_launch_plan(
         capabilities.append("remote-mcp")
     if resolved.host_commands:
         capabilities.append("host-command-bridge")
+    if resolved.aws_access:
+        capabilities.append("aws-host-cli")
     if resolved.tool == "opencode":
         capabilities.append("opencode-frozen-config")
         if resolved.opencode_plugins == "1":

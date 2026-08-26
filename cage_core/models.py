@@ -118,6 +118,7 @@ class ResolvedConfig:
     target: str = "container"
     claude_auth: str = ""
     aws_profile: str = ""
+    aws_access: str = ""
     aws_region: str = ""
     host_codex_dir: str = ""
     host_opencode_config_dir: str = ""
@@ -205,6 +206,7 @@ class ResolvedConfig:
                 "name": self.auth_name,
                 "claude_mode": self.claude_auth,
                 "aws_profile": self.aws_profile,
+                "aws_access": self.aws_access,
                 "aws_region": self.aws_region,
                 "host_codex_dir": self.host_codex_dir,
                 "host_opencode_config_dir": self.host_opencode_config_dir,
@@ -253,6 +255,7 @@ class RuntimeConfig:
 
     claude_auth: str
     aws_profile: str
+    aws_access: str
     aws_region: str
     host_codex_dir: str
     host_opencode_config_dir: str
@@ -291,6 +294,7 @@ class RuntimeConfig:
         return cls(
             claude_auth=resolved.claude_auth,
             aws_profile=resolved.aws_profile,
+            aws_access=resolved.aws_access,
             aws_region=resolved.aws_region,
             host_codex_dir=resolved.host_codex_dir,
             host_opencode_config_dir=resolved.host_opencode_config_dir,

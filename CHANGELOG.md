@@ -3,6 +3,12 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.30.0 — 2026-08-26
+
+- add profile-pinned host AWS CLI access for container agents, preserving the
+  host AWS SSO/browser flow while keeping profile and configuration overrides
+  fail-closed; see `docs/hardening/MIGRATIONS.md`.
+
 ## 0.29.0 — 2026-08-17
 
 - require Python 3.12 or newer for the host control plane and maintainer

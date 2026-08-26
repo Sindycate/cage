@@ -219,6 +219,9 @@ class BridgeTests(unittest.TestCase):
             bin_dir.mkdir()
             repo.mkdir()
             cli_rw.mkdir()
+            aws = bin_dir / "aws"
+            aws.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            aws.chmod(aws.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             docker = bin_dir / "docker"
             docker.write_text(
                 """#!/bin/sh
@@ -244,6 +247,8 @@ exit 0
                         "[auth.codex-test]",
                         'tool = "codex"',
                         "copy_auth = false",
+                        'aws_profile = "aws-staging.ReadOnly"',
+                        'aws_access = "host-cli"',
                         "[host_commands.token-tool]",
                         f'command = "{sys.executable} -c \'print(1)\'"',
                         "[presets.codex-test]",
@@ -329,7 +334,7 @@ while True:
                 value for value in docker_args if value.startswith("HOST_CMD_BRIDGE_TOKEN=")
             )
             self.assertRegex(token_arg, r"^HOST_CMD_BRIDGE_TOKEN=[0-9a-f]{64}$")
-            self.assertIn("CAGE_HOST_COMMANDS=token-tool", docker_args)
+            self.assertIn("CAGE_HOST_COMMANDS=token-tool aws", docker_args)
             bridge_args = json.loads(bridge_args_file.read_text(encoding="utf-8"))
             denied = [
                 bridge_args[index + 1]
@@ -338,6 +343,11 @@ while True:
             ]
             self.assertIn(str(repo.resolve()), denied)
             self.assertIn(str(cli_rw.resolve()), denied)
+            self.assertIn("--aws-profile", bridge_args)
+            self.assertEqual(
+                bridge_args[bridge_args.index("--aws-profile") + 1],
+                "aws-staging.ReadOnly",
+            )
 
     def test_unauthorized_mcp_client_cannot_spawn_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -536,6 +546,101 @@ while True:
             self.assertEqual(duplicate.stdout, "3:token -n codex\n")
             self.assertEqual(additional.returncode, 0, additional.stderr)
             self.assertEqual(additional.stdout, "4:token -n codex --refresh\n")
+
+    def test_aws_host_command_injects_fixed_profile_and_scrubs_ambient_identity(self):
+        code = (
+            "import json,os,sys; print(json.dumps({"
+            "'argv':sys.argv[1:],"
+            "'profile':os.getenv('AWS_PROFILE'),"
+            "'access_key':os.getenv('AWS_ACCESS_KEY_ID'),"
+            "'config':os.getenv('AWS_CONFIG_FILE')}))"
+        )
+        with RunningBridge(
+            HOST_BRIDGE,
+            "--command",
+            "COMMAND",
+            "aws",
+            command_for(code),
+            "--aws-profile",
+            "aws-staging.ReadOnly",
+            "--pass-env",
+            "AWS_PROFILE",
+            "--pass-env",
+            "AWS_ACCESS_KEY_ID",
+            "--pass-env",
+            "AWS_CONFIG_FILE",
+            env={
+                "AWS_PROFILE": "ambient-profile",
+                "AWS_ACCESS_KEY_ID": "ambient-access-key",
+                "AWS_CONFIG_FILE": "/tmp/ambient-config",
+            },
+        ) as bridge:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HOST_RELAY),
+                    "aws",
+                    "s3",
+                    "ls",
+                    "--region",
+                    "eu-central-1",
+                ],
+                env={**safe_test_env(), **relay_env("HOST_CMD", "aws", bridge.port)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "argv": [
+                    "--profile",
+                    "aws-staging.ReadOnly",
+                    "s3",
+                    "ls",
+                    "--region",
+                    "eu-central-1",
+                ],
+                "profile": None,
+                "access_key": None,
+                "config": None,
+            },
+        )
+
+    def test_aws_host_command_rejects_profile_and_configuration_overrides(self):
+        with RunningBridge(
+            HOST_BRIDGE,
+            "--command",
+            "COMMAND",
+            "aws",
+            command_for("print('spawned')"),
+            "--aws-profile",
+            "aws-prod.ReadOnly",
+        ) as bridge:
+            for arguments, message in (
+                (("--profile", "other", "sts", "get-caller-identity"), "managed or blocked"),
+                (("--profile=other", "sts", "get-caller-identity"), "managed or blocked"),
+                (("configure", "list"), "configure commands are blocked"),
+                (("sso", "logout"), "SSO logout is blocked"),
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        [sys.executable, str(HOST_RELAY), "aws", *arguments],
+                        env={
+                            **safe_test_env(),
+                            **relay_env("HOST_CMD", "aws", bridge.port),
+                        },
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=5,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 126, result.stderr)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("spawned", result.stdout)
 
     def test_host_command_gets_only_base_and_configured_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
