@@ -4,6 +4,15 @@ This file records user-visible and configuration migrations introduced by the
 hardening workflow. Entries move from **Unreleased** to a concrete version only
 when that version is committed and tagged.
 
+## 0.30.1 — 2026-08-26
+
+### OpenCode image contract refresh
+
+No user configuration migration. The OpenCode image build and `cage update
+opencode` overlay now recognize the current upstream binary's minified
+identifier for the fixed `1455` OAuth callback without weakening the required
+callback, isolation, or `--pure` contracts.
+
 ## 0.30.0 — 2026-08-26
 
 ### Profile-pinned host AWS CLI access

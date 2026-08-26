@@ -3,6 +3,23 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-26 — v0.30.0 CI caught upstream OpenCode contract drift; v0.30.1 prepared
+
+The v0.30.0 commit was pushed by the canonical publisher, but both allowed CI
+attempts stopped before tagging because the current `opencode-ai@latest`
+binary renamed its minified `1455` callback variable from the literal expected
+by Cage. The binary still contains an identifier assignment to `1455`, the
+`/auth/callback` and `/.well-known/opencode` markers, the 19876 MCP callback,
+and the project/external-skill isolation flags. The image and update-overlay
+contracts now require the assignment form rather than one minifier-generated
+identifier. No v0.30.0 tag or GitHub Release was created.
+
+Verification before the v0.30.1 publication attempt: complete supported suite
+`523 passed, 15 skipped`; Python compilation, Bash syntax, Compose rendering,
+and `git diff --check` passed. A disposable local OpenCode image built from
+the corrected contract, and the real Docker-backed proxy contract suite passed
+`4 tests` against that image.
+
 ## 2026-08-26 — profile-pinned host AWS CLI relay prepared for v0.30.0
 
 Added an additive `aws_access = "host-cli"` capability for container and

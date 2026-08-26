@@ -3,6 +3,12 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
+## 0.30.1 — 2026-08-26
+
+- refresh the OpenCode image contract for the current upstream binary minifier,
+  still requiring the fixed `1455` OAuth callback assignment and all existing
+  isolation markers.
+
 ## 0.30.0 — 2026-08-26
 
 - add profile-pinned host AWS CLI access for container agents, preserving the

@@ -469,7 +469,7 @@ def _run_update(
             "grep -a -F -q 'OPENCODE_DISABLE_PROJECT_CONFIG' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q 'OPENCODE_DISABLE_EXTERNAL_SKILLS' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q '127.0.0.1:19876' \"$OPENCODE_BINARY\" && "
-            "grep -a -F -q 'O$=1455' \"$OPENCODE_BINARY\" && "
+            "grep -a -E -q '[[:alpha:]_$][[:alnum:]_$]*=1455([,;]|$)' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q '/auth/callback' \"$OPENCODE_BINARY\" && "
             "grep -a -F -q '/.well-known/opencode' \"$OPENCODE_BINARY\" && "
             "chmod -R a+rwX /home/opencode/.npm-global\n"

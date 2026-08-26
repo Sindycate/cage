@@ -169,7 +169,7 @@ class LaunchPlanContractTests(unittest.TestCase):
                 build_launch_plan(
                     LaunchRequest(repo_operand=str(repo)),
                     resolved,
-                    cage_version="0.30.0",
+                    cage_version="0.30.1",
                     config_root=config_root,
                     install_root=ROOT,
                 )
@@ -374,7 +374,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.30.0")
+        self.assertEqual(result.stdout.strip(), "cage 0.30.1")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):
