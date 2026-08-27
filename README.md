@@ -70,6 +70,7 @@ docker compose build base         # just the agent-neutral shared base
 docker compose build claude       # Claude Code (requires the base)
 docker compose build codex        # Codex CLI (requires the base)
 docker compose build opencode     # OpenCode (requires the base)
+docker compose build monitor      # Token Monitor collector (requires the base)
 ```
 
 ## Usage
@@ -130,6 +131,47 @@ Same-project parallel sessions use distinct container names and share the
 project's persistent tool-state volume. The collision menu remains available
 when a terminal provides an interactive stdin but restricts direct access to
 `/dev/tty`, as some IDE and sandboxed terminals do.
+
+### Optional Token Monitor aggregation
+
+Cage can optionally aggregate accumulated Codex token totals from its
+persistent Docker volumes into a Token Monitor hub. This is a host-owned
+integration: host-native Codex, Claude, and OpenCode state are not scanned.
+The short-lived collector uses the pinned `token-monitor` image, has no
+network, mounts only `sessions/` and `archived_sessions/` from the selected
+Codex volume read-only, and leaves authenticated hub requests to the host.
+
+Connect a hub; Cage prompts for the secret without putting it in the command
+line (use `--secret-stdin` for a noninteractive handoff):
+
+```bash
+cage monitor connect https://token-monitor.example
+printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
+  cage monitor connect https://token-monitor.example --secret-stdin
+```
+
+After connecting, Codex Container and Desktop launches register their logical
+target automatically and scan immediately, every five minutes, and at exit.
+Parallel sessions for one repository intentionally share one device and are
+serialized, so their shared volume is counted once. A recreated volume is
+marked `needs-adoption` until explicitly accepted:
+
+```bash
+cage monitor status
+cage monitor add ~/projects/myapp --preset codex-company --container
+cage monitor sync                 # all active registrations
+cage monitor sync ~/projects/myapp
+cage monitor disconnect           # pause uploads, preserve hub device records
+cage monitor forget DEVICE_ID --yes
+```
+
+`monitor add` is the explicit replacement-volume adoption path and can also
+register a dormant target. `disconnect` removes the local hub credential but
+keeps registrations and existing hub device records; `forget` deletes exactly
+one hub device, then retires its local registration and archive. Monitor state
+is private under
+`~/.config/cage/monitor/` and never enters the launch-plan or container
+environment.
 
 ### Central configuration
 
@@ -865,7 +907,7 @@ installation, configuration, Docker volumes, SSH config, or Codex state.
 GHCR package visibility is a one-time maintainer prerequisite that image pushes
 cannot set. A public GitHub repository does not automatically make its container
 packages public. After the first publication of each managed package (`cage/base`,
-`cage/claude-code`, `cage/codex`, and `cage/opencode`), an organization owner or
+`cage/claude-code`, `cage/codex`, `cage/opencode`, and `cage/token-monitor`), an organization owner or
 package administrator must open the package on the Sindycate organization's
 **Packages** page, choose **Package settings**, use **Change visibility** to make
 it **Public**, and confirm that the package is connected to the `Sindycate/cage`
@@ -952,10 +994,11 @@ removal so a newly created container makes deletion fail safe.
 
 Tagged releases publish the source archive, its SHA-256 checksum, and an SPDX
 SBOM. GitHub also records signed provenance and SBOM attestations for the source
-archive. The three assistant images carry BuildKit SBOM and max-level provenance
-metadata plus signed GitHub provenance attestations. Their agent-neutral shared
-base is published under `ghcr.io/sindycate/cage/base` with the same metadata and
-signed provenance; the image names are `claude-code`, `codex`, and `opencode`.
+archive. The three assistant images and the optional Token Monitor collector
+carry BuildKit SBOM and max-level provenance metadata plus signed GitHub
+provenance attestations. Their agent-neutral shared base is published under
+`ghcr.io/sindycate/cage/base` with the same metadata and signed provenance; the
+image names are `claude-code`, `codex`, `opencode`, and `token-monitor`.
 
 ```bash
 VERSION="$(cage --version | awk '{print $NF}')"
@@ -976,8 +1019,8 @@ gh attestation verify \
   --repo Sindycate/cage
 ```
 
-Repeat the image command with `claude-code` and `opencode` to verify those
-images. Attestations
+Repeat the image command with `claude-code`, `opencode`, and `token-monitor` to
+verify those images. Attestations
 link an artifact to its source and build workflow; an SBOM inventories detected
 components. Neither is a guarantee that the artifact is vulnerability-free.
 

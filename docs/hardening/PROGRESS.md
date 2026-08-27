@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-27 — optional host-owned Token Monitor aggregation prepared for v0.31.0
+
+Added the optional Token Monitor host collector for Codex Container/Desktop
+state. The collector is pinned to Token Monitor v0.48.0 by commit and source
+archive digest, runs as a short-lived network-disabled bounded Docker process,
+and mounts only `sessions/` and `archived_sessions/` through Docker
+`volume-subpath` read-only mounts. The host keeps the hub secret and performs
+the authenticated upload. Host-native Codex, Claude, and OpenCode are excluded.
+
+One stable device is assigned per Cage logical target (repository plus Desktop
+preset), so parallel sessions sharing a Codex volume cannot double-count it.
+Private mode-0600 connection/identity/registry/device state tracks volume
+fingerprints and requires explicit `cage monitor add` adoption after a volume
+replacement. CLI and TUI controls cover connect, disconnect, status, sync, add,
+and forget; hub device records remain until explicit forget, while replacement
+adoption intentionally upserts the stable device's current summary.
+
+The release plumbing now carries the fifth managed `token-monitor` image,
+candidate-manifest schema 3, source archive payload, installer allowlist, and
+storage retention role. The pinned arm64 collector image built successfully
+from the verified archive and completed an end-to-end scan against a disposable
+Codex volume, returning the expected Codex-only identity and empty-provider
+limits. The real Docker smoke suite passed `8 tests` with one intentional
+Desktop skip; the complete supported suite passed `540 tests` with `13 skips`.
+Python compilation, Bash/Node syntax, Compose validation, and `git diff --check`
+also pass. Publication remains owned by the canonical publisher and is not
+complete until `public_verified`.
+
 ## 2026-08-26 — v0.30.2 AWS CLI settings moved to reusable presets for the TUI
 
 Moved profile-pinned AWS CLI editing to reusable presets so `Authentication

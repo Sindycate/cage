@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from . import config, opencode_policy, storage
+from . import config, monitor, opencode_policy, storage
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
 from .targets.host import HostTargetError, run_host_target
@@ -50,6 +51,12 @@ Commands:
   update [claude|codex|opencode] Refresh the tool binary only (fast; no full rebuild)
   storage status             Show Docker capacity and exact cleanup candidates
   storage clean              Preview and confirm narrow Cage image cleanup
+  monitor connect URL         Connect the optional host-owned Token Monitor hub
+  monitor disconnect          Remove the local hub credential and pause uploads
+  monitor status [--json]     Show monitor connection and registered devices
+  monitor sync [PATH]         Scan registered Codex volumes (or one project)
+  monitor add PATH            Explicitly adopt/register a Codex volume
+  monitor forget DEVICE_ID    Delete one hub device and retire its registration
 
 Options:
   --preset NAME     Use a central config preset (one-shot override)
@@ -373,6 +380,15 @@ def _dispatch_management(
         )
     if command == "storage":
         raise SystemExit(_run_storage(rest, config_root=config_root))
+    if command == "monitor":
+        raise SystemExit(
+            _run_monitor(
+                rest,
+                config_root=config_root,
+                install_root=install_root,
+                cage_version=cage_version,
+            )
+        )
     return False
 
 
@@ -389,6 +405,334 @@ def _run_storage(arguments: list[str], *, config_root: Path) -> int:
         )
         return storage.run_storage_command(arguments[0], policy)
     except (config.ConfigError, storage.StorageError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+def _monitor_secret_from_terminal(*, stdin_stream=None) -> str:
+    """Read a hub secret without putting it in argv or ordinary output."""
+
+    stream = stdin_stream or sys.stdin
+    try:
+        tty = open("/dev/tty", "r+", encoding="utf-8")
+    except OSError:
+        tty = None
+    if tty is not None:
+        try:
+            return getpass.getpass("Token Monitor hub secret: ", stream=tty).strip()
+        finally:
+            tty.close()
+    if not stream.isatty():
+        raise CliError("monitor connect needs --secret-stdin when no TTY is available")
+    return getpass.getpass("Token Monitor hub secret: ", stream=stream).strip()
+
+
+def _monitor_read_secret_stdin() -> str:
+    if sys.stdin.isatty():
+        raise CliError("--secret-stdin requires a noninteractive stdin")
+    value = sys.stdin.readline(1024 * 1024).strip()
+    if not value:
+        raise CliError("Token Monitor hub secret cannot be empty")
+    return value
+
+
+def _monitor_target_and_preset(arguments: list[str]) -> tuple[str, str, str, bool]:
+    """Parse the bounded project selector shared by monitor add/sync."""
+
+    preset = ""
+    target = ""
+    path = ""
+    json_output = False
+    index = 0
+    while index < len(arguments):
+        item = arguments[index]
+        if item in {"--container", "--desktop"}:
+            selected = item[2:]
+            if target:
+                raise CliError("monitor target options are mutually exclusive")
+            target = selected
+        elif item == "--preset":
+            if index + 1 >= len(arguments) or not arguments[index + 1]:
+                raise CliError("Missing value after --preset")
+            preset = arguments[index + 1]
+            index += 1
+        elif item.startswith("--preset="):
+            preset = item.partition("=")[2]
+        elif item == "--json":
+            json_output = True
+        elif item.startswith("-"):
+            raise CliError(f"Unknown monitor option: {item}")
+        elif path:
+            raise CliError("monitor accepts only one project path")
+        else:
+            path = item
+        index += 1
+    if preset and not config.NAME_RE.fullmatch(preset):
+        raise CliError(f"Invalid preset name: {preset!r}")
+    return path, preset, target, json_output
+
+
+def _resolve_monitor_registration(
+    path: str,
+    preset: str,
+    target: str,
+    *,
+    config_root: Path,
+    install_root: Path,
+    cage_version: str,
+) -> tuple[PreparedLaunch, str]:
+    if not path:
+        raise CliError("monitor project path is required")
+    try:
+        repository = Path(path).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise CliError(f"cannot resolve monitor repository: {exc}") from exc
+    if not repository.is_dir():
+        raise CliError(f"monitor repository is not a directory: {repository}")
+    config_path = config_root / "config.toml"
+    if not config_path.is_file():
+        raise CliError(f"central config not found at {config_path}")
+    data = config.load_config(config_path)
+    resolved = config.resolve_config(
+        data,
+        config_path,
+        str(repository),
+        preset_name=preset,
+        explicit_tool="codex",
+        mcp_inventory=False,
+    )
+    request = LaunchRequest(
+        repo_operand=str(repository),
+        explicit_tool="codex",
+        preset=preset,
+        target=target,
+    )
+    prepared = build_launch_plan(
+        request,
+        resolved,
+        cage_version=cage_version,
+        config_root=config_root,
+        install_root=install_root,
+    )
+    if prepared.plan.tool != "codex" or prepared.plan.target not in {"container", "desktop"}:
+        raise CliError("Token Monitor supports only Codex container or Desktop targets")
+    return prepared, str(repository)
+
+
+def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
+    connection = monitor.load_connection(config_root)
+    registrations = monitor.load_registry(config_root)
+    rows = [item.public_dict() for item in registrations]
+    hub: dict[str, object] | None = None
+    if connection is not None and connection.enabled:
+        try:
+            raw = monitor._hub_request(connection, "GET", "/api/stats")
+            if isinstance(raw, dict):
+                hub = {
+                    "device_count": len(raw.get("devices", []))
+                    if isinstance(raw.get("devices"), list)
+                    else None,
+                    "updated_at": raw.get("updatedAt", ""),
+                    "periods": raw.get("periods", {}),
+                }
+        except monitor.MonitorError as exc:
+            hub = {"error": str(exc)}
+    payload = {
+        "connected": bool(connection is not None and connection.enabled),
+        "hub_url": connection.hub_url if connection is not None else "",
+        "interval_seconds": connection.interval_seconds if connection is not None else None,
+        "devices": rows,
+        "hub": hub,
+    }
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        return 0
+    if connection is None or not connection.enabled:
+        print("Token Monitor: disconnected")
+    else:
+        print(f"Token Monitor: connected to {connection.hub_url} (every {connection.interval_seconds}s)")
+        if hub and "error" in hub:
+            print(f"Hub: unavailable ({hub['error']})")
+        elif hub:
+            print(f"Hub devices: {hub.get('device_count', '?')}")
+    if not rows:
+        print("Registered Cage devices: none")
+    else:
+        print(f"Registered Cage devices: {len(rows)}")
+        for row in rows:
+            print(
+                f"  {row['device_id']}  {row['status']}  {row['display_name']}"
+                f"  last={row['last_success_at'] or 'never'}"
+            )
+    return 0
+
+
+def _run_monitor(
+    arguments: list[str],
+    *,
+    config_root: Path,
+    install_root: Path,
+    cage_version: str,
+) -> int:
+    if not arguments:
+        print(
+            "Usage: cage monitor connect|disconnect|status|sync|add|forget ...",
+            file=sys.stderr,
+        )
+        return 1
+    action = arguments[0]
+    rest = arguments[1:]
+    try:
+        if action == "connect":
+            if not rest:
+                raise CliError("monitor connect requires a hub URL")
+            url = rest.pop(0)
+            interval = 300
+            secret_stdin = False
+            index = 0
+            while index < len(rest):
+                item = rest[index]
+                if item == "--secret-stdin":
+                    secret_stdin = True
+                elif item == "--interval-seconds":
+                    if index + 1 >= len(rest):
+                        raise CliError("Missing value after --interval-seconds")
+                    interval = int(rest[index + 1])
+                    index += 1
+                elif item.startswith("--interval-seconds="):
+                    interval = int(item.partition("=")[2])
+                else:
+                    raise CliError(f"Unknown monitor connect option: {item}")
+                index += 1
+            secret = _monitor_read_secret_stdin() if secret_stdin else _monitor_secret_from_terminal()
+            connection = monitor.MonitorConnection(
+                hub_url=monitor.normalize_hub_url(url),
+                secret=secret,
+                interval_seconds=monitor.validate_interval(interval),
+            )
+            monitor.verify_connection(connection)
+            monitor.save_connection(config_root, connection)
+            print(f"Token Monitor connected to {connection.hub_url}")
+            return 0
+        if action == "disconnect":
+            if rest:
+                raise CliError("monitor disconnect accepts no options")
+            monitor.disable_connection(config_root)
+            print("Token Monitor disconnected; registered device totals were preserved.")
+            return 0
+        if action == "status":
+            _, _, _, as_json = _monitor_target_and_preset(rest)
+            return _monitor_status(config_root, as_json=as_json)
+        if action not in {"sync", "add"}:
+            if action == "forget":
+                if not rest:
+                    raise CliError("monitor forget requires a device ID")
+                device_id = rest.pop(0)
+                assume_yes = False
+                for item in rest:
+                    if item == "--yes":
+                        assume_yes = True
+                    else:
+                        raise CliError(f"Unknown monitor forget option: {item}")
+                connection = monitor.load_connection(config_root)
+                if connection is None or not connection.enabled:
+                    raise CliError("Token Monitor is disconnected")
+                if not assume_yes:
+                    if not sys.stdin.isatty():
+                        raise CliError("monitor forget requires --yes in a noninteractive shell")
+                    print(f"Type FORGET to delete {device_id} from the Token Monitor hub: ", end="", flush=True)
+                    if sys.stdin.readline().strip() != "FORGET":
+                        raise CliError("forget aborted")
+                monitor.delete_device(connection, device_id)
+                monitor.retire_registration(config_root, device_id, disabled=True)
+                monitor.remove_device_state(config_root, device_id)
+                print(f"Forgot Token Monitor device {device_id}; future launches require explicit add.")
+                return 0
+            raise CliError(f"unknown monitor action: {action}")
+
+        path, preset, target, _ = _monitor_target_and_preset(rest)
+        docker = storage.docker_command()
+        config_path = config_root / "config.toml"
+        policy = (
+            config.storage_policy_from_config(config.load_config(config_path))
+            if config_path.is_file()
+            else storage.StoragePolicy()
+        )
+        if action == "add" and not path:
+            raise CliError("monitor add requires a project path")
+        if path:
+            prepared, repository = _resolve_monitor_registration(
+                path,
+                preset,
+                target,
+                config_root=config_root,
+                install_root=install_root,
+                cage_version=cage_version,
+            )
+            logical_id = monitor.logical_target_id(
+                repository, prepared.plan.target, prepared.plan.preset_name
+            )
+            fingerprint = monitor.ensure_codex_volume(
+                docker,
+                prepared.plan.volume_name,
+                logical_id=logical_id,
+            )
+            display_kind = "Desktop" if prepared.plan.target == "desktop" else "Container"
+            record = monitor.register_volume(
+                config_root,
+                docker,
+                volume_name=prepared.plan.volume_name,
+                repository=repository,
+                target=prepared.plan.target,
+                preset=prepared.plan.preset_name,
+                display_name=f"Cage: {Path(repository).name} ({display_kind})",
+                fingerprint=fingerprint,
+                allow_replacement=action == "add",
+            )
+            print(f"Registered {record.device_id} for {record.display_name}")
+            connection = monitor.load_connection(config_root)
+            if connection is None or not connection.enabled:
+                raise CliError("registration saved, but Token Monitor is disconnected")
+            updated, _ = monitor.scan_registration(
+                config_root,
+                docker,
+                install_root,
+                record,
+                version=cage_version,
+                storage_policy=policy,
+                allow_build=True,
+            )
+            print(f"Synchronized {updated.device_id} at {updated.last_success_at}")
+            return 0
+
+        if action == "add":
+            raise CliError("monitor add requires a project path")
+        connection = monitor.load_connection(config_root)
+        if connection is None or not connection.enabled:
+            raise CliError("Token Monitor is disconnected")
+        registrations = monitor.load_registry(config_root)
+        active = [item for item in registrations if item.status == "active"]
+        if not active:
+            print("No active Token Monitor registrations.")
+            return 0
+        failures = 0
+        for record in active:
+            try:
+                updated, _ = monitor.scan_registration(
+                    config_root,
+                    docker,
+                    install_root,
+                    record,
+                    version=cage_version,
+                    storage_policy=policy,
+                    allow_build=True,
+                )
+                print(f"Synchronized {updated.device_id} at {updated.last_success_at}")
+            except monitor.MonitorError as exc:
+                failures += 1
+                print(f"WARNING: {record.device_id}: {exc}", file=sys.stderr)
+        return 1 if failures else 0
+    except (CliError, config.ConfigError, PlanError, monitor.MonitorError, storage.StorageError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

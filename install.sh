@@ -239,8 +239,8 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
         cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py
         mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay
         codex-remote.py cage-user-remap.py
-        docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex Dockerfile.opencode
-        entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh Makefile README.md SECURITY.md
+        docker-compose.yml Dockerfile.base Dockerfile Dockerfile.codex Dockerfile.opencode Dockerfile.monitor
+        token-monitor-collector.js entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh Makefile README.md SECURITY.md
         CHANGELOG.md
     )
     for source_file in "${SOURCE_FILES[@]}"; do
@@ -265,7 +265,7 @@ else
     tar xzf "$TARBALL" -C "$STAGE_DIR" --strip-components=1
 fi
 
-for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py cage-user-remap.py entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh; do
+for required in cage cage-main.py cage-config.py cage-desktop.py cage-tui.py cage-netgate.sh netgate-proxy.py mcp-bridge.py mcp-relay host-cmd-bridge.py host-cmd-relay codex-remote.py cage-user-remap.py entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh Dockerfile.monitor token-monitor-collector.js; do
     [ -f "$STAGE_DIR/$required" ] && [ ! -L "$STAGE_DIR/$required" ] || \
         error "Release archive is missing a safe regular file: $required"
 done
@@ -276,7 +276,7 @@ unsafe_entry="$(find "$STAGE_DIR/cage_core" -type l -print -quit)"
 unsafe_entry="$(find "$STAGE_DIR/cage_core" ! -type f ! -type d -print -quit)"
 [ -z "$unsafe_entry" ] || error "Release archive contains a non-regular package entry: $unsafe_entry"
 for required in \
-    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py opencode.py opencode_policy.py planning.py storage.py \
+    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py monitor.py opencode.py opencode_policy.py planning.py storage.py \
     state/__init__.py state/oauth.py state/opencode.py state/sessions.py \
     targets/__init__.py targets/container.py targets/desktop.py targets/host.py; do
     [ -f "$STAGE_DIR/cage_core/$required" ] && [ ! -L "$STAGE_DIR/cage_core/$required" ] || \

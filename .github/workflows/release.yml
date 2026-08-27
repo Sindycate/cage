@@ -36,6 +36,7 @@ jobs:
       claude_digest: ${{ steps.candidates.outputs.claude_digest }}
       codex_digest: ${{ steps.candidates.outputs.codex_digest }}
       opencode_digest: ${{ steps.candidates.outputs.opencode_digest }}
+      monitor_digest: ${{ steps.candidates.outputs.monitor_digest }}
       ci_run_id: ${{ steps.ci-run.outputs.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,18 +118,18 @@ jobs:
           path, sha, version, run_id = sys.argv[1:]
           with open(path, encoding="utf-8") as handle:
               manifest = json.load(handle)
-          if manifest.get("schema") != "cage.release-candidate" or manifest.get("schema_version") != 2:
-              raise SystemExit("ERROR: candidate manifest must use cage.release-candidate schema version 2")
+          if manifest.get("schema") != "cage.release-candidate" or manifest.get("schema_version") != 3:
+              raise SystemExit("ERROR: candidate manifest must use cage.release-candidate schema version 3")
           if manifest.get("source_sha") != sha or manifest.get("version") != version:
               raise SystemExit("ERROR: candidate manifest source identity mismatch")
           if manifest.get("ci_run_id") != int(run_id):
               raise SystemExit("ERROR: candidate manifest CI run mismatch")
           if manifest.get("platforms") != ["linux/amd64", "linux/arm64"]:
               raise SystemExit("ERROR: candidate manifest platform set mismatch")
-          names = ("base", "claude-code", "codex", "opencode")
+          names = ("base", "claude-code", "codex", "opencode", "token-monitor")
           images = manifest.get("images")
           if not isinstance(images, dict) or set(images) != set(names):
-              raise SystemExit("ERROR: candidate manifest must contain exactly base, claude-code, codex, and opencode")
+              raise SystemExit("ERROR: candidate manifest must contain exactly base, claude-code, codex, opencode, and token-monitor")
           for name in names:
               entry = images[name]
               if entry.get("name") != "ghcr.io/sindycate/cage/" + name:
@@ -138,12 +139,13 @@ jobs:
               if not re.fullmatch(r"sha256:[0-9a-f]{64}", entry.get("digest", "")):
                   raise SystemExit("ERROR: candidate manifest digest mismatch for " + name)
           PY
-          for image in base claude-code codex opencode; do
+          for image in base claude-code codex opencode token-monitor; do
             case "$image" in
               base) key=base ;;
               claude-code) key=claude ;;
               codex) key=codex ;;
               opencode) key=opencode ;;
+              token-monitor) key=monitor ;;
             esac
             expected="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["images"][sys.argv[2]]["digest"])' "$MANIFEST" "$image")"
             candidate="ghcr.io/sindycate/cage/${image}:candidate-${GITHUB_SHA}"
@@ -290,6 +292,8 @@ jobs:
             digest: ${{ needs.gate.outputs.codex_digest }}
           - image: opencode
             digest: ${{ needs.gate.outputs.opencode_digest }}
+          - image: token-monitor
+            digest: ${{ needs.gate.outputs.monitor_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -366,6 +370,8 @@ jobs:
             digest: ${{ needs.gate.outputs.codex_digest }}
           - image: opencode
             digest: ${{ needs.gate.outputs.opencode_digest }}
+          - image: token-monitor
+            digest: ${{ needs.gate.outputs.monitor_digest }}
     steps:
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -409,6 +415,8 @@ jobs:
             digest: ${{ needs.gate.outputs.codex_digest }}
           - image: opencode
             digest: ${{ needs.gate.outputs.opencode_digest }}
+          - image: token-monitor
+            digest: ${{ needs.gate.outputs.monitor_digest }}
     steps:
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 

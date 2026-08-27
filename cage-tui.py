@@ -66,6 +66,7 @@ DESKTOP_STATUSES = {
 }
 MAX_DESKTOP_TARGETS = 256
 MAX_DESKTOP_LIST_CHARS = 2 * 1024 * 1024
+MAX_MONITOR_OUTPUT_CHARS = 2 * 1024 * 1024
 
 
 def execution_target_label(target: str) -> str:
@@ -321,6 +322,73 @@ class Controller:
                 output = "\n".join(
                     [f"(showing the newest 250 of {len(lines)} log lines)", *lines[-250:]]
                 )
+        return completed.returncode, output
+
+    def monitor_status(self) -> dict[str, Any]:
+        launcher = self.backend.with_name("cage")
+        environment = os.environ.copy()
+        environment["CAGE_CONFIG_DIR"] = str(self.config.parent)
+        completed = subprocess.run(
+            [str(launcher), "monitor", "status", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env=environment,
+        )
+        if len(completed.stdout) + len(completed.stderr) > MAX_MONITOR_OUTPUT_CHARS:
+            raise UiError("Token Monitor returned too much data")
+        if completed.returncode:
+            raise UiError(
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or "could not read Token Monitor status"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise UiError("Token Monitor returned invalid status data") from exc
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("connected"), bool)
+            or not isinstance(payload.get("devices"), list)
+            or len(payload["devices"]) > 4096
+        ):
+            raise UiError("Token Monitor returned an unsupported status")
+        return payload
+
+    def run_monitor_action(
+        self,
+        action: str,
+        arguments: list[str] | None = None,
+        *,
+        interactive: bool = False,
+    ) -> tuple[int, str]:
+        if action not in {"connect", "disconnect", "sync", "add", "forget"}:
+            raise UiError(f"unsupported Token Monitor action: {action}")
+        launcher = self.backend.with_name("cage")
+        command = [str(launcher), "monitor", action, *(arguments or [])]
+        environment = os.environ.copy()
+        environment["CAGE_CONFIG_DIR"] = str(self.config.parent)
+        if interactive:
+            completed = subprocess.run(command, check=False, env=environment)
+            return completed.returncode, ""
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=300,
+            env=environment,
+        )
+        output = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        if len(output) > MAX_MONITOR_OUTPUT_CHARS:
+            output = (
+                f"(showing the newest {MAX_MONITOR_OUTPUT_CHARS} characters)\n"
+                + output[-MAX_MONITOR_OUTPUT_CHARS:]
+            )
         return completed.returncode, output
 
     def effective_preset(self) -> tuple[str, dict[str, Any]]:
@@ -1571,6 +1639,119 @@ class CursesView:
             except UiError as exc:
                 self.message = str(exc)
 
+    def manage_monitor(self) -> None:
+        """Manage the optional host-owned Token Monitor connection."""
+
+        try:
+            status = self.controller.monitor_status()
+        except (UiError, OSError, subprocess.SubprocessError) as exc:
+            self.message = str(exc)
+            return
+        connection_label = (
+            f"Connected: {status.get('hub_url') or '(unknown hub)'}"
+            if status.get("connected")
+            else "Disconnected"
+        )
+        devices = status.get("devices", [])
+        details = [
+            connection_label,
+            f"Registered Cage devices: {len(devices)}",
+            "Only Codex Container/Desktop state is collected; host Codex, Claude, and OpenCode are excluded.",
+            "Hub device records remain until explicitly forgotten; replacement "
+            "adoption upserts the current volume summary.",
+        ]
+        options = [
+            ("refresh", "Refresh status"),
+            ("connect", "Connect or replace hub"),
+            ("disconnect", "Disconnect and preserve registrations"),
+            ("sync", "Synchronize all registered devices"),
+            ("add", "Explicitly add this project's Codex volume"),
+        ]
+        if devices:
+            options.append(("forget", "Forget a registered device"))
+        action = self.menu("Token Monitor", options, details, initial_key="refresh")
+        if not action:
+            return
+        if action == "refresh":
+            self.message = "Token Monitor status refreshed."
+            return
+        if action == "connect":
+            url = self.prompt("Token Monitor", "Hub URL (https://…):")
+            if not url:
+                return
+            import curses
+            curses.endwin()
+            code, _ = self.controller.run_monitor_action(
+                "connect", [url], interactive=True
+            )
+            self.screen.refresh()
+            self.message = (
+                "Token Monitor connection saved."
+                if code == 0
+                else "Token Monitor connection failed."
+            )
+            return
+        if action == "disconnect":
+            if not self.confirm(
+                "Disconnect Token Monitor",
+                [
+                    "Cage will remove the local hub credential.",
+                    "Hub device records and their current totals will remain available.",
+                ],
+                phrase="DISCONNECT",
+                case_sensitive=True,
+            ):
+                return
+            code, output = self.controller.run_monitor_action("disconnect")
+            if output:
+                self.show_text("Token Monitor disconnect", output.splitlines())
+            self.message = "Token Monitor disconnected." if code == 0 else "Disconnect failed."
+            return
+        if action == "sync":
+            code, output = self.controller.run_monitor_action("sync")
+            if output:
+                self.show_text("Token Monitor synchronization", output.splitlines())
+            self.message = "Token Monitor synchronization completed." if code == 0 else "Synchronization failed."
+            return
+        if action == "add":
+            name, preset = self.controller.effective_preset()
+            effective = self.controller.snapshot.get("effective", {})
+            target, _, _ = self.controller.effective_exec_state(preset)
+            if effective.get("tool") != "codex" or target not in {"container", "desktop"}:
+                self.message = "This project must resolve to a Codex Container or Desktop target before it can be monitored."
+                return
+            arguments = [str(self.controller.repo), "--preset", name, f"--{target}"]
+            code, output = self.controller.run_monitor_action("add", arguments)
+            if output:
+                self.show_text("Token Monitor add", output.splitlines())
+            self.message = "Project added to Token Monitor." if code == 0 else "Project could not be added."
+            return
+        if action == "forget":
+            choices = [
+                (str(item.get("device_id", "")), str(item.get("display_name", "")))
+                for item in devices
+                if isinstance(item, dict) and item.get("device_id")
+            ]
+            selected = self.menu("Forget Token Monitor device", choices)
+            if not selected:
+                return
+            label = next((label for identifier, label in choices if identifier == selected), selected)
+            if not self.confirm(
+                "Forget Token Monitor device",
+                [
+                    f"Device: {selected}",
+                    f"Name: {label}",
+                    "This deletes the device record and its accumulated total from the configured hub.",
+                ],
+                phrase="FORGET",
+                case_sensitive=True,
+            ):
+                return
+            code, output = self.controller.run_monitor_action("forget", [selected, "--yes"])
+            if output:
+                self.show_text("Token Monitor forget", output.splitlines())
+            self.message = "Token Monitor device forgotten." if code == 0 else "Forget failed."
+
     def manage(self) -> None:
         cursor: str | None = None
         while True:
@@ -1580,6 +1761,7 @@ class CursesView:
                 ("storage", "Docker storage guardrails"),
                 ("project", "Project mappings"),
                 ("oauth", "Codex MCP OAuth login/logout"),
+                ("monitor", "Token Monitor usage aggregation"),
             ]
             choice = self.menu("Manage configuration", options, initial_key=cursor)
             if not choice:
@@ -1649,6 +1831,8 @@ class CursesView:
                             self.message = f"{label} must be an integer."
                         except UiError as exc:
                             self.message = str(exc)
+            elif choice == "monitor":
+                self.manage_monitor()
             elif choice == "project":
                 projects = self.controller.data.get("projects", {})
                 details = [f"{path} → {preset}" for path, preset in sorted(projects.items())] or ["No project mappings."]

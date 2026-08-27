@@ -12,7 +12,16 @@ gosu "$TARGET_USER" chmod 755 "$HOME"
 
 CODEX_DIR="$HOME/.codex"
 mkdir -p "$CODEX_DIR"
+for runtime_directory in "$CODEX_DIR/sessions" "$CODEX_DIR/archived_sessions"; do
+    if [ -L "$runtime_directory" ] || { [ -e "$runtime_directory" ] && [ ! -d "$runtime_directory" ]; }; then
+        echo "ERROR: unsafe Codex runtime directory: $runtime_directory" >&2
+        exit 1
+    fi
+    [ -d "$runtime_directory" ] || mkdir "$runtime_directory"
+done
+chown "$TARGET_USER":"$(id -gn "$TARGET_USER")" "$CODEX_DIR" "$CODEX_DIR/sessions" "$CODEX_DIR/archived_sessions"
 gosu "$TARGET_USER" chmod 700 "$CODEX_DIR"
+gosu "$TARGET_USER" chmod 700 "$CODEX_DIR/sessions" "$CODEX_DIR/archived_sessions"
 
 # Desktop secrets arrive through a private, short-lived bind source instead of
 # Docker Config.Env. Import them into this process before MCP/profile

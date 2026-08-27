@@ -6,6 +6,82 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.31.0 — 2026-08-27
+
+### Optional host-owned Token Monitor aggregation
+
+This release adds an opt-in way to aggregate accumulated Codex token totals
+from Cage's persistent Docker volumes into a Token Monitor hub. It is not a
+new launch target or a replacement for Cage's isolation boundary.
+
+Supported sources are ordinary Codex `target = "container"` launches and
+Codex `target = "desktop"` targets. Host-native Codex, Claude, and OpenCode
+state are never scanned. The collector runs briefly on the host's Docker
+daemon using the pinned Token Monitor v0.48.0 image. It has no network, runs as
+the host numeric UID/GID with dropped capabilities and resource limits, and
+mounts only the exact `sessions` and `archived_sessions` subdirectories of the
+selected Codex volume read-only. The host performs the authenticated hub
+request; the hub secret is never passed to the collector container.
+The bundled collector source is pinned to Token Monitor v0.48.0 (commit
+`6121585f5d5e7fa98385f8a5ac7f8639660e4965`, archive SHA-256
+`019b9dede6daa9e34a306dac0e3a6f90ca25ca900a298bb5205cdbe8a25a3cda`).
+
+Connect a hub from a terminal (the secret is prompted on `/dev/tty` and is
+never accepted as a command-line argument):
+
+```bash
+cage monitor connect https://token-monitor.example
+# or for a noninteractive secret handoff:
+printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
+  cage monitor connect https://token-monitor.example --secret-stdin
+```
+
+Plain HTTP is accepted only for loopback/private hosts. The connection URL,
+secret, and interval are stored in the private
+`~/.config/cage/monitor/connection.json`; identity, registration, lock, and
+per-device archive state are stored beside it with mode-0600 files and
+mode-0700 directories. Use `cage monitor status` to inspect the redacted local
+registry and hub reachability.
+
+Once connected, Cage automatically registers a Codex volume when that target
+is launched and performs an immediate, periodic (five-minute by default), and
+final scan. A registration is keyed by the host installation identity plus the
+logical target (repository and, for Desktop, preset), not by a volatile volume
+fingerprint. Therefore parallel Cage sessions for one repository share one
+device and one serialized scan. If a volume is recreated or replaced, Cage
+marks the registration `needs-adoption` and refuses to upload it until the
+replacement is explicitly adopted:
+
+```bash
+cage monitor add ~/projects/myapp --preset codex-company --container
+cage monitor sync
+```
+
+`add` is also the way to register a dormant target that is not currently
+running. `cage monitor disconnect` removes the local hub credential and pauses
+uploads without deleting registrations or the existing hub device record.
+`cage monitor forget DEVICE_ID --yes` first deletes the exact device from the
+configured hub, then retires the local registration and its private collector
+archive. Explicit replacement adoption reuses the stable device identity and
+upserts the replacement volume's current summary; use the hub's own export or
+retention controls if the old volume must remain a separate historical device.
+
+Migration and verification:
+
+1. Confirm that the selected Token Monitor hub is reachable and protected by
+   its own secret; prefer HTTPS for non-loopback hubs.
+2. Run `cage monitor connect URL`, then `cage monitor status` and inspect that
+   only the intended Codex Container/Desktop devices are registered.
+3. Launch a monitored Codex target or use explicit `monitor add`, then run
+   `cage monitor sync` to force a bounded one-shot update.
+4. If a state volume was intentionally replaced, use `monitor add` to adopt it;
+   do not delete or edit the private registry by hand.
+
+Rollback: disconnect the monitor and install the previous Cage release. The
+Codex state volumes remain untouched. The optional `cage-token-monitor` image
+may remain locally; it is a managed image subject to the normal Cage storage
+retention policy.
+
 ## 0.30.2 — 2026-08-26
 
 ### AWS CLI settings belong to reusable presets

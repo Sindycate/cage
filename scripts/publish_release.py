@@ -39,12 +39,13 @@ from typing import Callable, Optional, Sequence
 
 REPOSITORY = "Sindycate/cage"
 GHCR_ROOT = "ghcr.io/sindycate/cage"
-IMAGE_NAMES: tuple[str, ...] = ("base", "claude-code", "codex", "opencode")
+IMAGE_NAMES: tuple[str, ...] = ("base", "claude-code", "codex", "opencode", "token-monitor")
 IMAGE_DOCKERFILE = {
     "base": "Dockerfile.base",
     "claude-code": "Dockerfile",
     "codex": "Dockerfile.codex",
     "opencode": "Dockerfile.opencode",
+    "token-monitor": "Dockerfile.monitor",
 }
 PHASES: tuple[str, ...] = (
     "local_ready",
@@ -1174,6 +1175,13 @@ class Orchestrator:
             result = self.runner.run([REQUIRED_BASH, "-n", name], cwd=self.repo_root)
             if not result.ok:
                 raise PreflightError(f"bash -n {name} failed:\n{bounded(result.stderr)}")
+        node = shutil.which("node")
+        if node:
+            result = self.runner.run([node, "--check", "token-monitor-collector.js"], cwd=self.repo_root)
+            if not result.ok:
+                raise PreflightError(
+                    f"node --check token-monitor-collector.js failed:\n{bounded(result.stderr)}"
+                )
         return "passed"
 
     def _gate_compose(self) -> str:
@@ -1255,7 +1263,7 @@ class Orchestrator:
     def _validate_candidate_manifest(self, data: dict) -> None:
         if data.get("schema") != CANDIDATE_SCHEMA:
             raise ReleaseError("candidate manifest schema mismatch")
-        if data.get("schema_version") != 2:
+        if data.get("schema_version") != 3:
             raise ReleaseError("candidate manifest schema version mismatch")
         if data.get("source_sha") != self.context.commit_sha:
             raise ReleaseError("candidate manifest source_sha mismatch")

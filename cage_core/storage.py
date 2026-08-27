@@ -24,10 +24,13 @@ KNOWN_REPOSITORIES = {
     "claude-code": "claude",
     "codex": "codex",
     "opencode": "opencode",
+    "token-monitor": "monitor",
+    "cage-token-monitor": "monitor",
     "ghcr.io/sindycate/cage/base": "base",
     "ghcr.io/sindycate/cage/claude-code": "claude",
     "ghcr.io/sindycate/cage/codex": "codex",
     "ghcr.io/sindycate/cage/opencode": "opencode",
+    "ghcr.io/sindycate/cage/token-monitor": "monitor",
 }
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -57,7 +60,7 @@ class ImageRecord:
     def managed(self) -> bool:
         return (
             self.labels.get(MANAGED_LABEL) == "true"
-            and self.labels.get(ROLE_LABEL) in {"base", "claude", "codex", "opencode"}
+            and self.labels.get(ROLE_LABEL) in {"base", "claude", "codex", "opencode", "monitor"}
             and bool(SEMVER_RE.fullmatch(self.labels.get(VERSION_LABEL, "")))
         )
 
@@ -239,6 +242,7 @@ def cleanup_candidates(
         "claude": set(),
         "codex": set(),
         "opencode": set(),
+        "monitor": set(),
     }
     legacy_ids: set[str] = set()
     for image in images:

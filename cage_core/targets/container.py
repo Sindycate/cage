@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .. import bridge as bridge_policy, config, opencode_policy, storage
+from .. import bridge as bridge_policy, config, monitor, opencode_policy, storage
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -77,6 +77,8 @@ class ContainerRuntime:
     build_preflight_done: bool = False
     opencode_snapshot: Path | None = None
     opencode_environment: dict[str, str] = field(default_factory=dict)
+    monitor_record: monitor.VolumeRegistration | None = None
+    monitor_worker: monitor.ActiveMonitor | None = None
 
     @property
     def plan(self):
@@ -1156,6 +1158,90 @@ def _run_ordinary(
     return result.returncode
 
 
+def _prepare_codex_monitor(runtime: ContainerRuntime) -> None:
+    """Create/fingerprint Codex state and register it when monitoring is enabled."""
+
+    plan = runtime.plan
+    if plan.tool != "codex":
+        return
+    logical_id = monitor.logical_target_id(
+        plan.repository, plan.target, plan.preset_name
+    )
+    try:
+        monitor.ensure_codex_volume_labels(
+            runtime.docker,
+            plan.volume_name,
+            logical_id=logical_id,
+        )
+    except monitor.MonitorError as exc:
+        print(f"WARNING: Token Monitor volume labels skipped: {exc}", file=sys.stderr)
+    try:
+        connection = monitor.load_connection(runtime.config_root)
+    except monitor.MonitorError as exc:
+        print(f"WARNING: Token Monitor state is invalid: {exc}", file=sys.stderr)
+        return
+    if connection is None or not connection.enabled:
+        return
+    try:
+        fingerprint = monitor.volume_fingerprint(runtime.docker, plan.volume_name)
+    except monitor.MonitorError as exc:
+        print(f"WARNING: Token Monitor volume registration skipped: {exc}", file=sys.stderr)
+        return
+    display_kind = "Desktop" if plan.target == "desktop" else "Container"
+    display_name = f"Cage: {Path(plan.repository).name} ({display_kind})"
+    try:
+        runtime.monitor_record = monitor.register_volume(
+            runtime.config_root,
+            runtime.docker,
+            volume_name=plan.volume_name,
+            repository=plan.repository,
+            target=plan.target,
+            preset=plan.preset_name,
+            display_name=display_name,
+            fingerprint=fingerprint,
+        )
+    except monitor.MonitorError as exc:
+        print(f"WARNING: Token Monitor registration skipped: {exc}", file=sys.stderr)
+
+
+def _start_codex_monitor(runtime: ContainerRuntime) -> None:
+    record = runtime.monitor_record
+    if record is None:
+        return
+    try:
+        connection = monitor.load_connection(runtime.config_root)
+    except monitor.MonitorError as exc:
+        print(f"WARNING: Token Monitor state is invalid: {exc}", file=sys.stderr)
+        return
+    if connection is None or not connection.enabled:
+        return
+
+    def scan() -> None:
+        monitor.scan_registration(
+            runtime.config_root,
+            runtime.docker,
+            runtime.install_root,
+            record,
+            version=runtime.plan.cage_version,
+            storage_policy=runtime.plan.storage_policy,
+            allow_build=False,
+        )
+
+    runtime.monitor_worker = monitor.ActiveMonitor(scan, connection.interval_seconds)
+    runtime.lifecycle.register(
+        "Token Monitor collector",
+        lambda: _stop_codex_monitor(runtime),
+    )
+
+
+def _stop_codex_monitor(runtime: ContainerRuntime) -> int:
+    worker = runtime.monitor_worker
+    if worker is not None:
+        worker.stop()
+        runtime.monitor_worker = None
+    return 0
+
+
 def _install_signal_handlers():
     previous = {
         signal.SIGINT: signal.getsignal(signal.SIGINT),
@@ -1208,6 +1294,7 @@ def run_container_target(
             _create_opencode_snapshot(runtime)
         _handle_collision(runtime)
         _acquire_image(runtime)
+        _prepare_codex_monitor(runtime)
         if prepared.plan.tool == "opencode":
             volume = runtime.run(
                 ["volume", "create", prepared.plan.volume_name],
@@ -1290,15 +1377,6 @@ def run_container_target(
                 or (Path.home() / ".codex")
             ).expanduser()
             if codex_home.is_dir():
-                volume = runtime.run(
-                    ["volume", "create", prepared.plan.volume_name],
-                    stdout=subprocess.DEVNULL,
-                    check=False,
-                )
-                if volume.returncode != 0:
-                    raise ContainerTargetError(
-                        "cannot create Codex state volume"
-                    )
                 oauth = OAuthReconciler(
                     volume_name=prepared.plan.volume_name,
                     image=prepared.plan.image,
@@ -1369,8 +1447,10 @@ def run_container_target(
         if prepared.plan.target == "desktop":
             from .desktop import run_desktop
 
+            _start_codex_monitor(runtime)
             primary_status = run_desktop(runtime, docker_arguments)
         else:
+            _start_codex_monitor(runtime)
             primary_status = _run_ordinary(
                 runtime, docker_arguments, tool_arguments
             )

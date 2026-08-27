@@ -307,6 +307,7 @@ class Scenario:
             "claude-code": "sha256:" + "2" * 64,
             "codex": "sha256:" + "3" * 64,
             "opencode": "sha256:" + "4" * 64,
+            "token-monitor": "sha256:" + "5" * 64,
         }
         self.archive_bytes = make_archive_bytes(version)
         self.archive_digest = __import__("hashlib").sha256(self.archive_bytes).hexdigest()
@@ -346,7 +347,7 @@ class Scenario:
         )
         return {
             "schema": "cage.release-candidate",
-            "schema_version": 2,
+            "schema_version": 3,
             "source_sha": self.sha,
             "version": self.version,
             "ci_run_id": ci_run_id,
@@ -1316,7 +1317,7 @@ class PublicVerificationResilienceTests(PublishReleaseTestCase):
 
         orch.image_inspector = inspect
         self.assertIn("version tags match", orch._verify_image_version_digests())
-        self.assertEqual(calls, 6)  # three base attempts, then one per leaf
+        self.assertEqual(calls, 7)  # three base attempts, then one per leaf
         self.assertEqual(sleeper.sleeps, 2)
 
     def test_latest_digest_propagation_is_retried_but_bounded(self):

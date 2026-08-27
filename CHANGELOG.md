@@ -5,6 +5,23 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.31.0 — 2026-08-27
+
+- add an optional host-owned Token Monitor integration for accumulated Codex
+  token totals across Cage Container and Desktop volumes; each logical Cage
+  target is one stable hub device, parallel sessions sharing a volume are
+  serialized, and host-native Codex, Claude, and OpenCode remain excluded;
+- collect only `sessions/` and `archived_sessions/` through a short-lived,
+  pinned Token Monitor v0.48.0 image with Docker `volume-subpath`, no network,
+  read-only source mounts, bounded resources, and a host-side authenticated
+  uploader;
+- add private monitor connection/identity/registry state, CLI and TUI controls
+  for connect, disconnect, status, sync, explicit volume adoption, and forget,
+  with replacement-volume detection and hub device records preserved until
+  explicit forget;
+- publish and verify the fifth managed `token-monitor` image alongside the
+  existing Cage images.
+
 ## 0.30.2 — 2026-08-26
 
 - make profile-pinned AWS CLI settings first-class reusable-preset and TUI

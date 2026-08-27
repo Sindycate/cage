@@ -275,8 +275,8 @@ a registry tag alone.
 ### SHA candidates, exact-digest promotion, and attestation identities
 
 A successful `ci.yml` run on `main` publishes immutable
-`candidate-<full-commit-sha>` images for `base`, `claude-code`, `codex`, and
-`opencode`.
+`candidate-<full-commit-sha>` images for `base`, `claude-code`, `codex`,
+`opencode`, and `token-monitor`.
 Candidate tags are **public and write-once**: anyone can inspect them, a
 conflicting or unverifiable candidate fails closed and is never overwritten,
 and they are not stable releases — Cage's image-pull logic never references
@@ -292,7 +292,7 @@ The tag-triggered release workflow **promotes** the exact verified candidate
 digests to the version and `latest` tags with `docker buildx imagetools
 create`; it never rebuilds images, never uses QEMU, and never resolves mutable
 package sources. Version tags are immutable (an existing version tag with a
-different digest fails closed), and `latest` moves only after all four version
+different digest fails closed), and `latest` moves only after all five version
 tags and their attestations succeed. Promotion is idempotent so a workflow
 rerun can finish after a partial registry interruption.
 

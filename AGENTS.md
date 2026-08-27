@@ -16,7 +16,7 @@ durable source of truth across context compaction and maintainer handoffs.
 ## Build and Run
 
 ```bash
-# Build/rebuild all images (builds shared base first, then all three leaves)
+# Build/rebuild all images (builds shared base first, then all four leaves)
 docker compose build
 
 # Build just the shared base
@@ -26,6 +26,7 @@ docker compose build base
 docker compose build claude
 docker compose build codex
 docker compose build opencode
+docker compose build monitor
 
 # Rebuild from scratch (e.g., to update tool versions)
 docker compose build --no-cache
@@ -173,6 +174,17 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   global policy before container/Desktop effects or builds; host-native execution
   bypasses it. Cleanup never prunes or deletes volumes, containers, referenced
   images, unrelated images, legacy unlabeled Cage images, or custom derived tags
+- `cage_core.monitor` is an optional host-owned Token Monitor integration. It
+  stores its hub credential, host identity, logical-target registry, locks, and
+  per-device state under private `~/.config/cage/monitor/` files; it is outside
+  the launch-plan contract. Only Codex Container/Desktop volumes can be
+  registered. A short-lived pinned collector mounts the exact `sessions/` and
+  `archived_sessions/` volume subpaths read-only with no network, while the
+  host performs authenticated hub requests. One logical repository target is
+  one device, so parallel sessions sharing a volume are serialized rather than
+  counted twice. Replacement volumes require explicit `cage monitor add`
+  adoption; `disconnect` preserves registrations and hub device records, while
+  `forget` deletes one hub device and retires its local archive
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
@@ -208,6 +220,10 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   backup files as config fragments
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the selected leaf image (useful for getting the latest tool version)
 - `cage update [claude|codex|opencode]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`; OpenCode: an unprivileged `npm install -g --allow-scripts=opencode-ai opencode-ai@latest` plus its image-level contract checks), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
+- `cage monitor connect|disconnect|status|sync|add|forget` manages the
+  optional host-side collector. Monitor connection state is not copied into
+  containers, and monitor failures are warnings during ordinary launches so
+  the accounting aid cannot make a coding session fail open or fail closed
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Ordinary same-repository launches keep one shared persistent state volume but
   use suffixed container names for parallel sessions. The collision menu reads
@@ -294,6 +310,9 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 - Preserves workspace trust across restarts (saves and restores `[projects]` entries in `config.toml`)
 - Sets `git safe.directory`, git identity, SSH config (same as Claude entrypoint)
 - Copies GitHub CLI config from `/host-gh` (same as Claude entrypoint)
+- Creates the volume-local `sessions/` and `archived_sessions/` directories with
+  the target user's ownership so the optional host collector can mount them by
+  Docker `volume-subpath` without broadening the volume boundary
 - Execs `codex` instead of `claude`
 
 **`entrypoint-opencode.sh`** (runs inside the OpenCode container on every start):
@@ -328,14 +347,21 @@ scripts, checks the required `--pure`, project/external-skill suppression, and
 fixed OAuth callback contracts at image build time, disables OpenCode's
 in-process updater, and copies `entrypoint-opencode.sh`.
 
+**`Dockerfile.monitor`**: Pinned, network-disabled Token Monitor collector
+image. It verifies the upstream v0.48.0 source archive by SHA-256, installs
+only production dependencies and the required architecture-specific token
+counter, and runs `token-monitor-collector.js`. The wrapper accepts the
+upstream summary only over loopback and writes one bounded JSON result to the
+host-provided output bind; it never receives the real hub secret.
+
 **`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, the `mcp-relay`/`host-cmd-relay` bridge scripts, and the shared fail-closed user-remapping helper. Contains no agent binaries, no entrypoints, no Cage tool accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
 
-All four Dockerfiles end with OCI version plus `io.cage.managed`,
+All five Dockerfiles end with OCI version plus `io.cage.managed`,
 `io.cage.role`, and `io.cage.version` labels. Local launcher, Compose, update
 overlay, CI candidate, and release-promotion paths preserve that identity so
 storage cleanup never infers ownership from repository names alone.
 
-**`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest`, `codex:latest`, and `opencode:latest`. Not used for running containers (that's `cage`'s job).
+**`docker-compose.yml`**: Build-only helper — builds the shared base first, then tags leaf images as `claude-code:latest`, `codex:latest`, `opencode:latest`, and `cage-token-monitor:latest`. Not used for running containers (that's `cage`'s job).
 
 **`netgate-proxy.py`** (host-side, runs when `--net gate` is active):
 - Python3 forward proxy that gates outbound HTTP/HTTPS by domain
@@ -424,10 +450,11 @@ from the release archive.
 installer, and Python 3.12 test/Docker/Desktop gates, a `candidate` job
 runs only on a `push` to `main` after every gate passes. It builds the shared
 base for `linux/amd64`+`linux/arm64`, publishes it as
-`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds all three leaves from
-that exact base digest, publishes `claude-code`/`codex`/`opencode` candidate tags, retains
-BuildKit SBOM and `provenance: mode=max`, signs GitHub provenance attestations
-for all four digests, and uploads a schema-v2 `release-candidate-<SHA>` manifest
+`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds all four leaves from
+that exact base digest, publishes `claude-code`/`codex`/`opencode`/`token-monitor`
+candidate tags, retains BuildKit SBOM and `provenance: mode=max`, signs GitHub
+provenance attestations for all five digests, and uploads a schema-v3
+`release-candidate-<SHA>` manifest
 artifact. Candidate tags are public, write-once, serialized per SHA
 (`cancel-in-progress: false`), and never referenced by Cage's pull logic. On a
 rerun for the same SHA, an existing candidate is verified (amd64/arm64 platforms
@@ -440,7 +467,7 @@ immutable commit SHAs (maintained by Dependabot), serialized per tag with
 cancellation disabled. (1) **Exact-commit gate**: requires an annotated
 `v<VERSION>` tag whose commit matches `CAGE_VERSION` and `GITHUB_SHA`, finds a
 successful `ci.yml` push run for exactly that SHA on `main`, downloads its
-candidate manifest, and verifies the four candidate digests, their
+candidate manifest, and verifies the five candidate digests, their
 amd64/arm64 platforms, and their CI attestations (expected repo, exact source
 digest, `refs/heads/main`, pinned `ci.yml` signer); fails closed if a version
 tag already exists with a different digest. This gate protects manual tag
@@ -450,7 +477,7 @@ secret scan, checksum, SPDX SBOM, and source provenance/SBOM attestations. (3)
 digests (`docker buildx imagetools create`, never rebuild/QEMU), re-attests
 each digest from the release workflow, and only then moves `latest`; idempotent
 for resume. (4) **Public consumer gate**: from a fresh empty Docker credential
-directory, verifies all four version and `latest` digests, their amd64/arm64
+directory, verifies all five version and `latest` digests, their amd64/arm64
 platforms, and literal anonymous pulls. (5) **GitHub Release**: reverifies the
 downloaded assets and creates the release last. The
 exact successful CI run replaces the duplicated Python/macOS/Docker/history-scan
@@ -462,7 +489,7 @@ deliverable.
 - Version is defined in `CAGE_VERSION` at the top of the `cage` script (e.g., `CAGE_VERSION="0.1.0"`)
 - `cage --version` prints the current version
 - Git tags use `v` prefix: `v0.1.0`, `v0.2.0`, etc.
-- Docker images are tagged with the version (`claude-code:0.1.0`, `codex:0.1.0`, and `opencode:0.1.0`) plus `:latest`, and published to `ghcr.io/sindycate/cage/` as multi-arch (amd64/arm64)
+- Docker images are tagged with the version (`claude-code:0.1.0`, `codex:0.1.0`, `opencode:0.1.0`, and `token-monitor:0.1.0`) plus `:latest`, and published to `ghcr.io/sindycate/cage/` as multi-arch (amd64/arm64)
 - On first run, cage pulls the pre-built image from ghcr.io; falls back to local build if pull fails
 - `--rebuild` forces a local `docker build --no-cache` to get the latest tool version
 - Releases are automated via GitHub Actions on tag push

@@ -33,3 +33,12 @@ services:
         CAGE_VERSION: ${CAGE_VERSION:-dev}
     image: opencode:latest
     depends_on: [base]
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+      args:
+        CAGE_BASE: cage-base:latest
+        CAGE_VERSION: ${CAGE_VERSION:-dev}
+    image: cage-token-monitor:latest
+    depends_on: [base]

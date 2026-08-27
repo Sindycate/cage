@@ -2,10 +2,12 @@
 !Dockerfile
 !Dockerfile.codex
 !Dockerfile.opencode
+!Dockerfile.monitor
 !entrypoint.sh
 !entrypoint-codex.sh
 !entrypoint-opencode.sh
 !codex-remote.py
+!token-monitor-collector.js
 !cage-user-remap.py
 !cage_core/
 !cage_core/**
