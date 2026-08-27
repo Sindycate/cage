@@ -6,6 +6,53 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.32.0 — 2026-08-27
+
+### One Cage device with volume projects
+
+Token Monitor registrations now use one stable hub device per Cage
+installation. Its ID has the form `cage-local-<8 hex characters>`. Each Codex
+Container or Desktop volume is a project under that device. Project IDs are
+keyed hashes of Cage logical-target IDs. They do not expose repository paths.
+
+Cage scans all active registered volumes before it performs one replacement
+upload. It deduplicates identical session records. When one cumulative copy
+contains every counter from another copy, Cage keeps the larger copy. A session
+that exists in more than one volume is assigned to `Cage: Unattributed` because
+Cage cannot prove its original repository. Incompatible copies abort the new
+upload, so the hub keeps its last good snapshot.
+
+Existing v0.31.x registry files are read without an in-place destructive
+conversion. Cage retains each exact old device ID as migration state. Use:
+
+```bash
+cage monitor status
+cage monitor migrate --yes
+```
+
+The migration uploads the new aggregate device first. It then reads
+authenticated hub statistics and requires the new device to be present. Only
+after verification does it delete the exact legacy IDs recorded in the private
+registry. Each successful delete is committed separately. If the command
+stops, run it again; already completed IDs are not deleted again. Do not use
+`monitor forget` as a substitute for this migration.
+
+Cost now remains part of the aggregate payload. `monitor status` reports total
+estimated cost, priced-token coverage, and missing model IDs. Token Monitor's
+built-in catalog remains authoritative. For private aliases that have no
+catalog price, add an explicit USD-per-million rate:
+
+```bash
+cage monitor pricing set MODEL --input 1.25 --output 10 --cache-read 0.125
+cage monitor pricing status
+cage monitor sync
+```
+
+At least `--input` or `--output` is required. A zero rate means explicitly
+free. Cage does not infer or invent missing rates. Pricing data is mode 0600
+under `~/.config/cage/monitor/`; the generated Tokscale file enters only the
+network-disabled collector state.
+
 ## 0.31.2 — 2026-08-27
 
 ### Token Monitor prompt compatibility

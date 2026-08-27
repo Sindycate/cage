@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
+process.umask(0o077);
+
 // Cage runs this adapter as the entrypoint of the pinned Token Monitor image.
 // The upstream agent remains the accounting authority.  Its hub request is
 // terminated on loopback so the collector can retain its local archive without

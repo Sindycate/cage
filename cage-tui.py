@@ -351,8 +351,9 @@ class Controller:
         if (
             not isinstance(payload, dict)
             or not isinstance(payload.get("connected"), bool)
-            or not isinstance(payload.get("devices"), list)
-            or len(payload["devices"]) > 4096
+            or not isinstance(payload.get("device_id"), str)
+            or not isinstance(payload.get("projects"), list)
+            or len(payload["projects"]) > 4096
         ):
             raise UiError("Token Monitor returned an unsupported status")
         return payload
@@ -364,7 +365,7 @@ class Controller:
         *,
         interactive: bool = False,
     ) -> tuple[int, str]:
-        if action not in {"connect", "disconnect", "sync", "add", "forget"}:
+        if action not in {"connect", "disconnect", "sync", "add", "migrate", "forget"}:
             raise UiError(f"unsupported Token Monitor action: {action}")
         launcher = self.backend.with_name("cage")
         command = [str(launcher), "monitor", action, *(arguments or [])]
@@ -1652,23 +1653,32 @@ class CursesView:
             if status.get("connected")
             else "Disconnected"
         )
-        devices = status.get("devices", [])
+        projects = status.get("projects", [])
+        device_id = str(status.get("device_id", ""))
         details = [
             connection_label,
-            f"Registered Cage devices: {len(devices)}",
+            f"Cage device: {device_id}",
+            f"Registered Cage projects: {len(projects)}",
             "Only Codex Container/Desktop state is collected; host Codex, Claude, and OpenCode are excluded.",
-            "Hub device records remain until explicitly forgotten; replacement "
-            "adoption upserts the current volume summary.",
+            "Cage deduplicates shared sessions before it replaces the hub device summary.",
         ]
+        aggregate = status.get("aggregate")
+        if isinstance(aggregate, dict):
+            details.append(
+                f"Estimated cost: ${float(aggregate.get('cost_usd', 0)):.6f}; "
+                f"price coverage: {float(aggregate.get('price_coverage_percent', 0)):.2f}%"
+            )
         options = [
             ("refresh", "Refresh status"),
             ("connect", "Connect or replace hub"),
             ("disconnect", "Disconnect and preserve registrations"),
-            ("sync", "Synchronize all registered devices"),
+            ("sync", "Synchronize the Cage device"),
             ("add", "Explicitly add this project's Codex volume"),
         ]
-        if devices:
-            options.append(("forget", "Forget a registered device"))
+        if int(status.get("migration_pending", 0) or 0) > 0:
+            options.append(("migrate", "Replace legacy per-volume devices"))
+        if projects:
+            options.append(("forget", "Forget the Cage device"))
         action = self.menu("Token Monitor", options, details, initial_key="refresh")
         if not action:
             return
@@ -1726,28 +1736,35 @@ class CursesView:
                 self.show_text("Token Monitor add", output.splitlines())
             self.message = "Project added to Token Monitor." if code == 0 else "Project could not be added."
             return
-        if action == "forget":
-            choices = [
-                (str(item.get("device_id", "")), str(item.get("display_name", "")))
-                for item in devices
-                if isinstance(item, dict) and item.get("device_id")
-            ]
-            selected = self.menu("Forget Token Monitor device", choices)
-            if not selected:
+        if action == "migrate":
+            if not self.confirm(
+                "Migrate Token Monitor devices",
+                [
+                    "Cage will upload and verify one aggregate device first.",
+                    "It will then delete only the legacy device IDs in the private registry.",
+                ],
+                phrase="MIGRATE",
+                case_sensitive=True,
+            ):
                 return
-            label = next((label for identifier, label in choices if identifier == selected), selected)
+            code, output = self.controller.run_monitor_action("migrate", ["--yes"])
+            if output:
+                self.show_text("Token Monitor migration", output.splitlines())
+            self.message = "Token Monitor migration completed." if code == 0 else "Migration failed."
+            return
+        if action == "forget":
             if not self.confirm(
                 "Forget Token Monitor device",
                 [
-                    f"Device: {selected}",
-                    f"Name: {label}",
-                    "This deletes the device record and its accumulated total from the configured hub.",
+                    f"Device: {device_id}",
+                    f"Projects: {len(projects)}",
+                    "This deletes the aggregate device and disables all registered projects.",
                 ],
                 phrase="FORGET",
                 case_sensitive=True,
             ):
                 return
-            code, output = self.controller.run_monitor_action("forget", [selected, "--yes"])
+            code, output = self.controller.run_monitor_action("forget", [device_id, "--yes"])
             if output:
                 self.show_text("Token Monitor forget", output.splitlines())
             self.message = "Token Monitor device forgotten." if code == 0 else "Forget failed."

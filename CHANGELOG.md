@@ -5,6 +5,18 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.32.0 — 2026-08-27
+
+- replace opaque per-volume Token Monitor devices with one readable Cage
+  installation device and one project per registered Codex volume;
+- aggregate every active volume before one hub upload, deduplicate identical or
+  monotonic session copies, attribute cross-volume history to `Unattributed`,
+  and preserve the last good hub snapshot on incompatible copies;
+- report estimated cost, pricing coverage, missing model prices, and duplicate
+  counts; add private custom pricing commands for model aliases;
+- add an explicit verified and resumable migration that deletes only exact
+  legacy device IDs after the new aggregate device is visible on the hub;
+
 ## 0.31.2 — 2026-08-27
 
 - make the interactive Token Monitor secret prompt work in terminals where

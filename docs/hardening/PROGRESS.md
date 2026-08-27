@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-27 — aggregate Token Monitor device prepared for v0.32.0
+
+Replaced the per-volume hub identity with one stable `cage-local-…` identity
+per Cage installation and keyed project IDs per logical Codex volume. Every
+sync now scans all active volumes, uploads one replacement snapshot, and uses a
+host-wide lock and short automatic-scan throttle. Session copies are counted
+once when identical or monotonic. Cross-volume history is reported as
+`Unattributed`; incompatible copies preserve the hub's last good snapshot.
+
+The collector still has no network and receives only exact read-only Codex
+session subpaths. Per-project archives remain private. Cage now supplies a
+private Tokscale custom-pricing file, reports aggregate cost and price coverage,
+and lists model IDs with missing rates. It never invents prices.
+
+Registry schema 2 retains exact v0.31.x device IDs. `monitor migrate --yes`
+uploads and verifies the new device before it deletes those IDs one at a time,
+which makes failure recovery resumable. CLI, TUI, README, architecture notes,
+and migration guidance describe the new device/project model. Focused monitor,
+TUI, Desktop, launcher, and collision coverage passes (`115 passed`). The
+complete supported suite passes (`561 passed, 13 skipped`). An offline scan of
+copies of both live archives produced 154,969,077 deduplicated tokens, 38
+duplicate copies, two named projects, one `Unattributed` rollup, and a 37 KB
+payload without contacting the hub. The exact 0.32.0 collector image built and
+returned a zero-token Codex-only summary from a disposable volume with no
+network. Python 3.12 compilation, Bash and Node syntax, Compose rendering,
+source-archive creation and checksum verification, and `git diff --check` pass.
+Public publication remains pending.
+
 ## 2026-08-27 — Token Monitor interactive prompt compatibility prepared for v0.31.2
 
 The interactive `monitor connect` path previously passed `sys.stdin` as the

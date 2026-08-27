@@ -53,10 +53,12 @@ Commands:
   storage clean              Preview and confirm narrow Cage image cleanup
   monitor connect URL         Connect the optional host-owned Token Monitor hub
   monitor disconnect          Remove the local hub credential and pause uploads
-  monitor status [--json]     Show monitor connection and registered devices
-  monitor sync [PATH]         Scan registered Codex volumes (or one project)
+  monitor status [--json]     Show the Cage device, projects, cost, and migration state
+  monitor sync [PATH]         Scan and aggregate all registered Codex volumes
   monitor add PATH            Explicitly adopt/register a Codex volume
-  monitor forget DEVICE_ID    Delete one hub device and retire its registration
+  monitor migrate --yes       Replace legacy per-volume hub devices safely
+  monitor pricing ...         Manage private custom model prices
+  monitor forget DEVICE_ID    Delete a Cage-owned hub device
 
 Options:
   --preset NAME     Use a central config preset (one-shot override)
@@ -538,7 +540,8 @@ def _resolve_monitor_registration(
 def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     connection = monitor.load_connection(config_root)
     registrations = monitor.load_registry(config_root)
-    rows = [item.public_dict() for item in registrations]
+    rows = [item.public_dict_for(config_root) for item in registrations]
+    aggregate = monitor.load_aggregate_status(config_root)
     hub: dict[str, object] | None = None
     if connection is not None and connection.enabled:
         try:
@@ -557,7 +560,10 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         "connected": bool(connection is not None and connection.enabled),
         "hub_url": connection.hub_url if connection is not None else "",
         "interval_seconds": connection.interval_seconds if connection is not None else None,
-        "devices": rows,
+        "device_id": monitor.host_device_id(config_root),
+        "projects": rows,
+        "migration_pending": sum(bool(item.legacy_device_id) for item in registrations),
+        "aggregate": aggregate,
         "hub": hub,
     }
     if as_json:
@@ -571,15 +577,86 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             print(f"Hub: unavailable ({hub['error']})")
         elif hub:
             print(f"Hub devices: {hub.get('device_count', '?')}")
+    print(f"Cage device: {monitor.host_device_id(config_root)}")
     if not rows:
-        print("Registered Cage devices: none")
+        print("Registered Cage projects: none")
     else:
-        print(f"Registered Cage devices: {len(rows)}")
+        print(f"Registered Cage projects: {len(rows)}")
         for row in rows:
             print(
-                f"  {row['device_id']}  {row['status']}  {row['display_name']}"
+                f"  {row['project_id']}  {row['status']}  {row['display_name']}"
                 f"  last={row['last_success_at'] or 'never'}"
             )
+    if aggregate:
+        print(
+            f"Estimated cost: ${aggregate.get('cost_usd', 0):.6f} for "
+            f"{aggregate.get('total_tokens', 0):,} tokens"
+        )
+        print(
+            f"Price coverage: {aggregate.get('price_coverage_percent', 0):.2f}% "
+            f"({aggregate.get('unpriced_tokens', 0):,} unpriced tokens)"
+        )
+        missing = aggregate.get("missing_models")
+        if isinstance(missing, list) and missing:
+            print("Missing prices: " + ", ".join(str(item) for item in missing))
+        print(f"Deduplicated session copies: {aggregate.get('duplicate_sessions', 0)}")
+    pending = sum(bool(item.legacy_device_id) for item in registrations)
+    if pending:
+        print(
+            f"Legacy migration: {pending} old hub device(s) remain; "
+            "run cage monitor migrate --yes"
+        )
+    return 0
+
+
+def _run_monitor_pricing(arguments: list[str], *, config_root: Path) -> int:
+    if not arguments:
+        raise CliError("Usage: cage monitor pricing status|set|remove ...")
+    action, rest = arguments[0], arguments[1:]
+    if action == "status":
+        if rest not in ([], ["--json"]):
+            raise CliError("monitor pricing status accepts only --json")
+        models = monitor.load_pricing(config_root)
+        if rest == ["--json"]:
+            print(json.dumps({"models": models}, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        elif not models:
+            print("Custom Token Monitor prices: none")
+        else:
+            print(f"Custom Token Monitor prices: {len(models)}")
+            for model, rates in sorted(models.items()):
+                rendered = ", ".join(f"{key}={value:g}" for key, value in sorted(rates.items()))
+                print(f"  {model}  {rendered}")
+        return 0
+    if action == "remove":
+        if len(rest) != 1:
+            raise CliError("monitor pricing remove requires one model ID")
+        if not monitor.remove_model_pricing(config_root, rest[0]):
+            raise CliError("custom price was not found")
+        print(f"Removed custom price for {rest[0]}")
+        return 0
+    if action != "set" or not rest:
+        raise CliError("Usage: cage monitor pricing set MODEL --input N --output N [--cache-read N]")
+    model_id = rest.pop(0)
+    values: dict[str, float | None] = {"input": None, "output": None, "cache_read": None}
+    index = 0
+    while index < len(rest):
+        option = rest[index]
+        names = {"--input": "input", "--output": "output", "--cache-read": "cache_read"}
+        if option not in names or index + 1 >= len(rest):
+            raise CliError(f"invalid monitor pricing option: {option}")
+        try:
+            values[names[option]] = float(rest[index + 1])
+        except ValueError as exc:
+            raise CliError(f"invalid price for {option}") from exc
+        index += 2
+    monitor.set_model_pricing(
+        config_root,
+        model_id,
+        input_per_million=values["input"],
+        output_per_million=values["output"],
+        cache_read_per_million=values["cache_read"],
+    )
+    print(f"Saved custom price for {model_id}; run cage monitor sync to recalculate cost.")
     return 0
 
 
@@ -592,13 +669,15 @@ def _run_monitor(
 ) -> int:
     if not arguments:
         print(
-            "Usage: cage monitor connect|disconnect|status|sync|add|forget ...",
+            "Usage: cage monitor connect|disconnect|status|sync|add|migrate|pricing|forget ...",
             file=sys.stderr,
         )
         return 1
     action = arguments[0]
     rest = arguments[1:]
     try:
+        if action == "pricing":
+            return _run_monitor_pricing(rest, config_root=config_root)
         if action == "connect":
             if not rest:
                 raise CliError("monitor connect requires a hub URL")
@@ -634,11 +713,31 @@ def _run_monitor(
             if rest:
                 raise CliError("monitor disconnect accepts no options")
             monitor.disable_connection(config_root)
-            print("Token Monitor disconnected; registered device totals were preserved.")
+            print("Token Monitor disconnected; the Cage device and project totals were preserved.")
             return 0
         if action == "status":
-            _, _, _, as_json = _monitor_target_and_preset(rest)
-            return _monitor_status(config_root, as_json=as_json)
+            if rest not in ([], ["--json"]):
+                raise CliError("monitor status accepts only --json")
+            return _monitor_status(config_root, as_json=rest == ["--json"])
+        if action == "migrate":
+            if rest != ["--yes"]:
+                raise CliError("monitor migrate requires --yes")
+            docker = storage.docker_command()
+            config_path = config_root / "config.toml"
+            policy = (
+                config.storage_policy_from_config(config.load_config(config_path))
+                if config_path.is_file()
+                else storage.StoragePolicy()
+            )
+            count = monitor.migrate_legacy_devices(
+                config_root,
+                docker,
+                install_root,
+                version=cage_version,
+                storage_policy=policy,
+            )
+            print(f"Token Monitor migration complete; removed {count} legacy hub device(s).")
+            return 0
         if action not in {"sync", "add"}:
             if action == "forget":
                 if not rest:
@@ -653,18 +752,25 @@ def _run_monitor(
                 connection = monitor.load_connection(config_root)
                 if connection is None or not connection.enabled:
                     raise CliError("Token Monitor is disconnected")
+                registrations = monitor.load_registry(config_root)
+                host_id = monitor.host_device_id(config_root)
+                legacy_record = next(
+                    (item for item in registrations if item.legacy_device_id == device_id),
+                    None,
+                )
+                is_host_device = device_id == host_id and bool(registrations)
+                if not is_host_device and legacy_record is None:
+                    raise CliError("monitor device was not found")
                 if not assume_yes:
                     if not sys.stdin.isatty():
                         raise CliError("monitor forget requires --yes in a noninteractive shell")
                     print(f"Type FORGET to delete {device_id} from the Token Monitor hub: ", end="", flush=True)
                     if sys.stdin.readline().strip() != "FORGET":
                         raise CliError("forget aborted")
-                # Retire the exact locally-owned record before contacting the
-                # hub.  This both scopes the destructive request to a device
-                # Cage registered on this installation and leaves a disabled
-                # tombstone if the remote delete fails, preventing an
-                # automatic re-registration race.
-                monitor.retire_registration(config_root, device_id, disabled=True)
+                if is_host_device:
+                    monitor.disable_all_registrations(config_root)
+                elif legacy_record is not None:
+                    monitor.retire_registration(config_root, legacy_record.logical_id, disabled=True)
                 try:
                     monitor.delete_device(connection, device_id)
                 except monitor.MonitorError as exc:
@@ -672,8 +778,17 @@ def _run_monitor(
                         "Token Monitor hub deletion failed; the local registration "
                         f"remains disabled: {exc}"
                     ) from exc
-                monitor.remove_device_state(config_root, device_id)
-                print(f"Forgot Token Monitor device {device_id}; future launches require explicit add.")
+                if is_host_device:
+                    for record in registrations:
+                        monitor.remove_project_state(config_root, record.logical_id)
+                    monitor.remove_aggregate_status(config_root)
+                else:
+                    assert legacy_record is not None
+                    monitor.remove_device_state(config_root, device_id)
+                    monitor.clear_legacy_device_id(
+                        config_root, legacy_record.logical_id, device_id
+                    )
+                print(f"Forgot Token Monitor device {device_id}; disabled projects require explicit add.")
                 return 0
             raise CliError(f"unknown monitor action: {action}")
 
@@ -716,7 +831,10 @@ def _run_monitor(
                 fingerprint=fingerprint,
                 allow_replacement=action == "add",
             )
-            print(f"Registered {record.device_id} for {record.display_name}")
+            print(
+                f"Registered {monitor.project_id_for(config_root, record.logical_id)} "
+                f"for {record.display_name}"
+            )
             connection = monitor.load_connection(config_root)
             if connection is None or not connection.enabled:
                 raise CliError("registration saved, but Token Monitor is disconnected")
@@ -728,6 +846,7 @@ def _run_monitor(
                 version=cage_version,
                 storage_policy=policy,
                 allow_build=True,
+                force=True,
             )
             print(f"Synchronized {updated.device_id} at {updated.last_success_at}")
             return 0
@@ -740,25 +859,22 @@ def _run_monitor(
         registrations = monitor.load_registry(config_root)
         active = [item for item in registrations if item.status == "active"]
         if not active:
-            print("No active Token Monitor registrations.")
+            print("No active Token Monitor projects.")
             return 0
-        failures = 0
-        for record in active:
-            try:
-                updated, _ = monitor.scan_registration(
-                    config_root,
-                    docker,
-                    install_root,
-                    record,
-                    version=cage_version,
-                    storage_policy=policy,
-                    allow_build=True,
-                )
-                print(f"Synchronized {updated.device_id} at {updated.last_success_at}")
-            except monitor.MonitorError as exc:
-                failures += 1
-                print(f"WARNING: {record.device_id}: {exc}", file=sys.stderr)
-        return 1 if failures else 0
+        updated, _ = monitor.scan_all_registrations(
+            config_root,
+            docker,
+            install_root,
+            version=cage_version,
+            storage_policy=policy,
+            allow_build=True,
+            force=True,
+        )
+        print(
+            f"Synchronized {monitor.host_device_id(config_root)} with "
+            f"{len(updated)} project(s) at {updated[0].last_success_at}"
+        )
+        return 0
     except (CliError, config.ConfigError, PlanError, monitor.MonitorError, storage.StorageError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

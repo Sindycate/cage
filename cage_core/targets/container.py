@@ -1216,7 +1216,7 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
     if connection is None or not connection.enabled:
         return
 
-    def scan() -> None:
+    def scan(force: bool) -> None:
         monitor.scan_registration(
             runtime.config_root,
             runtime.docker,
@@ -1225,6 +1225,7 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
             version=runtime.plan.cage_version,
             storage_policy=runtime.plan.storage_policy,
             allow_build=False,
+            force=force,
         )
 
     runtime.monitor_worker = monitor.ActiveMonitor(scan, connection.interval_seconds)

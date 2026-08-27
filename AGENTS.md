@@ -175,16 +175,19 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   bypasses it. Cleanup never prunes or deletes volumes, containers, referenced
   images, unrelated images, legacy unlabeled Cage images, or custom derived tags
 - `cage_core.monitor` is an optional host-owned Token Monitor integration. It
-  stores its hub credential, host identity, logical-target registry, locks, and
-  per-device state under private `~/.config/cage/monitor/` files; it is outside
+  stores its hub credential, host identity, logical-target registry, locks,
+  per-project collector state, custom prices, and aggregate status under private
+  `~/.config/cage/monitor/` files; it is outside
   the launch-plan contract. Only Codex Container/Desktop volumes can be
   registered. A short-lived pinned collector mounts the exact `sessions/` and
   `archived_sessions/` volume subpaths read-only with no network, while the
-  host performs authenticated hub requests. One logical repository target is
-  one device, so parallel sessions sharing a volume are serialized rather than
-  counted twice. Replacement volumes require explicit `cage monitor add`
-  adoption; `disconnect` preserves registrations and hub device records, while
-  `forget` deletes one hub device and retires its local archive
+  host performs authenticated hub requests. One Cage installation is one hub
+  device and each logical Codex volume is one project. Every upload scans all
+  active volumes, deduplicates identical or monotonic session copies, assigns
+  cross-volume copies to `Unattributed`, and fails closed on incompatible
+  copies. Replacement volumes require explicit `cage monitor add` adoption.
+  Legacy per-volume hub devices require verified, resumable `monitor migrate`;
+  private custom pricing never enters the tool container or hub credential path
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
@@ -220,7 +223,7 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   backup files as config fragments
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the selected leaf image (useful for getting the latest tool version)
 - `cage update [claude|codex|opencode]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`; OpenCode: an unprivileged `npm install -g --allow-scripts=opencode-ai opencode-ai@latest` plus its image-level contract checks), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
-- `cage monitor connect|disconnect|status|sync|add|forget` manages the
+- `cage monitor connect|disconnect|status|sync|add|migrate|pricing|forget` manages the
   optional host-side collector. Monitor connection state is not copied into
   containers, and monitor failures are warnings during ordinary launches so
   the accounting aid cannot make a coding session fail open or fail closed

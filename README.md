@@ -157,26 +157,48 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
 
 After connecting, Codex Container and Desktop launches register their logical
 target automatically and scan immediately, every five minutes, and at exit.
-Parallel sessions for one repository intentionally share one device and are
-serialized, so their shared volume is counted once. A recreated volume is
-marked `needs-adoption` until explicitly accepted:
+One Cage installation reports one readable `cage-local-…` hub device. Each
+registered Codex volume is a project under that device. Cage scans all active
+volumes before each upload and replaces the device summary once.
+
+The aggregate is session-aware. Identical copies count once. If one copy is a
+strictly newer cumulative copy, Cage keeps it. Incompatible copies stop the
+upload and preserve the hub's last good snapshot. A session found in more than
+one volume is reported as `Cage: Unattributed`; Cage does not guess its project.
+Parallel sessions for one repository share one volume, so they still count
+once. A recreated volume is marked `needs-adoption` until explicitly accepted:
 
 ```bash
 cage monitor status
 cage monitor add ~/projects/myapp --preset codex-company --container
-cage monitor sync                 # all active registrations
-cage monitor sync ~/projects/myapp
+cage monitor sync                 # all active projects, one aggregate upload
+cage monitor sync ~/projects/myapp # add/resolve this project, then aggregate all
+cage monitor pricing status
+cage monitor pricing set MODEL --input 1.25 --output 10 --cache-read 0.125
+cage monitor pricing remove MODEL
+cage monitor migrate --yes        # one-time v0.31.x hub cleanup
 cage monitor disconnect           # pause uploads, preserve hub device records
 cage monitor forget DEVICE_ID --yes
 ```
 
 `monitor add` is the explicit replacement-volume adoption path and can also
-register a dormant target. `disconnect` removes the local hub credential but
-keeps registrations and existing hub device records; `forget` deletes exactly
-one locally registered hub device, marking the local registration disabled
-before the remote delete and removing its archive only after success. A failed
-remote delete leaves that disabled tombstone for explicit recovery. Monitor
-state is private under
+register a dormant target. Cost is always uploaded when Token Monitor can price
+the model. `monitor status` shows the estimated cost, priced-token coverage,
+and model IDs that still need a price. Custom rates are USD per million tokens;
+they are stored privately and passed only to the network-disabled collector.
+Cage does not invent rates for private or aliased model IDs.
+
+Versions before 0.32.0 created one opaque hub device per volume. After upgrade,
+`monitor status` shows how many legacy records remain. `monitor migrate --yes`
+first uploads the new aggregate device, verifies that the hub returns it, and
+then deletes only the exact legacy IDs recorded by this Cage installation. The
+operation is resumable. A failure keeps all unprocessed legacy IDs.
+
+`disconnect` removes the local hub credential but keeps registrations and
+existing hub records. `forget` can delete the shared Cage device; Cage disables
+all its projects before the remote delete and removes local project archives
+only after success. A failed remote delete leaves disabled tombstones for
+explicit recovery. Monitor state is private under
 `~/.config/cage/monitor/` and never enters the launch-plan or container
 environment.
 

@@ -1471,6 +1471,7 @@ def _monitor_final_scan_before_remove(
             version=str(setup.get("cage_version") or current_version(Path(setup["launcher"]))),
             storage_policy=policy,
             allow_build=False,
+            force=True,
         )
     except (DesktopError, cage_config.ConfigError, monitor.MonitorError, storage.StorageError, OSError, ValueError) as exc:
         print(f"WARNING: final Token Monitor Desktop scan skipped: {exc}", file=sys.stderr)
@@ -1484,7 +1485,7 @@ def _retire_monitor_after_remove(
     try:
         record = _desktop_monitor_record(args, metadata)
         if record is not None:
-            monitor.retire_registration(config_root(args), record.device_id, disabled=False)
+            monitor.retire_registration(config_root(args), record.logical_id, disabled=False)
     except (DesktopError, cage_config.ConfigError, monitor.MonitorError, OSError, ValueError) as exc:
         print(f"WARNING: could not retire Token Monitor Desktop registration: {exc}", file=sys.stderr)
 

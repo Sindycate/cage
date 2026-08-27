@@ -78,6 +78,66 @@ class MonitorStateTests(unittest.TestCase):
             monitor.disable_connection(root)
             self.assertIsNone(monitor.load_connection(root))
 
+    def test_status_reports_one_device_and_registered_projects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.register_volume(
+                root,
+                "docker",
+                volume_name="codex-state-demo",
+                repository="/work/demo",
+                target="container",
+                preset="main",
+                display_name="Cage: demo (Container)",
+                fingerprint=FINGERPRINT,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cli._monitor_status(root, as_json=True), 0)
+            status = json.loads(output.getvalue())
+            self.assertEqual(status["device_id"], record.device_id)
+            self.assertEqual(len(status["projects"]), 1)
+            self.assertTrue(status["projects"][0]["project_id"].startswith("cage-project-"))
+
+    def test_pricing_cli_set_status_and_remove(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = cli._run_monitor(
+                    ["pricing", "set", "gpt-private", "--input", "1.5", "--output", "8"],
+                    config_root=root,
+                    install_root=Path("/work/cage"),
+                    cage_version="0.32.0",
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                monitor.load_pricing(root)["gpt-private"],
+                {"input_per_million": 1.5, "output_per_million": 8.0},
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["pricing", "status", "--json"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.32.0",
+                    ),
+                    0,
+                )
+            self.assertIn("gpt-private", json.loads(output.getvalue())["models"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["pricing", "remove", "gpt-private"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.32.0",
+                    ),
+                    0,
+                )
+            self.assertEqual(monitor.load_pricing(root), {})
+
     def test_http_hub_is_private_only(self):
         self.assertEqual(
             monitor.normalize_hub_url("http://127.0.0.1:17321/"),
@@ -252,7 +312,11 @@ class MonitorStateTests(unittest.TestCase):
                 fingerprint=dict(FINGERPRINT, name="codex-state-desktop"),
             )
             self.assertEqual(parallel.device_id, first.device_id)
-            self.assertNotEqual(desktop.device_id, first.device_id)
+            self.assertEqual(desktop.device_id, first.device_id)
+            self.assertNotEqual(
+                monitor.project_id_for(root, desktop.logical_id),
+                monitor.project_id_for(root, first.logical_id),
+            )
             self.assertEqual(len(monitor.load_registry(root)), 2)
 
     def test_one_volume_cannot_be_registered_to_two_active_devices(self):
@@ -369,6 +433,13 @@ class MonitorStateTests(unittest.TestCase):
             self.assertIn("TOKEN_MONITOR_OPENCODE_AMBIENT=0", joined)
             self.assertIn("TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS=0", joined)
             self.assertIn("TOKEN_MONITOR_WSL_SCAN=0", joined)
+            self.assertIn("TOKSCALE_CONFIG_DIR=/state/tokscale", joined)
+            pricing = (
+                monitor._project_state_path(root, state)
+                / "tokscale"
+                / "custom-pricing.json"
+            )
+            self.assertEqual(json.loads(pricing.read_text()), {"models": {}})
 
     def test_unsupported_volume_subpath_fails_closed(self):
         result = type(
@@ -417,8 +488,7 @@ class MonitorStateTests(unittest.TestCase):
                 display_name="Cage: demo (Container)",
                 fingerprint=FINGERPRINT,
             )
-            device_state = monitor.monitor_root(root) / monitor.DEVICE_DIR / record.device_id
-            device_state.mkdir(parents=True, exist_ok=True)
+            project_state = monitor._project_state_path(root, record)
             events = []
 
             def delete(connection, device_id):
@@ -438,7 +508,7 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertEqual(events, ["disabled"])
             self.assertEqual(monitor.load_registry(root)[0].status, "disabled")
-            self.assertTrue(device_state.exists())
+            self.assertTrue(project_state.exists())
             self.assertIn("remains disabled", error.getvalue())
 
             with patch.object(monitor, "delete_device") as delete:
@@ -454,7 +524,7 @@ class MonitorStateTests(unittest.TestCase):
             delete.assert_not_called()
             self.assertIn("monitor device was not found", error.getvalue())
 
-            device_state.mkdir(parents=True, exist_ok=True)
+            project_state.mkdir(parents=True, exist_ok=True)
             with patch.object(monitor, "delete_device") as delete:
                 result = cli._run_monitor(
                     ["forget", record.device_id, "--yes"],
@@ -464,8 +534,273 @@ class MonitorStateTests(unittest.TestCase):
                 )
             self.assertEqual(result, 0)
             delete.assert_called_once()
-            self.assertFalse(device_state.exists())
+            self.assertFalse(project_state.exists())
             self.assertEqual(monitor.load_registry(root)[0].status, "disabled")
+
+    def test_v1_registry_upgrades_to_one_device_and_keeps_exact_legacy_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.host_install_id(root)
+            registry = root / "monitor" / "registry.json"
+            legacy = {
+                "logical_id": "a" * 32,
+                "device_id": "cage-old-device",
+                "volume_name": "codex-state-demo",
+                "target": "container",
+                "repository": "/work/demo",
+                "display_name": "Cage: demo (Container)",
+                "fingerprint": FINGERPRINT,
+                "status": "active",
+                "registered_at": "now",
+                "last_scan_at": "",
+                "last_success_at": "",
+                "last_error": "",
+            }
+            registry.write_text(json.dumps({"version": 1, "registrations": [legacy]}), encoding="utf-8")
+            os.chmod(registry, 0o600)
+
+            record = monitor.load_registry(root)[0]
+            self.assertEqual(record.device_id, monitor.host_device_id(root))
+            self.assertEqual(record.legacy_device_id, "cage-old-device")
+            monitor.save_registry(root, [record])
+            self.assertEqual(json.loads(registry.read_text())["version"], 2)
+
+    @staticmethod
+    def _session(session_id, *, total, input_tokens, output_tokens, model="gpt-test", cost=0):
+        return {
+            "client": "codex",
+            "sessionId": session_id,
+            "totalTokens": total,
+            "costUsd": cost,
+            "messageCount": 1,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0,
+            "startedAt": "2026-08-27T00:00:00Z",
+            "lastUsedAt": "2026-08-27T00:01:00Z",
+            "projectId": "",
+            "projectLabel": "",
+            "models": {model: total},
+            "modelCosts": ({model: cost} if cost else {}),
+            "providers": {"openai": total},
+        }
+
+    @staticmethod
+    def _summary(device_id, sessions):
+        total = sum(item["totalTokens"] for item in sessions.values())
+        cost = sum(item["costUsd"] for item in sessions.values())
+        period = {"totalTokens": total, "costUsd": cost, "sessions": sessions}
+        return {
+            "deviceId": device_id,
+            "trackedClients": ["codex"],
+            "limits": {"updatedAt": "", "refreshMs": 0, "providers": []},
+            "today": dict(period),
+            "month": dict(period),
+            "allTime": dict(period),
+        }
+
+    def test_aggregate_deduplicates_identical_and_monotonic_session_copies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            device_id = monitor.host_device_id(root)
+            first = monitor.VolumeRegistration(
+                "a" * 32, device_id, "codex-state-a", "container", "/work/a",
+                "Cage: a (Container)", FINGERPRINT,
+            )
+            second = monitor.VolumeRegistration(
+                "b" * 32, device_id, "codex-state-b", "container", "/work/b",
+                "Cage: b (Container)", dict(FINGERPRINT, name="codex-state-b"),
+            )
+            old = self._session("shared", total=100, input_tokens=70, output_tokens=30)
+            new = self._session("shared", total=120, input_tokens=80, output_tokens=40)
+            unique = self._session("unique", total=50, input_tokens=40, output_tokens=10)
+            payload, status = monitor.aggregate_summaries(
+                root,
+                [
+                    (first, self._summary(device_id, {"codex:shared": old, "codex:unique": unique})),
+                    (second, self._summary(device_id, {"codex:shared": new})),
+                ],
+            )
+            self.assertEqual(payload["allTime"]["totalTokens"], 170)
+            self.assertEqual(status["duplicate_sessions"], 1)
+            self.assertEqual(
+                payload["today"]["sessions"]["codex:shared"]["projectLabel"],
+                "Cage: Unattributed",
+            )
+            self.assertEqual(
+                payload["today"]["sessions"]["codex:unique"]["projectLabel"],
+                "Cage: a (Container)",
+            )
+
+    def test_aggregate_rejects_incompatible_session_copies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    value * 32, device_id, f"codex-state-{value}", "container",
+                    f"/work/{value}", f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                )
+                for value in ("a", "b")
+            ]
+            left = self._session("shared", total=100, input_tokens=70, output_tokens=30)
+            right = self._session("shared", total=100, input_tokens=60, output_tokens=40)
+            with self.assertRaisesRegex(monitor.MonitorError, "conflicting copies"):
+                monitor.aggregate_summaries(
+                    root,
+                    [(records[0], self._summary(device_id, {"codex:shared": left})),
+                     (records[1], self._summary(device_id, {"codex:shared": right}))],
+                )
+
+    def test_custom_pricing_is_private_and_reports_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.set_model_pricing(
+                root,
+                "gpt-private",
+                input_per_million=1.0,
+                output_per_million=2.0,
+                cache_read_per_million=0.1,
+            )
+            pricing_path = root / "monitor" / "pricing.json"
+            self.assertEqual(pricing_path.stat().st_mode & 0o777, 0o600)
+            record = monitor.VolumeRegistration(
+                "a" * 32, monitor.host_device_id(root), "codex-state-a", "container",
+                "/work/a", "Cage: a (Container)", FINGERPRINT,
+            )
+            priced = self._session(
+                "priced", total=75, input_tokens=50, output_tokens=25, model="gpt-private"
+            )
+            missing = self._session(
+                "missing", total=25, input_tokens=20, output_tokens=5, model="gpt-unknown"
+            )
+            _, status = monitor.aggregate_summaries(
+                root,
+                [(record, self._summary(record.device_id, {"codex:priced": priced, "codex:missing": missing}))],
+            )
+            self.assertEqual(status["price_coverage_percent"], 75.0)
+            self.assertEqual(status["missing_models"], ["gpt-unknown"])
+            self.assertEqual(status["cost_usd"], 0.0001)
+
+    def test_legacy_migration_is_verified_exact_and_resumable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    value * 32,
+                    device_id,
+                    f"codex-state-{value}",
+                    "container",
+                    f"/work/{value}",
+                    f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                    legacy_device_id=f"cage-old-{value}",
+                )
+                for value in ("a", "b")
+            ]
+            monitor.save_registry(root, records)
+            stats = {"devices": [{"deviceId": device_id}], "periods": {}}
+
+            def fail_second(_connection, legacy_id):
+                if legacy_id == "cage-old-b":
+                    raise monitor.MonitorError("hub unavailable")
+
+            with patch.object(monitor, "scan_all_registrations"), patch.object(
+                monitor, "_hub_request", return_value=stats
+            ), patch.object(monitor, "delete_device", side_effect=fail_second):
+                with self.assertRaisesRegex(monitor.MonitorError, "hub unavailable"):
+                    monitor.migrate_legacy_devices(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        version="0.32.0",
+                        storage_policy=object(),
+                    )
+            migrated = monitor.load_registry(root)
+            self.assertEqual(migrated[0].legacy_device_id, "")
+            self.assertEqual(migrated[1].legacy_device_id, "cage-old-b")
+
+            with patch.object(monitor, "scan_all_registrations"), patch.object(
+                monitor, "_hub_request", return_value=stats
+            ), patch.object(monitor, "delete_device") as delete:
+                count = monitor.migrate_legacy_devices(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    version="0.32.0",
+                    storage_policy=object(),
+                )
+            self.assertEqual(count, 1)
+            delete.assert_called_once_with(
+                monitor.load_connection(root), "cage-old-b"
+            )
+            self.assertEqual(monitor.load_registry(root)[1].legacy_device_id, "")
+
+    def test_scan_all_collects_each_project_and_uploads_one_device_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    value * 32,
+                    device_id,
+                    f"codex-state-{value}",
+                    "container",
+                    f"/work/{value}",
+                    f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                )
+                for value in ("a", "b")
+            ]
+            monitor.save_registry(root, records)
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                session = self._session(
+                    record.logical_id,
+                    total=100,
+                    input_tokens=80,
+                    output_tokens=20,
+                )
+                return self._summary(
+                    device_id,
+                    {f"codex:{record.logical_id}": session},
+                )
+
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: next(
+                    item.fingerprint for item in records if item.volume_name == name
+                ),
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(monitor, "upload_summary") as upload:
+                updated, payload = monitor.scan_all_registrations(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    version="0.32.0",
+                    storage_policy=object(),
+                    allow_build=False,
+                    force=True,
+                )
+            self.assertEqual(len(updated), 2)
+            self.assertEqual(collector.call_count, 2)
+            upload.assert_called_once()
+            self.assertEqual(payload["deviceId"], device_id)
+            self.assertEqual(payload["allTime"]["totalTokens"], 200)
 
     def test_empty_account_limits_may_have_probe_timestamp(self):
         payload = {
@@ -527,6 +862,24 @@ class MonitorStateTests(unittest.TestCase):
             with self.assertRaises(monitor.MonitorError):
                 monitor.remove_device_state(root, "cage-redirect")
             self.assertTrue((outside / "keep.txt").exists())
+
+    def test_legacy_collector_archive_is_secured_without_following_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "archive.json"
+            archive.write_text("{}", encoding="utf-8")
+            os.chmod(archive, 0o644)
+            monitor._secure_collector_file(archive, max_bytes=1024)
+            self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+
+            target = root / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            os.chmod(target, 0o644)
+            link = root / "link.json"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(monitor.MonitorError, "unsafe collector"):
+                monitor._secure_collector_file(link, max_bytes=1024)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
 
     def test_volume_name_cannot_inject_mount_options(self):
         with self.assertRaises(monitor.MonitorError):
