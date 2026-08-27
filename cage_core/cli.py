@@ -643,8 +643,19 @@ def _run_monitor(
                     print(f"Type FORGET to delete {device_id} from the Token Monitor hub: ", end="", flush=True)
                     if sys.stdin.readline().strip() != "FORGET":
                         raise CliError("forget aborted")
-                monitor.delete_device(connection, device_id)
+                # Retire the exact locally-owned record before contacting the
+                # hub.  This both scopes the destructive request to a device
+                # Cage registered on this installation and leaves a disabled
+                # tombstone if the remote delete fails, preventing an
+                # automatic re-registration race.
                 monitor.retire_registration(config_root, device_id, disabled=True)
+                try:
+                    monitor.delete_device(connection, device_id)
+                except monitor.MonitorError as exc:
+                    raise CliError(
+                        "Token Monitor hub deletion failed; the local registration "
+                        f"remains disabled: {exc}"
+                    ) from exc
                 monitor.remove_device_state(config_root, device_id)
                 print(f"Forgot Token Monitor device {device_id}; future launches require explicit add.")
                 return 0

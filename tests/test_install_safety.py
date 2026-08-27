@@ -99,6 +99,7 @@ class InstallerSafetyTests(unittest.TestCase):
             "codex-remote.py",
             "Dockerfile.monitor",
             "token-monitor-collector.js",
+            "THIRD_PARTY_NOTICES.md",
             "entrypoint.sh",
             "entrypoint-codex.sh",
             "entrypoint-opencode.sh",

@@ -43,6 +43,7 @@ PAYLOAD_FILES = (
     "README.md",
     "SECURITY.md",
     "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
 )
 PAYLOAD_DIRS = ("cage_core", "docs", "netgate")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?$")

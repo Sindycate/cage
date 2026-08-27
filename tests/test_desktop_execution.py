@@ -675,6 +675,90 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                 desktop.confirm_remove(metadata, False)
         desktop.confirm_remove(metadata, True)
 
+    def test_desktop_monitor_registration_is_retired_after_remove(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            repo.mkdir()
+            metadata = {
+                "repo": str(repo),
+                "preset": "desktop",
+                "volume_name": "cage-desktop-volume-placeholder",
+            }
+            fingerprint = {
+                "name": metadata["volume_name"],
+                "driver": "local",
+                "scope": "local",
+                "created_at": "2026-08-27T00:00:00Z",
+                "label_identity": "",
+            }
+            record = desktop.monitor.register_volume(
+                root,
+                "docker",
+                volume_name=metadata["volume_name"],
+                repository=str(repo),
+                target="desktop",
+                preset="desktop",
+                display_name="Cage: repo (Desktop)",
+                fingerprint=fingerprint,
+            )
+            args = argparse.Namespace(
+                config_dir=str(root),
+                launcher=str(ROOT / "cage"),
+            )
+            setup = {
+                "docker": "docker",
+                "helper": str(ROOT / "cage-desktop.py"),
+                "launcher": str(ROOT / "cage"),
+                "cage_version": "0.31.1",
+            }
+            with patch.object(desktop.monitor, "load_connection", return_value=None):
+                desktop._monitor_final_scan_before_remove(args, setup, metadata)
+            desktop._retire_monitor_after_remove(args, metadata)
+            self.assertEqual(desktop.monitor.load_registry(root)[0].device_id, record.device_id)
+            self.assertEqual(desktop.monitor.load_registry(root)[0].status, "retired")
+
+    def test_desktop_remove_calls_final_scan_then_retirement(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "0123456789abcdef"
+            target.mkdir()
+            metadata = {
+                "alias": "cage-test",
+                "target_id": "0123456789abcdef",
+                "volume_name": "cage-desktop-volume-placeholder",
+            }
+            args = argparse.Namespace(
+                config_dir=str(root),
+                launcher=str(ROOT / "cage"),
+                yes=True,
+            )
+            setup = {"docker": "docker"}
+            events = []
+
+            def final_scan(_args, _setup, _metadata):
+                events.append("scan")
+
+            def retire(_args, _metadata):
+                events.append("retire")
+
+            docker_result = subprocess.CompletedProcess(
+                ["docker", "volume", "rm"], 0, "", ""
+            )
+            with (
+                patch.object(desktop, "locate_target", return_value=(target, metadata)),
+                patch.object(desktop, "load_setup", return_value=setup),
+                patch.object(desktop, "confirm_remove"),
+                patch.object(desktop, "command_stop_for_root"),
+                patch.object(desktop, "recover_stale_target"),
+                patch.object(desktop, "_monitor_final_scan_before_remove", side_effect=final_scan),
+                patch.object(desktop, "_retire_monitor_after_remove", side_effect=retire),
+                patch.object(desktop.subprocess, "run", return_value=docker_result),
+                patch.object(desktop, "rebuild_ssh_include"),
+            ):
+                self.assertEqual(desktop.command_remove(args), 0)
+            self.assertEqual(events, ["scan", "retire"])
+
 
 class RemoteLauncherTests(unittest.TestCase):
     def test_heartbeat_expires_after_active_time_without_progress(self):

@@ -47,6 +47,20 @@ function writeOutput(body) {
   }
 }
 
+function ensureScanDirectory(pathname) {
+  let info;
+  try {
+    info = fs.lstatSync(pathname);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    fs.mkdirSync(pathname, { recursive: true, mode: 0o700 });
+    info = fs.lstatSync(pathname);
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`scan directory is unsafe: ${pathname}`);
+  }
+}
+
 const server = http.createServer((request, response) => {
   if (request.method !== 'POST' || request.url !== '/api/ingest') {
     response.writeHead(404);
@@ -94,6 +108,14 @@ const server = http.createServer((request, response) => {
 
 server.on('error', (error) => fail(`loopback receiver failed: ${error.message}`));
 server.listen(17321, '127.0.0.1', () => {
+  const codexHome = String(process.env.CODEX_HOME || '/scan/codex');
+  try {
+    ensureScanDirectory(`${codexHome}/sessions`);
+    ensureScanDirectory(`${codexHome}/archived_sessions`);
+  } catch (error) {
+    fail(`scan directory is unsafe: ${error.message}`);
+    return;
+  }
   const environment = {
     ...process.env,
     TOKEN_MONITOR_HUB_URL: 'http://127.0.0.1:17321',
@@ -103,9 +125,12 @@ server.listen(17321, '127.0.0.1', () => {
     TOKEN_MONITOR_PROJECTS_ENABLED: '0',
     TOKEN_MONITOR_HISTORY_ENABLED: '1',
     TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED: '1',
+    TOKEN_MONITOR_OPENCODE_AMBIENT: '0',
+    TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS: '0',
+    TOKEN_MONITOR_WSL_SCAN: '0',
     TOKEN_MONITOR_WATCH: '0',
     TOKEN_MONITOR_DEVICE_ID: String(process.env.TOKEN_MONITOR_DEVICE_ID || 'cage'),
-    CODEX_HOME: String(process.env.CODEX_HOME || '/scan/codex'),
+    CODEX_HOME: codexHome,
     TOKEN_MONITOR_SHARED_DIR: String(process.env.TOKEN_MONITOR_SHARED_DIR || '/state')
   };
   child = spawn(process.execPath, ['/opt/token-monitor/src/agent/agent.js', '--once'], {

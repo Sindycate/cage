@@ -3,6 +3,30 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-27 — Token Monitor audit corrections prepared for v0.31.1
+
+Fixed the collector control plane and lifecycle gaps found in the post-release
+review. Hub requests now use a valid redirect-blocking handler, require the
+authenticated stats shape, and redact response bodies from persisted errors.
+Collector summaries now use an explicit top-level wire-field allowlist and
+reject obvious source paths before upload.
+Plain HTTP accepts only literal private/loopback addresses. `monitor forget`
+retires the exact local registration before remote deletion, rejects unknown
+devices without a hub request, and retains a disabled tombstone when the hub
+is unavailable. Docker engines without `volume-subpath` now fail closed;
+missing scan directories are created only in the collector's temporary root,
+and unrelated OpenCode/WSL probes are disabled. Desktop removal attempts a
+final scan and retires the monitor registration after the volume is removed.
+The upstream Token Monitor MIT notice is included in the source archive.
+
+Validation: focused monitor/Desktop tests `57 passed`; complete supported suite
+`550 passed, 13 skipped`; real Docker smoke `8 passed, 1 skipped`; and a
+disposable network-disabled collector scan returned Codex-only zero totals with
+no unexpected fields. Python compilation, Bash/Node syntax, isolated Desktop
+startup, Compose rendering, and `git diff --check` also pass. Publication
+remains owned by the canonical publisher; the accepted host-side uploader
+behavior under `--net off` is documented and unchanged.
+
 ## 2026-08-27 — optional host-owned Token Monitor aggregation prepared for v0.31.0
 
 Added the optional Token Monitor host collector for Codex Container/Desktop

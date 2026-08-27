@@ -140,6 +140,11 @@ integration: host-native Codex, Claude, and OpenCode state are not scanned.
 The short-lived collector uses the pinned `token-monitor` image, has no
 network, mounts only `sessions/` and `archived_sessions/` from the selected
 Codex volume read-only, and leaves authenticated hub requests to the host.
+The host-side uploader is outside Docker's network namespace, so an enabled
+monitor can still upload while a Codex launch uses `--net off`; run
+`cage monitor disconnect` to pause those uploads. Plain HTTP hub URLs are
+accepted only for literal private or loopback IP addresses; use HTTPS for a
+hostname or any non-loopback hub.
 
 Connect a hub; Cage prompts for the secret without putting it in the command
 line (use `--secret-stdin` for a noninteractive handoff):
@@ -168,8 +173,10 @@ cage monitor forget DEVICE_ID --yes
 `monitor add` is the explicit replacement-volume adoption path and can also
 register a dormant target. `disconnect` removes the local hub credential but
 keeps registrations and existing hub device records; `forget` deletes exactly
-one hub device, then retires its local registration and archive. Monitor state
-is private under
+one locally registered hub device, marking the local registration disabled
+before the remote delete and removing its archive only after success. A failed
+remote delete leaves that disabled tombstone for explicit recovery. Monitor
+state is private under
 `~/.config/cage/monitor/` and never enters the launch-plan or container
 environment.
 

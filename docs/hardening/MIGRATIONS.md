@@ -6,6 +6,37 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.31.1 — 2026-08-27
+
+### Token Monitor audit corrections
+
+The Token Monitor hub client now uses a valid no-redirect handler, requires the
+authenticated `/api/stats` response to have the hub's device/period shape, and
+does not copy attacker-controlled HTTP error bodies into local diagnostics.
+Collector summaries are constrained to the pinned upstream sync wire fields
+and reject native-session additions or obvious source paths before upload.
+Plain HTTP hub URLs are restricted to literal private or loopback IP addresses;
+DNS names, including `.local` names, require HTTPS.
+
+`cage monitor forget` now marks the exact locally registered device disabled
+before attempting the remote delete. An unknown device is rejected without a
+hub request, and a failed remote delete leaves a disabled local tombstone. The
+private archive is removed only after the exact hub delete succeeds.
+
+Desktop target removal performs a best-effort final monitor scan while the
+volume still exists and retires its local monitor registration after successful
+volume removal. If Docker does not support `volume-subpath`, monitoring fails
+closed with a diagnostic instead of falling back to an unscoped volume mount;
+missing session directories are created as empty temporary scan directories.
+The collector explicitly disables OpenCode ambient/local-limit probes and WSL
+scanning. The host-side uploader remains outside the tool container's network
+namespace by design, including for `--net off`; disconnect the monitor to pause
+uploads.
+
+No Codex state volume migration is required. Existing monitor registrations are
+compatible; a failed `forget` may be retried after reconnecting the hub, and a
+disabled registration can be explicitly adopted with `cage monitor add`.
+
 ## 0.31.0 — 2026-08-27
 
 ### Optional host-owned Token Monitor aggregation
@@ -36,7 +67,7 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
   cage monitor connect https://token-monitor.example --secret-stdin
 ```
 
-Plain HTTP is accepted only for loopback/private hosts. The connection URL,
+Plain HTTP is accepted only for literal loopback/private IP addresses. The connection URL,
 secret, and interval are stored in the private
 `~/.config/cage/monitor/connection.json`; identity, registration, lock, and
 per-device archive state are stored beside it with mode-0600 files and
@@ -60,9 +91,9 @@ cage monitor sync
 `add` is also the way to register a dormant target that is not currently
 running. `cage monitor disconnect` removes the local hub credential and pauses
 uploads without deleting registrations or the existing hub device record.
-`cage monitor forget DEVICE_ID --yes` first deletes the exact device from the
-configured hub, then retires the local registration and its private collector
-archive. Explicit replacement adoption reuses the stable device identity and
+`cage monitor forget DEVICE_ID --yes` first marks the exact local registration
+disabled, then deletes that exact device from the configured hub; its private
+collector archive is removed only after the remote delete succeeds. Explicit replacement adoption reuses the stable device identity and
 upserts the replacement volume's current summary; use the hub's own export or
 retention controls if the old volume must remain a separate historical device.
 

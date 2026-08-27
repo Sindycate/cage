@@ -30,6 +30,16 @@ import tempfile
 import time
 from typing import Any
 
+# The Desktop helper is executed directly with ``python -I`` by the launcher;
+# isolated mode removes the script directory from imports, so add only this
+# resolved installation root before loading Cage's shared policy modules.
+_INSTALL_ROOT = Path(__file__).resolve().parent
+if str(_INSTALL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_INSTALL_ROOT))
+
+from cage_core import config as cage_config
+from cage_core import monitor, storage
+
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_DESKTOP_TARGETS = 256
@@ -1416,6 +1426,69 @@ def confirm_remove(metadata: dict[str, Any], assume_yes: bool) -> None:
         raise DesktopError("desktop target removal cancelled")
 
 
+def _desktop_monitor_record(
+    args: argparse.Namespace, metadata: dict[str, Any]
+) -> monitor.VolumeRegistration | None:
+    repository = metadata.get("repo")
+    preset = metadata.get("preset")
+    volume_name = metadata.get("volume_name")
+    if not all(isinstance(value, str) for value in (repository, preset, volume_name)):
+        raise DesktopError("desktop metadata is missing monitor identity fields")
+    logical_id = monitor.logical_target_id(repository, "desktop", preset)
+    for record in monitor.load_registry(config_root(args)):
+        if (
+            record.logical_id == logical_id
+            and record.target == "desktop"
+            and record.volume_name == volume_name
+        ):
+            return record
+    return None
+
+
+def _monitor_final_scan_before_remove(
+    args: argparse.Namespace, setup: dict[str, Any], metadata: dict[str, Any]
+) -> None:
+    """Best-effort final accounting while the Desktop volume still exists."""
+
+    try:
+        record = _desktop_monitor_record(args, metadata)
+        if record is None or record.status != "active":
+            return
+        connection = monitor.load_connection(config_root(args))
+        if connection is None or not connection.enabled:
+            return
+        config_path = config_root(args) / "config.toml"
+        policy = (
+            cage_config.storage_policy_from_config(cage_config.load_config(config_path))
+            if config_path.is_file()
+            else storage.StoragePolicy()
+        )
+        monitor.scan_registration(
+            config_root(args),
+            str(setup["docker"]),
+            Path(str(setup["helper"])).resolve().parent,
+            record,
+            version=str(setup.get("cage_version") or current_version(Path(setup["launcher"]))),
+            storage_policy=policy,
+            allow_build=False,
+        )
+    except (DesktopError, cage_config.ConfigError, monitor.MonitorError, storage.StorageError, OSError, ValueError) as exc:
+        print(f"WARNING: final Token Monitor Desktop scan skipped: {exc}", file=sys.stderr)
+
+
+def _retire_monitor_after_remove(
+    args: argparse.Namespace, metadata: dict[str, Any]
+) -> None:
+    """Leave a retired local tombstone after the Desktop volume is gone."""
+
+    try:
+        record = _desktop_monitor_record(args, metadata)
+        if record is not None:
+            monitor.retire_registration(config_root(args), record.device_id, disabled=False)
+    except (DesktopError, cage_config.ConfigError, monitor.MonitorError, OSError, ValueError) as exc:
+        print(f"WARNING: could not retire Token Monitor Desktop registration: {exc}", file=sys.stderr)
+
+
 def command_remove(args: argparse.Namespace) -> int:
     located = locate_target(args)
     assert located is not None
@@ -1429,6 +1502,7 @@ def command_remove(args: argparse.Namespace) -> int:
         # reused outside Cage since the last launch; never delete that
         # unrelated container during destructive target removal.
         recover_stale_target(setup, root, metadata)
+        _monitor_final_scan_before_remove(args, setup, metadata)
         docker = setup["docker"]
         result = subprocess.run(
             [docker, "volume", "rm", metadata["volume_name"]],
@@ -1439,6 +1513,7 @@ def command_remove(args: argparse.Namespace) -> int:
         )
         if result.returncode != 0 and "No such volume" not in result.stderr:
             raise DesktopError(f"could not remove desktop volume: {result.stderr.strip()}")
+        _retire_monitor_after_remove(args, metadata)
         tombstone = root.with_name(f".remove-{root.name}-{time.time_ns()}")
         root.rename(tombstone)
         shutil.rmtree(tombstone)

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from . import storage
 
@@ -58,6 +58,42 @@ SCAN_TIMEOUT_SECONDS = 180
 COLLECTOR_MEMORY = "1g"
 COLLECTOR_CPUS = "1.0"
 COLLECTOR_PIDS = "128"
+
+# Token Monitor's local hub receives the upstream agent's sync payload.  Keep
+# this top-level wire contract explicit so a future upstream collector cannot
+# silently add native-session, credential, or diagnostic fields to a Cage
+# upload.  The omission fields are produced by the pinned sync serializer when
+# it trims an oversized payload; the remaining fields are the v0.48.0 summary
+# contract (including optional fields).
+COLLECTOR_SUMMARY_FIELDS = frozenset(
+    {
+        "deviceId",
+        "hostname",
+        "platform",
+        "osName",
+        "osVersion",
+        "updatedAt",
+        "agentVersion",
+        "agentRuntime",
+        "projectsEnabled",
+        "trackedClients",
+        "clientStatus",
+        "clientHealth",
+        "wslStatus",
+        "periodWindows",
+        "historyAvailable",
+        "today",
+        "month",
+        "allTime",
+        "history",
+        "limits",
+        "allTimeProjectsOmitted",
+        "allTimeProjectsIncomplete",
+        "sessionDetailsOmitted",
+        "periodProjectsOmitted",
+        "syncUploadIntervalMs",
+    }
+)
 
 CONNECTION_FILE = "connection.json"
 IDENTITY_FILE = "identity.json"
@@ -350,20 +386,17 @@ def validate_interval(value: object) -> int:
 
 def _allowed_http_host(hostname: str) -> bool:
     lower = hostname.lower().rstrip(".")
-    if lower in {"localhost", "localhost.localdomain"}:
-        return True
     try:
         address = ipaddress.ip_address(lower)
     except ValueError:
-        return lower.endswith(".local")
+        return False
     return bool(
         address.is_loopback
         or address.is_private
         or address.is_link_local
-        or address.is_unspecified
         or address in ipaddress.ip_network("100.64.0.0/10")
         or address in ipaddress.ip_network("fd00::/8")
-    )
+    ) and not address.is_unspecified
 
 
 def normalize_hub_url(value: object) -> str:
@@ -940,9 +973,24 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
     if result.returncode == 0:
         return True
     message = result.stderr.strip().replace("\n", " ")[:300]
-    if "volume-subpath" in message and ("does not exist" in message or "not found" in message or "invalid" in message):
-        return False
-    if "no such file or directory" in message.lower() or "not found" in message.lower():
+    lower = message.lower()
+    if "volume-subpath" in lower and any(
+        marker in lower
+        for marker in (
+            "not supported",
+            "unsupported",
+            "unknown flag",
+            "unknown option",
+            "invalid option",
+            "invalid field",
+        )
+    ):
+        raise MonitorError(
+            "Docker does not support volume-subpath; refusing an unscoped Codex scan"
+        )
+    if "volume-subpath" in lower and any(
+        marker in lower for marker in ("does not exist", "no such file or directory")
+    ):
         return False
     raise MonitorError(f"Codex volume subpath probe failed: {message or 'unknown error'}")
 
@@ -950,6 +998,8 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
 def _validate_summary(payload: object, expected_device_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise MonitorError("collector output must be a JSON object")
+    if set(payload).difference(COLLECTOR_SUMMARY_FIELDS):
+        raise MonitorError("collector output has unexpected fields")
     if payload.get("deviceId") != expected_device_id:
         raise MonitorError("collector output device identity mismatch")
     if payload.get("trackedClients") != ["codex"]:
@@ -973,7 +1023,13 @@ def _validate_summary(payload: object, expected_device_id: str) -> dict[str, Any
     # unbounded all-time sessions. Reject obvious path-bearing fields even if a
     # future upstream version accidentally reintroduces them.
     encoded = json.dumps(payload, ensure_ascii=True)
-    if "/home/" in encoded or "\\Users\\" in encoded or "CODEX_HOME" in encoded:
+    if (
+        "/home/" in encoded
+        or "/Users/" in encoded
+        or "\\Users\\" in encoded
+        or "CODEX_HOME" in encoded
+        or "/scan/" in encoded
+    ):
         raise MonitorError("collector output contains a source path")
     return payload
 
@@ -1043,6 +1099,12 @@ def _run_collector(
         "-e",
         "TOKEN_MONITOR_SESSION_USAGE_ARCHIVE_ENABLED=1",
         "-e",
+        "TOKEN_MONITOR_OPENCODE_AMBIENT=0",
+        "-e",
+        "TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS=0",
+        "-e",
+        "TOKEN_MONITOR_WSL_SCAN=0",
+        "-e",
         "TOKEN_MONITOR_WATCH=0",
         "-e",
         f"TOKEN_MONITOR_DEVICE_ID={record.device_id}",
@@ -1073,7 +1135,7 @@ def _run_collector(
         output_path.unlink(missing_ok=True)
 
 
-class _NoRedirect:
+class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         raise MonitorError("Token Monitor hub redirect refused")
 
@@ -1090,8 +1152,11 @@ def _hub_request(connection: MonitorConnection, method: str, path: str, body: by
         with opener.open(request, timeout=30) as response:
             raw = response.read(MAX_OUTPUT_BYTES + 1)
     except HTTPError as exc:
-        detail = exc.read(256).decode("utf-8", "replace").replace("\n", " ")
-        raise MonitorError(f"Token Monitor hub returned HTTP {exc.code}: {detail[:200]}") from exc
+        # Do not persist or display an attacker-controlled response body.  A
+        # hub can reflect credentials or other request material in an error,
+        # and scan errors are retained in the local registry.
+        exc.close()
+        raise MonitorError(f"Token Monitor hub returned HTTP {exc.code}") from exc
     except (URLError, OSError) as exc:
         raise MonitorError(f"Token Monitor hub request failed: {exc.reason if isinstance(exc, URLError) else exc}") from exc
     if len(raw) > MAX_OUTPUT_BYTES:
@@ -1104,10 +1169,14 @@ def _hub_request(connection: MonitorConnection, method: str, path: str, body: by
 
 def verify_connection(connection: MonitorConnection) -> None:
     health = _hub_request(replace(connection, secret="unused"), "GET", "/api/health")
-    if not isinstance(health, dict) or health.get("ok") is not True or health.get("role") not in {"hub", "worker", None}:
+    if not isinstance(health, dict) or health.get("ok") is not True or health.get("role") not in {"hub", "worker"}:
         raise MonitorError("configured URL is not a Token Monitor hub")
     stats = _hub_request(connection, "GET", "/api/stats")
-    if not isinstance(stats, dict):
+    if (
+        not isinstance(stats, dict)
+        or not isinstance(stats.get("devices"), list)
+        or not isinstance(stats.get("periods"), dict)
+    ):
         raise MonitorError("Token Monitor hub authentication check failed")
 
 

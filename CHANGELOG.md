@@ -5,6 +5,20 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.31.1 — 2026-08-27
+
+- repair Token Monitor hub requests with a valid no-redirect handler, strict
+  authenticated stats-shape checks, and redacted HTTP error diagnostics;
+- enforce an explicit Token Monitor summary-field allowlist and reject source
+  paths before any collector result can reach the hub;
+- restrict plain HTTP monitor hubs to literal private/loopback addresses and
+  make `monitor forget` operate only on a local registration, leaving a
+  disabled tombstone if remote deletion fails;
+- fail closed when Docker lacks `volume-subpath`, create empty missing scan
+  directories safely, disable unrelated Token Monitor probes, and retire
+  Desktop monitor registrations after target removal;
+- carry the upstream Token Monitor MIT notice in the source release.
+
 ## 0.31.0 — 2026-08-27
 
 - add an optional host-owned Token Monitor integration for accumulated Codex

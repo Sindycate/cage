@@ -236,6 +236,16 @@ official SSH-host workflow.
 - `stop` preserves keys, alias, volume, and history. `remove` requires explicit
   confirmation before deleting them.
 
+## Optional Token Monitor aggregation
+
+Token Monitor is an optional host-owned accounting aid, not part of the tool
+container's network boundary. The collector container has no network and sees
+only read-only `sessions/` and `archived_sessions/` volume subpaths; the host
+holds the hub credential and performs uploads. Consequently, an enabled
+monitor can upload while the tool itself runs with `--net off`; disconnect the
+monitor to disable that host-side traffic. Plain HTTP hubs are limited to
+literal private or loopback IP addresses and should otherwise use HTTPS.
+
 This preserves Cage's existing container threat model; it does not turn the
 host ChatGPT application itself into a containerized process. The repository,
 explicit read-write mounts, selected credentials, MCP/host-command bridges,
