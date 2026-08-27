@@ -413,18 +413,34 @@ def _monitor_secret_from_terminal(*, stdin_stream=None) -> str:
     """Read a hub secret without putting it in argv or ordinary output."""
 
     stream = stdin_stream or sys.stdin
+    prompt = "Token Monitor hub secret: "
     try:
         tty = open("/dev/tty", "r+", encoding="utf-8")
     except OSError:
         tty = None
     if tty is not None:
         try:
-            return getpass.getpass("Token Monitor hub secret: ", stream=tty).strip()
+            try:
+                return getpass.getpass(prompt, stream=tty).strip()
+            except (OSError, ValueError):
+                # Some IDE and sandbox terminals expose /dev/tty for reads but
+                # reject writes.  Retry with a writable prompt stream while
+                # letting getpass control echo on the terminal itself.
+                pass
         finally:
             tty.close()
-    if not stream.isatty():
+    try:
+        stdin_is_tty = stream.isatty()
+    except (AttributeError, OSError, ValueError):
+        stdin_is_tty = False
+    if not stdin_is_tty:
         raise CliError("monitor connect needs --secret-stdin when no TTY is available")
-    return getpass.getpass("Token Monitor hub secret: ", stream=stream).strip()
+    try:
+        return getpass.getpass(prompt, stream=sys.stderr).strip()
+    except (OSError, ValueError) as exc:
+        raise CliError(
+            "interactive secret prompt is unavailable; use --secret-stdin"
+        ) from exc
 
 
 def _monitor_read_secret_stdin() -> str:

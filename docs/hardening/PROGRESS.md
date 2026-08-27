@@ -3,6 +3,18 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-27 — Token Monitor interactive prompt compatibility prepared for v0.31.2
+
+The interactive `monitor connect` path previously passed `sys.stdin` as the
+prompt output stream when `/dev/tty` could not be opened read/write. Restricted
+IDE/sandbox terminals can expose stdin as read-only, causing the raw
+`not writable` error before any hub request. The prompt now retries through
+stderr while preserving hidden input where possible, and reports a clear
+`--secret-stdin` fallback if interactive prompting is unavailable.
+
+Focused monitor prompt coverage passes; full release validation and public
+publication remain pending.
+
 ## 2026-08-27 — Token Monitor audit corrections prepared for v0.31.1
 
 Fixed the collector control plane and lifecycle gaps found in the post-release

@@ -22,6 +22,43 @@ FINGERPRINT = {
 }
 
 
+class MonitorSecretPromptTests(unittest.TestCase):
+    class _InteractiveInput:
+        def isatty(self):
+            return True
+
+    class _Tty:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def test_unwritable_tty_retries_with_stderr_prompt(self):
+        tty = self._Tty()
+        with patch("cage_core.cli.open", return_value=tty), patch(
+            "cage_core.cli.getpass.getpass",
+            side_effect=[OSError("not writable"), "hub-secret"],
+        ) as getpass_call:
+            secret = cli._monitor_secret_from_terminal(
+                stdin_stream=self._InteractiveInput()
+            )
+
+        self.assertEqual(secret, "hub-secret")
+        self.assertEqual(getpass_call.call_args_list[0].kwargs["stream"], tty)
+        self.assertIs(getpass_call.call_args_list[1].kwargs["stream"], cli.sys.stderr)
+        self.assertTrue(tty.closed)
+
+    def test_unavailable_prompt_gives_secret_stdin_guidance(self):
+        with patch("cage_core.cli.open", side_effect=OSError("not writable")), patch(
+            "cage_core.cli.getpass.getpass", side_effect=OSError("not writable")
+        ):
+            with self.assertRaisesRegex(cli.CliError, "use --secret-stdin"):
+                cli._monitor_secret_from_terminal(
+                    stdin_stream=self._InteractiveInput()
+                )
+
+
 class MonitorStateTests(unittest.TestCase):
     def test_connection_is_private_and_round_trips(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -396,7 +433,7 @@ class MonitorStateTests(unittest.TestCase):
                         ["forget", record.device_id, "--yes"],
                         config_root=root,
                         install_root=Path("/work/cage"),
-                        cage_version="0.31.1",
+                        cage_version="0.31.2",
                     )
             self.assertEqual(result, 1)
             self.assertEqual(events, ["disabled"])
@@ -411,7 +448,7 @@ class MonitorStateTests(unittest.TestCase):
                         ["forget", "cage-unregistered", "--yes"],
                         config_root=root,
                         install_root=Path("/work/cage"),
-                        cage_version="0.31.1",
+                        cage_version="0.31.2",
                     )
             self.assertEqual(result, 1)
             delete.assert_not_called()
@@ -423,7 +460,7 @@ class MonitorStateTests(unittest.TestCase):
                     ["forget", record.device_id, "--yes"],
                     config_root=root,
                     install_root=Path("/work/cage"),
-                    cage_version="0.31.1",
+                    cage_version="0.31.2",
                 )
             self.assertEqual(result, 0)
             delete.assert_called_once()

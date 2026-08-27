@@ -710,7 +710,7 @@ class DesktopLifecycleSafetyTests(unittest.TestCase):
                 "docker": "docker",
                 "helper": str(ROOT / "cage-desktop.py"),
                 "launcher": str(ROOT / "cage"),
-                "cage_version": "0.31.1",
+                "cage_version": "0.31.2",
             }
             with patch.object(desktop.monitor, "load_connection", return_value=None):
                 desktop._monitor_final_scan_before_remove(args, setup, metadata)

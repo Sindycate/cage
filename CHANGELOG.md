@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.31.2 — 2026-08-27
+
+- make the interactive Token Monitor secret prompt work in terminals where
+  `/dev/tty` cannot be written, retrying with a safe prompt stream and giving
+  clear `--secret-stdin` guidance when no interactive prompt is available;
+
 ## 0.31.1 — 2026-08-27
 
 - repair Token Monitor hub requests with a valid no-redirect handler, strict

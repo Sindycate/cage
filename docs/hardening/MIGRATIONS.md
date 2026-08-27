@@ -6,6 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.31.2 — 2026-08-27
+
+### Token Monitor prompt compatibility
+
+`cage monitor connect URL` now keeps the hub secret prompt usable in terminals
+where `/dev/tty` is readable but not writable, and reports a safe
+`--secret-stdin` fallback instead of exposing the terminal's raw write error.
+There is no configuration or state migration. Existing connections and hub
+secrets are unchanged.
+
 ## 0.31.1 — 2026-08-27
 
 ### Token Monitor audit corrections
