@@ -1217,7 +1217,7 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
     if connection is None or not connection.enabled:
         return
 
-    def scan(force: bool) -> None:
+    def scan(force: bool, *, final: bool = False) -> None:
         monitor.scan_registration(
             runtime.config_root,
             runtime.docker,
@@ -1227,9 +1227,17 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
             storage_policy=runtime.plan.storage_policy,
             allow_build=False,
             force=force,
+            final=final,
         )
 
-    runtime.monitor_worker = monitor.ActiveMonitor(scan, connection.interval_seconds)
+    def final_scan(force: bool) -> None:
+        scan(force, final=True)
+
+    runtime.monitor_worker = monitor.ActiveMonitor(
+        scan,
+        connection.interval_seconds,
+        final_scan=final_scan,
+    )
     runtime.lifecycle.register(
         "Token Monitor collector",
         lambda: _stop_codex_monitor(runtime),

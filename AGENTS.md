@@ -189,17 +189,24 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   registered. A short-lived pinned collector mounts the exact `sessions/` and
   `archived_sessions/` volume subpaths read-only with no network, while the
   host performs authenticated hub requests. One Cage installation publishes
-  one readable hub device per provider stream, and each logical Codex volume is
-  a project under the stream that owns its sessions. Every upload scans all
-  active volumes, deduplicates identical or monotonic session copies before
-  provider partitioning, assigns missing or multi-provider copies to
-  `Unattributed`, and fails closed on incompatible copies. Discovery is limited
-  to Cage-named `codex-state-*` volumes and recovered volumes require explicit
-  `cage monitor add --volume` adoption. Replacement volumes require explicit
+  one readable hub device per observed provider stream, and each logical Codex
+  volume is a project under the stream that owns its sessions. Normal launches
+  refresh only their exact volume and reuse fingerprint-bound sanitized
+  snapshots for inactive peers; one cross-process coordinator serializes
+  provider aggregation and performs a bounded wall-clock full reconciliation.
+  Explicit `monitor sync` forces that full reconciliation and repairs a
+  prepared upload generation. Every aggregate deduplicates identical or
+  monotonic session copies before provider partitioning, assigns missing or
+  multi-provider copies to `Unattributed`, and fails closed on incompatible
+  copies. Discovery is limited to Cage-named `codex-state-*` volumes. A normal
+  launch may promote an exact unchanged recovered registration's display label
+  to its project basename plus target without changing its logical ID, cached
+  state, or totals; replacement or ambiguous volumes require explicit
   `cage monitor add` adoption. Legacy unsplit and per-volume hub devices require
   verified, resumable `monitor migrate`; private custom pricing never enters
-  the tool container or hub credential path. Split state and aggregate status
-  remain private under the monitor directory
+  the tool container or hub credential path. Provider upload generation state,
+  split state, snapshots, and aggregate status remain private under the monitor
+  directory
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
@@ -363,11 +370,11 @@ scripts, checks the required `--pure`, project/external-skill suppression, and
 fixed OAuth callback contracts at image build time, disables OpenCode's
 in-process updater, and copies `entrypoint-opencode.sh`.
 
-**`Dockerfile.monitor`**: Pinned, network-disabled Token Monitor collector
-image. It verifies the upstream v0.48.0 source archive by SHA-256, installs
-only production dependencies and the required architecture-specific token
-counter, and runs `token-monitor-collector.js`. The wrapper accepts the
-upstream summary only over loopback and writes one bounded JSON result to the
+**`Dockerfile.monitor`**: Pinned, network-disabled Token Monitor v0.49.0
+collector image. It verifies the upstream source archive by SHA-256, installs
+only production dependencies and official Tokscale 4.14, and runs
+`token-monitor-collector.js`. The wrapper accepts the upstream headless-agent
+summary only over loopback and writes one bounded JSON result to the
 host-provided output bind; it never receives the real hub secret.
 
 **`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, the `mcp-relay`/`host-cmd-relay` bridge scripts, and the shared fail-closed user-remapping helper. Contains no agent binaries, no entrypoints, no Cage tool accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.

@@ -40,14 +40,15 @@ STATE_VERSION = 1
 REGISTRY_VERSION = 2
 PRICING_VERSION = 1
 SPLIT_STATUS_VERSION = 1
+SCHEDULER_STATE_VERSION = 1
+VOLUME_SNAPSHOT_VERSION = 1
+UPLOAD_STATE_VERSION = 1
 COLLECTOR_IMAGE = "cage-token-monitor"
 COLLECTOR_REGISTRY = "ghcr.io/sindycate/cage/token-monitor"
 COLLECTOR_DOCKERFILE = "Dockerfile.monitor"
-COLLECTOR_SOURCE_VERSION = "0.48.0"
-COLLECTOR_SOURCE_COMMIT = "6121585f5d5e7fa98385f8a5ac7f8639660e4965"
-COLLECTOR_SOURCE_SHA256 = (
-    "019b9dede6daa9e34a306dac0e3a6f90ca25ca900a298bb5205cdbe8a25a3cda"
-)
+COLLECTOR_SOURCE_VERSION = "0.49.0"
+COLLECTOR_SOURCE_COMMIT = "7c74e61fd8f9d592e647f14107738746a51e49ff"
+COLLECTOR_SOURCE_SHA256 = "c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e"
 COLLECTOR_SOURCE_URL = (
     "https://github.com/Javis603/token-monitor/archive/refs/tags/"
     f"v{COLLECTOR_SOURCE_VERSION}.tar.gz"
@@ -61,6 +62,10 @@ MAX_REGISTRY_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 SCAN_TIMEOUT_SECONDS = 180
+FULL_RECONCILIATION_INTERVAL_SECONDS = 60 * 60
+COORDINATOR_LEASE_SECONDS = SCAN_TIMEOUT_SECONDS + 60
+MAX_SNAPSHOT_BYTES = 2 * MAX_OUTPUT_BYTES
+MAX_GENERATIONS = 4
 COLLECTOR_MEMORY = "1g"
 COLLECTOR_CPUS = "1.0"
 COLLECTOR_PIDS = "128"
@@ -69,7 +74,7 @@ COLLECTOR_PIDS = "128"
 # this top-level wire contract explicit so a future upstream collector cannot
 # silently add native-session, credential, or diagnostic fields to a Cage
 # upload.  The omission fields are produced by the pinned sync serializer when
-# it trims an oversized payload; the remaining fields are the v0.48.0 summary
+# it trims an oversized payload; the remaining fields are the v0.49.0 summary
 # contract (including optional fields).
 COLLECTOR_SUMMARY_FIELDS = frozenset(
     {
@@ -111,10 +116,15 @@ RUN_DIR = "runs"
 PRICING_FILE = "pricing.json"
 AGGREGATE_STATUS_FILE = "aggregate-status.json"
 SPLIT_STATUS_FILE = "split-status.json"
+SCHEDULER_STATE_FILE = "scheduler.json"
+UPLOAD_STATE_FILE = "upload-state.json"
+GENERATION_DIR = "generations"
+VOLUME_SNAPSHOT_FILE = "volume-snapshot.json"
 VOLUME_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 DEVICE_ID_PATTERN = re.compile(r"^cage-[a-z0-9_-]{1,120}$")
 LOGICAL_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 PROVIDER_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+GENERATION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CODEX_VOLUME_PREFIX = "codex-state-"
 UNATTRIBUTED_PROVIDER = "unattributed"
 
@@ -565,6 +575,153 @@ def _registry_write_lock(config_root: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _scheduler_state_path(config_root: Path) -> Path:
+    return monitor_root(config_root) / SCHEDULER_STATE_FILE
+
+
+def _default_scheduler_state() -> dict[str, Any]:
+    return {
+        "version": SCHEDULER_STATE_VERSION,
+        "next_full_reconciliation_at": 0.0,
+        "last_full_reconciliation_at": "",
+        "last_generation": "",
+        "last_error": "",
+        "updated_at": "",
+        "full_reconciliation_in_progress": None,
+    }
+
+
+def _validate_scheduler_state(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "next_full_reconciliation_at",
+        "last_full_reconciliation_at",
+        "last_generation",
+        "last_error",
+        "updated_at",
+        "full_reconciliation_in_progress",
+    }:
+        raise MonitorError("monitor scheduler state has an invalid shape")
+    if value["version"] != SCHEDULER_STATE_VERSION:
+        raise MonitorError("monitor scheduler state has an invalid version")
+    next_full = value["next_full_reconciliation_at"]
+    if type(next_full) not in (int, float) or not math.isfinite(next_full) or next_full < 0:
+        raise MonitorError("monitor scheduler next reconciliation time is invalid")
+    for key in ("last_full_reconciliation_at", "last_generation", "last_error", "updated_at"):
+        if not isinstance(value[key], str) or len(value[key]) > 512:
+            raise MonitorError("monitor scheduler state contains an invalid text field")
+    if value["last_generation"] and not GENERATION_ID_PATTERN.fullmatch(value["last_generation"]):
+        raise MonitorError("monitor scheduler generation is invalid")
+    progress = value["full_reconciliation_in_progress"]
+    if progress is not None:
+        if not isinstance(progress, dict) or set(progress) != {
+            "owner",
+            "scheduled_at",
+            "started_at",
+            "expires_at",
+        }:
+            raise MonitorError("monitor scheduler progress is invalid")
+        if (
+            not isinstance(progress["owner"], str)
+            or not progress["owner"]
+            or len(progress["owner"]) > 64
+            or any(
+                type(progress[key]) not in (int, float)
+                or not math.isfinite(progress[key])
+                or progress[key] < 0
+                for key in ("scheduled_at", "started_at", "expires_at")
+            )
+        ):
+            raise MonitorError("monitor scheduler progress is invalid")
+    return dict(value)
+
+
+def load_scheduler_state(config_root: Path) -> dict[str, Any]:
+    value = _read_json(
+        _scheduler_state_path(config_root),
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if value is None:
+        return _default_scheduler_state()
+    return _validate_scheduler_state(value)
+
+
+def save_scheduler_state(config_root: Path, value: dict[str, Any]) -> None:
+    _write_json(_scheduler_state_path(config_root), _validate_scheduler_state(value))
+
+
+def _remove_private_file(path: Path, *, max_bytes: int) -> None:
+    try:
+        _reject_unsafe_path(path, max_bytes=max_bytes)
+    except FileNotFoundError:
+        return
+    try:
+        path.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise MonitorError(f"cannot remove monitor state {path.name}: {exc}") from exc
+
+
+@contextmanager
+def try_coordinator_lease(config_root: Path) -> Iterator[bool]:
+    """Claim the one host-wide monitor coordinator for one bounded operation.
+
+    The flock is the crash-recovery primitive: the kernel releases it when a
+    process exits, including an unclean exit.  The separate lease record is
+    only bounded private observability and is overwritten by the next owner,
+    so a stale record can never block automatic recovery.
+    """
+
+    directory = monitor_root(config_root) / LOCK_DIR
+    _ensure_private_directory(directory)
+    lock_path = directory / "coordinator.lock"
+    lease_path = directory / "coordinator-lease.json"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise MonitorError(f"cannot create monitor coordinator lock: {exc}") from exc
+    owner = secrets.token_hex(16)
+    acquired = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        acquired = True
+        now = time.time()
+        _write_json(
+            lease_path,
+            {
+                "version": SCHEDULER_STATE_VERSION,
+                "owner": owner,
+                "pid": os.getpid(),
+                "started_at": now,
+                "expires_at": now + COORDINATOR_LEASE_SECONDS,
+            },
+        )
+        yield True
+    finally:
+        try:
+            if acquired:
+                try:
+                    current = _read_json(lease_path, max_bytes=MAX_CONNECTION_BYTES)
+                except MonitorError:
+                    # The lease record is observability only; a torn or
+                    # externally damaged record must not mask the scan or
+                    # prevent the kernel lock from being released.
+                    current = None
+                if isinstance(current, dict) and current.get("owner") == owner:
+                    _remove_private_file(lease_path, max_bytes=MAX_CONNECTION_BYTES)
+        finally:
+            os.close(descriptor)
+
+
 def retire_registration(config_root: Path, identity: str, *, disabled: bool) -> VolumeRegistration:
     """Retire one logical project, never an arbitrary row of a shared device."""
 
@@ -609,11 +766,28 @@ def remove_aggregate_status(config_root: Path) -> None:
     try:
         _reject_unsafe_path(path, max_bytes=MAX_CONNECTION_BYTES)
     except FileNotFoundError:
-        return
-    try:
-        path.unlink()
-    except OSError as exc:
-        raise MonitorError(f"cannot remove monitor aggregate status: {exc}") from exc
+        pass
+    else:
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise MonitorError(f"cannot remove monitor aggregate status: {exc}") from exc
+    # A successful explicit host-device forget also retires the private
+    # scheduler, prepared generations, and repair journal.  Leaving payload
+    # generations behind would retain aggregate session data after the user
+    # deliberately forgot the host device.
+    _remove_private_file(
+        monitor_root(config_root) / SCHEDULER_STATE_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    _remove_private_file(
+        monitor_root(config_root) / UPLOAD_STATE_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    _remove_owned_directory(
+        monitor_root(config_root) / GENERATION_DIR,
+        description="monitor upload generation",
+    )
 
 
 def remove_device_state(config_root: Path, device_id: str) -> None:
@@ -948,6 +1122,7 @@ def _recovered_registration_for_launch(
     volume_name: str,
     target: str,
     fingerprint: dict[str, str],
+    display_name: str,
 ) -> VolumeRegistration | None:
     """Return one safe discovery record that a normal launch can reuse.
 
@@ -979,7 +1154,11 @@ def _recovered_registration_for_launch(
     label_identity = fingerprint.get("label_identity", "")
     if label_identity and label_identity != record.logical_id:
         return None
-    return record
+    # The repository and logical identity are deliberately not changed here.
+    # Only a safe basename-plus-target label may become readable after the
+    # corresponding project launches.  The caller persists this replacement
+    # atomically while holding the registry transaction lock.
+    return replace(record, display_name=display_name)
 
 
 def register_volume(
@@ -1017,8 +1196,21 @@ def register_volume(
                 volume_name=volume_name,
                 target=target,
                 fingerprint=current,
+                display_name=display_name,
             )
             if recovered is not None:
+                if recovered.display_name != next(
+                    item.display_name
+                    for item in registrations
+                    if item.logical_id == recovered.logical_id
+                ):
+                    save_registry(
+                        config_root,
+                        [
+                            recovered if item.logical_id == recovered.logical_id else item
+                            for item in registrations
+                        ],
+                    )
                 return recovered
         if label_identity and label_identity != logical_id and not allow_replacement:
             raise MonitorError("monitor volume label belongs to a different logical target; run cage monitor add explicitly")
@@ -1124,6 +1316,33 @@ def try_volume_lock(config_root: Path, logical_id: str) -> Iterator[bool]:
         os.close(descriptor)
 
 
+@contextmanager
+def _wait_for_volume_lock(
+    config_root: Path,
+    logical_id: str,
+    *,
+    timeout_seconds: float = SCAN_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    """Wait briefly for a peer launch to finish the same volume refresh.
+
+    The non-blocking primitive remains public for callers that need to skip a
+    busy volume.  Collection itself waits so two simultaneous sessions for a
+    shared state volume converge on one trusted snapshot instead of racing or
+    making the second session fail merely because the first collector is slow.
+    """
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        with try_volume_lock(config_root, logical_id) as acquired:
+            if acquired:
+                yield
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MonitorError("monitor volume scan is already running")
+        time.sleep(min(0.05, remaining))
+
+
 def _project_state_path(config_root: Path, record: VolumeRegistration) -> Path:
     """Return isolated collector state and adopt a legacy archive once."""
 
@@ -1153,6 +1372,131 @@ def _project_state_path(config_root: Path, record: VolumeRegistration) -> Path:
             return path
     _ensure_private_directory(path)
     return path
+
+
+def _volume_snapshot_path(config_root: Path, record: VolumeRegistration) -> Path:
+    return _project_state_path(config_root, record) / VOLUME_SNAPSHOT_FILE
+
+
+def _summary_content_hash(payload: dict[str, Any]) -> str:
+    """Hash stable usage content while ignoring collector observation times."""
+
+    value = json.loads(json.dumps(payload, ensure_ascii=True))
+    if isinstance(value, dict):
+        value.pop("updatedAt", None)
+        limits = value.get("limits")
+        if isinstance(limits, dict):
+            limits.pop("updatedAt", None)
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _snapshot_timestamp(value: object) -> float | None:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _load_trusted_volume_snapshot(
+    config_root: Path,
+    record: VolumeRegistration,
+) -> tuple[dict[str, Any] | None, bool]:
+    value = _read_json(
+        _volume_snapshot_path(config_root, record),
+        max_bytes=MAX_SNAPSHOT_BYTES,
+    )
+    if value is None:
+        return None, False
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "logical_id",
+        "device_id",
+        "volume_name",
+        "fingerprint",
+        "display_name",
+        "captured_at",
+        "summary_hash",
+        "payload",
+    }:
+        raise MonitorError("monitor volume snapshot has an invalid shape")
+    if (
+        value["version"] != VOLUME_SNAPSHOT_VERSION
+        or value["logical_id"] != record.logical_id
+        or value["device_id"] != record.device_id
+        or value["volume_name"] != record.volume_name
+        or value["fingerprint"] != record.fingerprint
+    ):
+        raise MonitorError("monitor volume snapshot identity does not match the registry")
+    validate_display_name(value["display_name"])
+    captured_at = value["captured_at"]
+    if _snapshot_timestamp(captured_at) is None:
+        raise MonitorError("monitor volume snapshot timestamp is invalid")
+    summary_hash = value["summary_hash"]
+    if not isinstance(summary_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", summary_hash):
+        raise MonitorError("monitor volume snapshot hash is invalid")
+    payload = _validate_summary(value["payload"], record.device_id)
+    if _summary_content_hash(payload) != summary_hash:
+        raise MonitorError("monitor volume snapshot hash does not match its payload")
+    return payload, value["display_name"] != record.display_name
+
+
+def load_volume_snapshot(
+    config_root: Path,
+    record: VolumeRegistration,
+) -> dict[str, Any] | None:
+    """Load one exact, sanitized last-known-good volume summary."""
+
+    payload, _metadata_changed = _load_trusted_volume_snapshot(config_root, record)
+    return payload
+
+
+def _save_volume_snapshot(
+    config_root: Path,
+    record: VolumeRegistration,
+    payload: dict[str, Any],
+) -> None:
+    payload = _validate_summary(payload, record.device_id)
+    captured_at = _now()
+    _write_json(
+        _volume_snapshot_path(config_root, record),
+        {
+            "version": VOLUME_SNAPSHOT_VERSION,
+            "logical_id": record.logical_id,
+            "device_id": record.device_id,
+            "volume_name": record.volume_name,
+            "fingerprint": record.fingerprint,
+            "display_name": record.display_name,
+            "captured_at": captured_at,
+            "summary_hash": _summary_content_hash(payload),
+            "payload": payload,
+        },
+    )
+
+
+def _snapshot_is_recent(
+    config_root: Path,
+    record: VolumeRegistration,
+    *,
+    max_age_seconds: int,
+) -> bool:
+    try:
+        value = _read_json(
+            _volume_snapshot_path(config_root, record),
+            max_bytes=MAX_SNAPSHOT_BYTES,
+        )
+    except MonitorError:
+        return False
+    if not isinstance(value, dict):
+        return False
+    timestamp = _snapshot_timestamp(value.get("captured_at"))
+    if timestamp is None:
+        return False
+    age = time.time() - timestamp
+    return 0 <= age < max(MIN_INTERVAL_SECONDS, max_age_seconds)
 
 
 def _validate_model_id(value: object) -> str:
@@ -1676,6 +2020,395 @@ def upload_summary(connection: MonitorConnection, payload: dict[str, Any]) -> No
     _hub_request(connection, "POST", "/api/ingest", body)
 
 
+def _generation_root(config_root: Path) -> Path:
+    path = monitor_root(config_root) / GENERATION_DIR
+    _ensure_private_directory(path)
+    return path
+
+
+def _validate_generation_id(value: object) -> str:
+    if not isinstance(value, str) or not GENERATION_ID_PATTERN.fullmatch(value):
+        raise MonitorError("monitor upload generation is invalid")
+    return value
+
+
+def _generation_manifest_path(config_root: Path, generation: str) -> Path:
+    return _generation_root(config_root) / _validate_generation_id(generation) / "generation.json"
+
+
+def _validate_upload_state(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "state",
+        "generation",
+        "previous_generation",
+        "provider_ids",
+        "attempted",
+        "created_at",
+        "last_error",
+    }:
+        raise MonitorError("monitor upload state has an invalid shape")
+    if value["version"] != UPLOAD_STATE_VERSION:
+        raise MonitorError("monitor upload state has an invalid version")
+    if value["state"] not in {"pending", "repair_pending"}:
+        raise MonitorError("monitor upload state has an invalid status")
+    _validate_generation_id(value["generation"])
+    previous = value["previous_generation"]
+    if previous:
+        _validate_generation_id(previous)
+    provider_ids = value["provider_ids"]
+    if not isinstance(provider_ids, dict) or len(provider_ids) > 1024:
+        raise MonitorError("monitor upload provider identities are invalid")
+    for raw_provider, device_id in provider_ids.items():
+        provider = _provider_slug(raw_provider)
+        if provider != raw_provider:
+            raise MonitorError("monitor upload provider identity is invalid")
+        validate_device_id(device_id)
+    attempted = value["attempted"]
+    if not isinstance(attempted, list) or len(attempted) > len(provider_ids) or any(
+        not isinstance(item, str) for item in attempted
+    ):
+        raise MonitorError("monitor upload attempt list is invalid")
+    if any(item not in provider_ids or item in attempted[:index] for index, item in enumerate(attempted)):
+        raise MonitorError("monitor upload attempt list is invalid")
+    for key in ("created_at", "last_error"):
+        if not isinstance(value[key], str) or len(value[key]) > 512:
+            raise MonitorError("monitor upload state text is invalid")
+    return dict(value)
+
+
+def load_upload_state(config_root: Path) -> dict[str, Any] | None:
+    value = _read_json(
+        monitor_root(config_root) / UPLOAD_STATE_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if value is None:
+        return None
+    return _validate_upload_state(value)
+
+
+def save_upload_state(config_root: Path, value: dict[str, Any]) -> None:
+    _write_json(
+        monitor_root(config_root) / UPLOAD_STATE_FILE,
+        _validate_upload_state(value),
+    )
+
+
+def remove_upload_state(config_root: Path) -> None:
+    _remove_private_file(
+        monitor_root(config_root) / UPLOAD_STATE_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+
+
+def _generation_directory(config_root: Path, generation: str) -> Path:
+    return _generation_root(config_root) / _validate_generation_id(generation)
+
+
+def _validate_exact_provider_ids(
+    config_root: Path,
+    provider_ids: dict[str, str],
+) -> None:
+    if not isinstance(provider_ids, dict):
+        raise MonitorError("monitor provider device map is invalid")
+    for raw_provider, device_id in provider_ids.items():
+        provider = _provider_slug(raw_provider)
+        if provider != raw_provider:
+            raise MonitorError("monitor provider identity is invalid")
+        expected = provider_device_id(config_root, provider)
+        if device_id != expected:
+            raise MonitorError(
+                "monitor provider device identity was invalid; hub snapshot was preserved"
+            )
+
+
+def _write_generation_payloads(
+    config_root: Path,
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+) -> str:
+    generation = secrets.token_hex(16)
+    directory = _generation_directory(config_root, generation)
+    _ensure_private_directory(directory)
+    provider_ids: dict[str, str] = {}
+    for provider, (payload, _status) in sorted(payloads.items()):
+        normalized = _provider_slug(provider)
+        if normalized != provider:
+            raise MonitorError("monitor provider identity is invalid")
+        device_id = provider_device_id(config_root, provider)
+        _validate_summary(payload, device_id)
+        provider_ids[provider] = device_id
+        _write_json(directory / f"{provider}.json", payload)
+    _write_json(
+        directory / "generation.json",
+        {
+            "version": UPLOAD_STATE_VERSION,
+            "generation": generation,
+            "providers": {
+                provider: {"device_id": device_id}
+                for provider, device_id in sorted(provider_ids.items())
+            },
+        },
+    )
+    return generation
+
+
+def _load_generation_payloads(
+    config_root: Path,
+    generation: str,
+) -> dict[str, dict[str, Any]]:
+    generation = _validate_generation_id(generation)
+    value = _read_json(
+        _generation_manifest_path(config_root, generation),
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "generation", "providers"}
+        or value["version"] != UPLOAD_STATE_VERSION
+        or value["generation"] != generation
+        or not isinstance(value["providers"], dict)
+    ):
+        raise MonitorError("monitor upload generation manifest is invalid")
+    provider_entries = value["providers"]
+    if len(provider_entries) > 1024:
+        raise MonitorError("monitor upload generation has too many providers")
+    provider_ids: dict[str, str] = {}
+    for raw_provider, entry in provider_entries.items():
+        provider = _provider_slug(raw_provider)
+        if provider != raw_provider or not isinstance(entry, dict) or set(entry) != {"device_id"}:
+            raise MonitorError("monitor upload generation provider is invalid")
+        device_id = entry["device_id"]
+        validate_device_id(device_id)
+        provider_ids[provider] = device_id
+    _validate_exact_provider_ids(config_root, provider_ids)
+    result: dict[str, dict[str, Any]] = {}
+    directory = _generation_directory(config_root, generation)
+    for provider, device_id in sorted(provider_ids.items()):
+        payload = _read_json(directory / f"{provider}.json", max_bytes=MAX_OUTPUT_BYTES)
+        result[provider] = _validate_summary(payload, device_id)
+    return result
+
+
+def _previous_generation(
+    config_root: Path,
+    previous_status: dict[str, Any] | None,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    if not isinstance(previous_status, dict):
+        return "", {}
+    generation = previous_status.get("last_good_generation") or previous_status.get("generation") or ""
+    if not generation:
+        return "", {}
+    generation = _validate_generation_id(generation)
+    return generation, _load_generation_payloads(config_root, generation)
+
+
+def _upload_state_for_generation(
+    *,
+    generation: str,
+    previous_generation: str,
+    provider_ids: dict[str, str],
+    attempted: list[str],
+    state: str,
+    last_error: str = "",
+) -> dict[str, Any]:
+    return {
+        "version": UPLOAD_STATE_VERSION,
+        "state": state,
+        "generation": generation,
+        "previous_generation": previous_generation,
+        "provider_ids": dict(sorted(provider_ids.items())),
+        "attempted": sorted(set(attempted)),
+        "created_at": _now(),
+        "last_error": " ".join(last_error.split())[:512],
+    }
+
+
+def _repair_pending_upload(
+    config_root: Path,
+    connection: MonitorConnection,
+) -> None:
+    pending = load_upload_state(config_root)
+    if pending is None:
+        return
+    provider_ids = pending["provider_ids"]
+    _validate_exact_provider_ids(config_root, provider_ids)
+    previous_generation = pending["previous_generation"]
+    previous = (
+        _load_generation_payloads(config_root, previous_generation)
+        if previous_generation
+        else {}
+    )
+    try:
+        for provider in sorted(pending["attempted"]):
+            # A new provider has no last-good payload.  Leave that exact device
+            # untouched; the complete next generation below will repair it.
+            payload = previous.get(provider)
+            if payload is not None:
+                upload_summary(connection, payload)
+    except Exception as exc:
+        pending["state"] = "repair_pending"
+        pending["last_error"] = " ".join(str(exc).split())[:512]
+        save_upload_state(config_root, pending)
+        raise MonitorError(
+            "provider upload repair failed; the last-good local snapshot was preserved"
+        ) from exc
+    remove_upload_state(config_root)
+
+
+def _rollback_attempted_uploads(
+    config_root: Path,
+    connection: MonitorConnection,
+    attempted: list[str],
+    previous: dict[str, dict[str, Any]],
+) -> bool:
+    reversible = True
+    for provider in sorted(set(attempted)):
+        payload = previous.get(provider)
+        if payload is None:
+            # The provider may have been introduced in this generation.  Do
+            # not delete or zero its device; retain a repair marker so the
+            # next complete generation explicitly rewrites it.
+            reversible = False
+            continue
+        upload_summary(connection, payload)
+    return reversible
+
+
+def _prune_generations(
+    config_root: Path,
+    *,
+    current_generation: str,
+    previous_generation: str,
+) -> None:
+    root = _generation_root(config_root)
+    keep = {item for item in (current_generation, previous_generation) if item}
+    candidates: list[str] = []
+    for entry in root.iterdir():
+        try:
+            info = os.lstat(entry)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            continue
+        if info.st_uid != os.getuid() or not GENERATION_ID_PATTERN.fullmatch(entry.name):
+            continue
+        candidates.append(entry.name)
+    for generation in sorted(candidates, reverse=True):
+        if len(keep) >= MAX_GENERATIONS:
+            break
+        keep.add(generation)
+    for generation in candidates:
+        if generation not in keep:
+            _remove_owned_directory(
+                root / generation,
+                description="monitor upload generation",
+            )
+
+
+def _publish_provider_payloads(
+    config_root: Path,
+    connection: MonitorConnection,
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    status: dict[str, Any],
+    previous_status: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Publish one generation and repair any interrupted older generation.
+
+    Token Monitor v0.49.0 has one-device ingest rather than a transaction.  A
+    private prepared generation and exact-device rollback make the best
+    available behavior deterministic while keeping the last-good aggregate
+    status authoritative locally.
+    """
+
+    _repair_pending_upload(config_root, connection)
+    previous_generation, previous = _previous_generation(config_root, previous_status)
+    generation = _write_generation_payloads(config_root, payloads)
+    provider_ids = {
+        provider: provider_device_id(config_root, provider)
+        for provider in sorted(payloads)
+    }
+    _validate_exact_provider_ids(config_root, provider_ids)
+    attempted: list[str] = []
+    save_upload_state(
+        config_root,
+        _upload_state_for_generation(
+            generation=generation,
+            previous_generation=previous_generation,
+            provider_ids=provider_ids,
+            attempted=attempted,
+            state="pending",
+        ),
+    )
+    try:
+        for provider in sorted(payloads):
+            attempted.append(provider)
+            save_upload_state(
+                config_root,
+                _upload_state_for_generation(
+                    generation=generation,
+                    previous_generation=previous_generation,
+                    provider_ids=provider_ids,
+                    attempted=attempted,
+                    state="pending",
+                ),
+            )
+            upload_summary(connection, payloads[provider][0])
+    except Exception as exc:
+        failure = exc
+        save_upload_state(
+            config_root,
+            _upload_state_for_generation(
+                generation=generation,
+                previous_generation=previous_generation,
+                provider_ids=provider_ids,
+                attempted=attempted,
+                state="repair_pending",
+                last_error=str(exc),
+            ),
+        )
+        try:
+            rollback_complete = _rollback_attempted_uploads(
+                config_root, connection, attempted, previous
+            )
+        except Exception as rollback_error:
+            pending = load_upload_state(config_root) or {}
+            if pending:
+                pending["state"] = "repair_pending"
+                pending["last_error"] = (
+                    "provider upload failed and exact-device rollback is pending: "
+                    + " ".join(str(rollback_error).split())
+                )[:512]
+                save_upload_state(config_root, pending)
+            raise MonitorError(
+                "provider upload failed; exact-device repair is pending and the last-good snapshot was preserved"
+            ) from failure
+        if not rollback_complete:
+            pending = load_upload_state(config_root)
+            if pending is not None:
+                pending["last_error"] = (
+                    "provider upload failed; a new provider device needs a complete next generation"
+                )[:512]
+                save_upload_state(config_root, pending)
+            raise MonitorError(
+                "provider upload failed; complete-generation repair is pending and the last-good snapshot was preserved"
+            ) from failure
+        remove_upload_state(config_root)
+        raise failure
+
+    next_status = dict(status)
+    next_status["generation"] = generation
+    next_status["last_good_generation"] = generation
+    next_status["upload_state"] = "complete"
+    _write_json(monitor_root(config_root) / AGGREGATE_STATUS_FILE, next_status)
+    remove_upload_state(config_root)
+    _prune_generations(
+        config_root,
+        current_generation=generation,
+        previous_generation=previous_generation,
+    )
+    return next_status
+
+
 def delete_device(connection: MonitorConnection, device_id: str) -> None:
     validate_device_id(device_id)
     from urllib.parse import quote
@@ -1853,6 +2586,19 @@ def _custom_session_cost(
     return model, round(cost, 9), min(total, covered)
 
 
+def _authoritative_model_costs(session: dict[str, Any]) -> bool:
+    """Return whether model costs cover every model without allocation guesses."""
+
+    models = _session_map(session, "models")
+    model_costs = _session_map(session, "modelCosts")
+    if not models or set(models) != set(model_costs):
+        return False
+    session_cost = _session_number(session, "costUsd")
+    model_cost = sum(model_costs.values())
+    tolerance = max(1e-9, abs(session_cost) * 1e-6)
+    return abs(model_cost - session_cost) <= tolerance
+
+
 def _period_from_sessions(
     config_root: Path,
     occurrences: dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]],
@@ -1877,6 +2623,12 @@ def _period_from_sessions(
             # proxy may report the same model name while charging a different
             # rate, so never carry an unqualified upstream cost into a
             # non-OpenAI stream.
+            session["costUsd"] = 0.0
+            session["modelCosts"] = {}
+        elif len(_session_map(session, "models")) > 1 and not _authoritative_model_costs(session):
+            # An aggregate OpenAI cost cannot be allocated across multiple
+            # models.  Keep the token counts, but do not present an estimated
+            # price or fabricate component/model allocation.
             session["costUsd"] = 0.0
             session["modelCosts"] = {}
         client = str(session.get("client") or "")
@@ -2047,6 +2799,14 @@ def _build_device_payload(
         if not models:
             if _session_number(session, "costUsd") > 0:
                 priced_tokens += round(_session_number(session, "totalTokens"))
+            continue
+        if _authoritative_model_costs(session):
+            priced_tokens += round(_session_number(session, "totalTokens"))
+            continue
+        if len(models) > 1:
+            for model in models:
+                missing_models.add(model)
+                missing_prices.add(f"{session_provider_id}:{model}")
             continue
         for model, raw_tokens in models.items():
             tokens = round(raw_tokens)
@@ -2465,6 +3225,137 @@ def _scan_is_recent(config_root: Path) -> bool:
     return time.time() - timestamp < MIN_INTERVAL_SECONDS
 
 
+def _mark_volume_fingerprint_conflict(
+    config_root: Path,
+    record: VolumeRegistration,
+) -> None:
+    updated = replace(
+        record,
+        status="needs-adoption",
+        last_error="volume fingerprint changed; run cage monitor add explicitly",
+        last_scan_at=_now(),
+    )
+    update_registration(config_root, updated)
+
+
+def _checked_volume_fingerprint(
+    config_root: Path,
+    docker: str,
+    record: VolumeRegistration,
+) -> dict[str, str]:
+    current = volume_fingerprint(docker, record.volume_name)
+    if current != record.fingerprint:
+        _mark_volume_fingerprint_conflict(config_root, record)
+        raise MonitorError(f"monitor volume changed for {record.display_name}")
+    return current
+
+
+def _collect_current_registration(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    record: VolumeRegistration,
+    *,
+    version: str,
+    storage_policy: object,
+    allow_build: bool,
+    uid: int | None,
+    gid: int | None,
+    interval_seconds: int,
+    force: bool,
+) -> tuple[VolumeRegistration, dict[str, Any], bool, bool]:
+    """Refresh exactly one volume and return payload/content/metadata changes."""
+
+    with _wait_for_volume_lock(config_root, record.logical_id):
+        _checked_volume_fingerprint(config_root, docker, record)
+        previous, previous_metadata_changed = _load_trusted_volume_snapshot(
+            config_root, record
+        )
+        if (
+            not force
+            and previous is not None
+            and _snapshot_is_recent(
+                config_root,
+                record,
+                max_age_seconds=interval_seconds,
+            )
+        ):
+            if previous_metadata_changed:
+                # Promotion changes only the private display metadata.  Keep
+                # the cached usage content and bring its identity metadata
+                # forward so every later launch does not republish forever.
+                _save_volume_snapshot(config_root, record, previous)
+            return record, previous, False, previous_metadata_changed
+        image = ensure_collector_image(
+            docker,
+            install_root,
+            version=version,
+            storage_policy=storage_policy,
+            allow_build=allow_build,
+        )
+        payload = _run_collector(
+            docker,
+            image,
+            record,
+            config_root,
+            uid=os.getuid() if uid is None else uid,
+            gid=os.getgid() if gid is None else gid,
+        )
+        content_changed = previous is None or _summary_content_hash(previous) != _summary_content_hash(payload)
+        _save_volume_snapshot(config_root, record, payload)
+        return record, payload, content_changed, previous_metadata_changed
+
+
+def _summaries_from_cached_or_collected(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    active: list[VolumeRegistration],
+    *,
+    version: str,
+    storage_policy: object,
+    allow_build: bool,
+    uid: int | None,
+    gid: int | None,
+    overrides: dict[str, dict[str, Any]] | None = None,
+    full: bool = False,
+) -> list[tuple[VolumeRegistration, dict[str, Any]]]:
+    """Use trusted per-volume state and collect only missing/full inputs."""
+
+    overrides = overrides or {}
+    cached: dict[str, dict[str, Any]] = {}
+    missing: list[VolumeRegistration] = []
+    for record in active:
+        _checked_volume_fingerprint(config_root, docker, record)
+        override = overrides.get(record.logical_id)
+        if override is not None and not full:
+            cached[record.logical_id] = _validate_summary(override, record.device_id)
+            continue
+        if not full:
+            payload, _metadata_changed = _load_trusted_volume_snapshot(config_root, record)
+            if payload is not None:
+                cached[record.logical_id] = payload
+                continue
+        missing.append(record)
+    if missing:
+        collected = _collect_registered_summaries(
+            config_root,
+            docker,
+            install_root,
+            missing,
+            version=version,
+            storage_policy=storage_policy,
+            allow_build=allow_build,
+            uid=uid,
+            gid=gid,
+            overrides=overrides if full else None,
+        )
+        cached.update({record.logical_id: payload for record, payload in collected})
+    if len(cached) != len(active):
+        raise MonitorError("monitor aggregate has no trusted snapshot for every active volume")
+    return [(record, cached[record.logical_id]) for record in active]
+
+
 def _collect_registered_summaries(
     config_root: Path,
     docker: str,
@@ -2476,39 +3367,184 @@ def _collect_registered_summaries(
     allow_build: bool,
     uid: int | None,
     gid: int | None,
+    overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[tuple[VolumeRegistration, dict[str, Any]]]:
-    for record in active:
-        current_fingerprint = volume_fingerprint(docker, record.volume_name)
-        if current_fingerprint != record.fingerprint:
-            updated = replace(
-                record,
-                status="needs-adoption",
-                last_error="volume fingerprint changed; run cage monitor add explicitly",
-                last_scan_at=_now(),
-            )
-            update_registration(config_root, updated)
-            raise MonitorError(f"monitor volume changed for {record.display_name}")
-    image = ensure_collector_image(
-        docker,
-        install_root,
-        version=version,
-        storage_policy=storage_policy,
-        allow_build=allow_build,
-    )
-    return [
-        (
-            record,
-            _run_collector(
-                docker,
-                image,
-                record,
-                config_root,
-                uid=os.getuid() if uid is None else uid,
-                gid=os.getgid() if gid is None else gid,
-            ),
+    overrides = overrides or {}
+    to_collect = [record for record in active if record.logical_id not in overrides]
+    image = None
+    if to_collect:
+        image = ensure_collector_image(
+            docker,
+            install_root,
+            version=version,
+            storage_policy=storage_policy,
+            allow_build=allow_build,
         )
-        for record in active
-    ]
+    result: list[tuple[VolumeRegistration, dict[str, Any]]] = []
+    for record in active:
+        with _wait_for_volume_lock(config_root, record.logical_id):
+            _checked_volume_fingerprint(config_root, docker, record)
+            payload = overrides.get(record.logical_id)
+            if payload is None:
+                assert image is not None
+                payload = _run_collector(
+                    docker,
+                    image,
+                    record,
+                    config_root,
+                    uid=os.getuid() if uid is None else uid,
+                    gid=os.getgid() if gid is None else gid,
+                )
+            payload = _validate_summary(payload, record.device_id)
+            _save_volume_snapshot(config_root, record, payload)
+            result.append((record, payload))
+    return result
+
+
+def _add_previous_provider_payloads(
+    config_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+    split_payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    status: dict[str, Any],
+    previous_status: dict[str, Any] | None,
+) -> None:
+    previous_providers = (
+        previous_status.get("providers")
+        if isinstance(previous_status, dict)
+        and isinstance(previous_status.get("providers"), dict)
+        else {}
+    )
+    current_providers = set(split_payloads)
+    for raw_provider, previous_provider_status in previous_providers.items():
+        provider = _provider_slug(raw_provider)
+        if provider is None or provider in current_providers:
+            continue
+        if not isinstance(previous_provider_status, dict):
+            continue
+        previous_device = previous_provider_status.get("device_id")
+        expected_device = provider_device_id(config_root, provider)
+        if previous_device != expected_device:
+            raise MonitorError(
+                "previous provider device identity was invalid; hub snapshot was preserved"
+            )
+        empty_payload, empty_status = _empty_provider_payload(
+            config_root,
+            summaries[0][1],
+            expected_device,
+            provider,
+        )
+        split_payloads[provider] = (empty_payload, empty_status)
+        status.setdefault("providers", {})[provider] = empty_status
+        status.setdefault("device_ids", []).append(expected_device)
+    status["device_ids"] = sorted(set(status.get("device_ids", [])))
+
+
+def _mark_scan_success(
+    config_root: Path,
+    active: list[VolumeRegistration],
+    success_at: str,
+) -> list[VolumeRegistration]:
+    active_ids = {item.logical_id for item in active}
+    with _registry_write_lock(config_root):
+        current = load_registry(config_root)
+        updated_all = [
+            replace(
+                item,
+                status="active",
+                last_scan_at=success_at,
+                last_success_at=success_at,
+                last_error="",
+            )
+            if item.logical_id in active_ids
+            else item
+            for item in current
+        ]
+        save_registry(config_root, updated_all)
+    return [item for item in updated_all if item.logical_id in active_ids]
+
+
+def _full_reconciliation_due(state: dict[str, Any], now: float) -> bool:
+    if state.get("full_reconciliation_in_progress") is not None:
+        return True
+    next_due = state.get("next_full_reconciliation_at", 0.0)
+    return type(next_due) in (int, float) and now >= float(next_due)
+
+
+def _begin_full_reconciliation(
+    config_root: Path,
+    state: dict[str, Any],
+    now: float,
+    *,
+    forced: bool = False,
+) -> float:
+    progress = state.get("full_reconciliation_in_progress")
+    scheduled_at = progress.get("scheduled_at") if isinstance(progress, dict) else 0.0
+    if not forced and not scheduled_at:
+        scheduled_at = state.get("next_full_reconciliation_at", 0.0)
+    if type(scheduled_at) not in (int, float) or scheduled_at <= 0:
+        scheduled_at = (
+            now
+            if forced
+            else math.floor(now / FULL_RECONCILIATION_INTERVAL_SECONDS)
+            * FULL_RECONCILIATION_INTERVAL_SECONDS
+        )
+    state["full_reconciliation_in_progress"] = {
+        "owner": secrets.token_hex(16),
+        "scheduled_at": float(scheduled_at),
+        "started_at": now,
+        "expires_at": now + COORDINATOR_LEASE_SECONDS,
+    }
+    state["updated_at"] = _now()
+    save_scheduler_state(config_root, state)
+    return float(scheduled_at)
+
+
+def _finish_full_reconciliation(
+    config_root: Path,
+    state: dict[str, Any],
+    *,
+    scheduled_at: float,
+    generation: str,
+    now: float,
+) -> None:
+    next_due = scheduled_at + FULL_RECONCILIATION_INTERVAL_SECONDS
+    while next_due <= now:
+        next_due += FULL_RECONCILIATION_INTERVAL_SECONDS
+    state["next_full_reconciliation_at"] = next_due
+    state["last_full_reconciliation_at"] = _now()
+    state["last_generation"] = _validate_generation_id(generation)
+    state["last_error"] = ""
+    state["updated_at"] = _now()
+    state["full_reconciliation_in_progress"] = None
+    save_scheduler_state(config_root, state)
+
+
+def _fail_full_reconciliation(
+    config_root: Path,
+    state: dict[str, Any],
+    error: str,
+) -> None:
+    state["last_error"] = " ".join(error.split())[:512]
+    state["updated_at"] = _now()
+    # A process crash leaves the in-progress marker behind, so the next owner
+    # takes over immediately.  A completed-but-failed attempt, however, must
+    # advance to the next wall-clock slot or ten active launches could perform
+    # the same full scan in succession while the hub is unavailable.
+    progress = state.get("full_reconciliation_in_progress")
+    scheduled_at = (
+        progress.get("scheduled_at")
+        if isinstance(progress, dict)
+        else time.time()
+    )
+    if type(scheduled_at) not in (int, float) or scheduled_at < 0:
+        scheduled_at = time.time()
+    next_due = float(scheduled_at) + FULL_RECONCILIATION_INTERVAL_SECONDS
+    now = time.time()
+    while next_due <= now:
+        next_due += FULL_RECONCILIATION_INTERVAL_SECONDS
+    state["next_full_reconciliation_at"] = next_due
+    state["full_reconciliation_in_progress"] = None
+    save_scheduler_state(config_root, state)
 
 
 def preview_provider_split(
@@ -2522,28 +3558,31 @@ def preview_provider_split(
     uid: int | None = None,
     gid: int | None = None,
 ) -> dict[str, Any]:
-    """Collect and calculate a provider split without hub or volume writes."""
+    """Collect and calculate a provider split without hub uploads."""
 
     registrations = load_registry(config_root)
     active = [item for item in registrations if item.status == "active"]
     if not active:
         raise MonitorError("no active Token Monitor projects")
-    with try_aggregate_lock(config_root) as acquired:
-        if not acquired:
+    with try_coordinator_lease(config_root) as coordinator:
+        if not coordinator:
             raise MonitorError("monitor aggregate scan already running")
-        summaries = _collect_registered_summaries(
-            config_root,
-            docker,
-            install_root,
-            active,
-            version=version,
-            storage_policy=storage_policy,
-            allow_build=allow_build,
-            uid=uid,
-            gid=gid,
-        )
-        _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
-        return manifest
+        with try_aggregate_lock(config_root) as acquired:
+            if not acquired:
+                raise MonitorError("monitor aggregate scan already running")
+            summaries = _collect_registered_summaries(
+                config_root,
+                docker,
+                install_root,
+                active,
+                version=version,
+                storage_policy=storage_policy,
+                allow_build=allow_build,
+                uid=uid,
+                gid=gid,
+            )
+            _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
+            return manifest
 
 
 def scan_all_registrations(
@@ -2559,87 +3598,88 @@ def scan_all_registrations(
     force: bool = False,
     migration: bool = False,
 ) -> tuple[list[VolumeRegistration], dict[str, Any]]:
+    """Force one serialized full reconciliation of every active volume."""
+
     connection = load_connection(config_root)
     if connection is None or not connection.enabled:
         raise MonitorError("Token Monitor is not connected")
-    with try_aggregate_lock(config_root) as acquired:
-        if not acquired:
+    with try_coordinator_lease(config_root) as coordinator:
+        if not coordinator:
             raise MonitorError("monitor aggregate scan already running")
-        registrations = load_registry(config_root)
-        active = [item for item in registrations if item.status == "active"]
-        if not active:
-            raise MonitorError("no active Token Monitor projects")
-        if not migration and provider_split_pending(config_root, connection):
-            raise MonitorError(
-                "provider split migration is pending; run cage monitor migrate --yes"
-            )
-        if not force and _scan_is_recent(config_root):
-            return active, {}
-        try:
-            previous_status = load_aggregate_status(config_root)
-            summaries = _collect_registered_summaries(
-                config_root,
-                docker,
-                install_root,
-                active,
-                version=version,
-                storage_policy=storage_policy,
-                allow_build=allow_build,
-                uid=uid,
-                gid=gid,
-            )
-            split_payloads, status = aggregate_provider_summaries(config_root, summaries)
-            previous_providers = (
-                previous_status.get("providers")
-                if isinstance(previous_status, dict)
-                and isinstance(previous_status.get("providers"), dict)
-                else {}
-            )
-            current_providers = set(split_payloads)
-            for raw_provider, previous_provider_status in previous_providers.items():
-                provider = _provider_slug(raw_provider)
-                if provider is None or provider in current_providers:
-                    continue
-                if not isinstance(previous_provider_status, dict):
-                    continue
-                previous_device = previous_provider_status.get("device_id")
-                expected_device = provider_device_id(config_root, provider)
-                if previous_device != expected_device:
-                    raise MonitorError(
-                        "previous provider device identity was invalid; hub snapshot was preserved"
-                    )
-                empty_payload, empty_status = _empty_provider_payload(
-                    config_root,
-                    summaries[0][1],
-                    expected_device,
-                    provider,
+        with try_aggregate_lock(config_root) as acquired:
+            if not acquired:
+                raise MonitorError("monitor aggregate scan already running")
+            registrations = load_registry(config_root)
+            active = [item for item in registrations if item.status == "active"]
+            if not active:
+                raise MonitorError("no active Token Monitor projects")
+            if not migration and provider_split_pending(config_root, connection):
+                raise MonitorError(
+                    "provider split migration is pending; run cage monitor migrate --yes"
                 )
-                split_payloads[provider] = (empty_payload, empty_status)
-                status.setdefault("providers", {})[provider] = empty_status
-                status.setdefault("device_ids", []).append(expected_device)
-            status["device_ids"] = sorted(set(status.get("device_ids", [])))
-            for provider in sorted(split_payloads):
-                payload, _provider_status = split_payloads[provider]
-                upload_summary(connection, payload)
-            status["split_complete"] = False if migration else True
-            _write_json(monitor_root(config_root) / AGGREGATE_STATUS_FILE, status)
-            if not migration:
-                _mark_split_complete(config_root, status)
-            success_at = _now()
-            active_ids = {item.logical_id for item in active}
-            with _registry_write_lock(config_root):
-                current = load_registry(config_root)
-                updated_all = [
-                    replace(item, status="active", last_scan_at=success_at, last_success_at=success_at, last_error="")
-                    if item.logical_id in active_ids else item
-                    for item in current
-                ]
-                save_registry(config_root, updated_all)
-            return [item for item in updated_all if item.logical_id in active_ids], status
-        except MonitorError as exc:
-            for record in active:
-                _record_scan_error(config_root, record, str(exc))
-            raise
+            if not force and _scan_is_recent(config_root):
+                return active, {}
+            scheduler = load_scheduler_state(config_root)
+            scheduled_at = _begin_full_reconciliation(
+                config_root,
+                scheduler,
+                time.time(),
+                forced=force,
+            )
+            try:
+                previous_status = load_aggregate_status(config_root)
+                summaries = _collect_registered_summaries(
+                    config_root,
+                    docker,
+                    install_root,
+                    active,
+                    version=version,
+                    storage_policy=storage_policy,
+                    allow_build=allow_build,
+                    uid=uid,
+                    gid=gid,
+                )
+                split_payloads, status = aggregate_provider_summaries(config_root, summaries)
+                _add_previous_provider_payloads(
+                    config_root,
+                    summaries,
+                    split_payloads,
+                    status,
+                    previous_status,
+                )
+                status["split_complete"] = False if migration else True
+                status = _publish_provider_payloads(
+                    config_root,
+                    connection,
+                    split_payloads,
+                    status,
+                    previous_status,
+                )
+                if not migration:
+                    _mark_split_complete(config_root, status)
+                success_at = _now()
+                updated_all = _mark_scan_success(config_root, active, success_at)
+                generation = status.get("generation")
+                if not isinstance(generation, str):
+                    raise MonitorError("monitor upload omitted its generation")
+                _finish_full_reconciliation(
+                    config_root,
+                    scheduler,
+                    scheduled_at=scheduled_at,
+                    generation=generation,
+                    now=time.time(),
+                )
+                return updated_all, status
+            except Exception as exc:
+                try:
+                    _fail_full_reconciliation(config_root, scheduler, str(exc))
+                except MonitorError:
+                    pass
+                for record in active:
+                    _record_scan_error(config_root, record, str(exc))
+                if isinstance(exc, MonitorError):
+                    raise
+                raise MonitorError("Token Monitor full reconciliation failed") from exc
 
 
 def scan_registration(
@@ -2654,22 +3694,165 @@ def scan_registration(
     uid: int | None = None,
     gid: int | None = None,
     force: bool = False,
+    final: bool = False,
 ) -> tuple[VolumeRegistration, dict[str, Any]]:
-    updated, payload = scan_all_registrations(
-        config_root,
-        docker,
-        install_root,
-        version=version,
-        storage_policy=storage_policy,
-        allow_build=allow_build,
-        uid=uid,
-        gid=gid,
-        force=force,
+    """Refresh one current volume, then merge it with trusted cached volumes.
+
+    A final lifecycle refresh is deliberately current-volume-only: it may
+    publish already-trusted peer snapshots, but it never starts the bounded
+    host-wide safety reconciliation or collects a missing peer.
+    """
+
+    connection = load_connection(config_root)
+    if connection is None or not connection.enabled:
+        raise MonitorError("Token Monitor is not connected")
+    registrations = load_registry(config_root)
+    current = next(
+        (item for item in registrations if item.logical_id == record.logical_id),
+        None,
     )
-    current = next((item for item in updated if item.logical_id == record.logical_id), None)
-    if current is None:
+    if current is None or current.status != "active":
         raise MonitorError("monitor project is not active")
-    return current, payload
+    try:
+        refreshed, current_payload, content_changed, metadata_changed = _collect_current_registration(
+            config_root,
+            docker,
+            install_root,
+            current,
+            version=version,
+            storage_policy=storage_policy,
+            allow_build=allow_build,
+            uid=uid,
+            gid=gid,
+            interval_seconds=connection.interval_seconds,
+            force=force,
+        )
+    except Exception as exc:
+        _record_scan_error(config_root, current, str(exc))
+        if isinstance(exc, MonitorError):
+            raise
+        raise MonitorError("Token Monitor current-volume refresh failed") from exc
+
+    with try_coordinator_lease(config_root) as coordinator:
+        if not coordinator:
+            return refreshed, load_aggregate_status(config_root) or {}
+        with try_aggregate_lock(config_root) as acquired:
+            if not acquired:
+                return refreshed, load_aggregate_status(config_root) or {}
+            registrations = load_registry(config_root)
+            active = [item for item in registrations if item.status == "active"]
+            if not active or not any(item.logical_id == refreshed.logical_id for item in active):
+                raise MonitorError("monitor project is not active")
+            if provider_split_pending(config_root, connection):
+                raise MonitorError(
+                    "provider split migration is pending; run cage monitor migrate --yes"
+                )
+            previous_status = load_aggregate_status(config_root)
+            cache_complete = True
+            for item in active:
+                cached, _metadata = _load_trusted_volume_snapshot(config_root, item)
+                if cached is None:
+                    cache_complete = False
+                    break
+            if final and not cache_complete:
+                # The current volume is safely refreshed above.  Do not turn
+                # process shutdown into an all-volume scan merely because a
+                # peer has no local snapshot yet; a future coordinator owner
+                # can reconcile that peer normally.
+                return refreshed, previous_status or {}
+            scheduler = load_scheduler_state(config_root)
+            now = time.time()
+            full_due = (
+                not final
+                and not force
+                and _full_reconciliation_due(scheduler, now)
+            )
+            scheduled_at: float | None = None
+            if full_due:
+                scheduled_at = _begin_full_reconciliation(config_root, scheduler, now)
+            try:
+                overrides = {refreshed.logical_id: current_payload}
+                if full_due:
+                    summaries = _collect_registered_summaries(
+                        config_root,
+                        docker,
+                        install_root,
+                        active,
+                        version=version,
+                        storage_policy=storage_policy,
+                        allow_build=allow_build,
+                        uid=uid,
+                        gid=gid,
+                        overrides=overrides,
+                    )
+                else:
+                    summaries = _summaries_from_cached_or_collected(
+                        config_root,
+                        docker,
+                        install_root,
+                        active,
+                        version=version,
+                        storage_policy=storage_policy,
+                        allow_build=allow_build,
+                        uid=uid,
+                        gid=gid,
+                        overrides=overrides,
+                    )
+                should_publish = bool(
+                    force
+                    or full_due
+                    or content_changed
+                    or metadata_changed
+                    or not cache_complete
+                    or previous_status is None
+                    or load_upload_state(config_root) is not None
+                )
+                if not should_publish:
+                    return refreshed, previous_status or {}
+                split_payloads, status = aggregate_provider_summaries(config_root, summaries)
+                _add_previous_provider_payloads(
+                    config_root,
+                    summaries,
+                    split_payloads,
+                    status,
+                    previous_status,
+                )
+                status["split_complete"] = True
+                status = _publish_provider_payloads(
+                    config_root,
+                    connection,
+                    split_payloads,
+                    status,
+                    previous_status,
+                )
+                _mark_split_complete(config_root, status)
+                updated_all = _mark_scan_success(config_root, active, _now())
+                result = next(
+                    item for item in updated_all if item.logical_id == refreshed.logical_id
+                )
+                if full_due:
+                    generation = status.get("generation")
+                    if not isinstance(generation, str) or scheduled_at is None:
+                        raise MonitorError("monitor upload omitted its generation")
+                    _finish_full_reconciliation(
+                        config_root,
+                        scheduler,
+                        scheduled_at=scheduled_at,
+                        generation=generation,
+                        now=time.time(),
+                    )
+                return result, status
+            except Exception as exc:
+                if full_due:
+                    try:
+                        _fail_full_reconciliation(config_root, scheduler, str(exc))
+                    except MonitorError:
+                        pass
+                for item in active:
+                    _record_scan_error(config_root, item, str(exc))
+                if isinstance(exc, MonitorError):
+                    raise
+                raise MonitorError("Token Monitor aggregate update failed") from exc
 
 
 def migrate_legacy_devices(
@@ -2781,29 +3964,49 @@ def migrate_legacy_devices(
 
 
 class ActiveMonitor:
-    """Best-effort active-session scanner owned by a Cage launch."""
+    """Best-effort current-volume scanner with a wall-clock cadence."""
 
-    def __init__(self, scan, interval_seconds: int):
+    def __init__(self, scan, interval_seconds: int, final_scan=None):
         self._scan = scan
+        self._final_scan = final_scan or scan
         self._interval = validate_interval(interval_seconds)
         self._stop = threading.Event()
+        self._final_scan_done = False
         self._thread = threading.Thread(target=self._run, name="cage-token-monitor", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
+        # Compute the first wall-clock boundary before collection starts so a
+        # slow collector cannot shift every later tick by one full interval.
+        next_due = (math.floor(time.time() / self._interval) + 1) * self._interval
+        try:
+            self._scan(False)
+        except Exception as exc:  # optional observability must not stop Cage
+            print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
         while not self._stop.is_set():
+            wait_seconds = max(0.0, next_due - time.time())
+            if self._stop.wait(wait_seconds):
+                return
             try:
                 self._scan(False)
             except Exception as exc:  # optional observability must not stop Cage
                 print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
-            if self._stop.wait(self._interval):
-                return
+            now = time.time()
+            missed = max(1, math.floor((now - next_due) / self._interval) + 1)
+            next_due += missed * self._interval
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=SCAN_TIMEOUT_SECONDS + 10)
+        if self._final_scan_done:
+            return
+        self._final_scan_done = True
         try:
-            self._scan(True)
+            # The lifecycle callback uses scan_registration(final=True): it
+            # refreshes only this launch's exact volume, can merge cached peer
+            # snapshots, and never calls the all-volume reconciliation path.
+            final_scan = getattr(self, "_final_scan", self._scan)
+            final_scan(True)
         except Exception as exc:
             print(f"WARNING: final Token Monitor scan skipped: {exc}", file=sys.stderr)
 
@@ -2817,6 +4020,7 @@ __all__ = [
     "COLLECTOR_SOURCE_SHA256",
     "COLLECTOR_SOURCE_URL",
     "COLLECTOR_SOURCE_VERSION",
+    "FULL_RECONCILIATION_INTERVAL_SECONDS",
     "MonitorConnection",
     "MonitorError",
     "VolumeRegistration",
@@ -2834,6 +4038,9 @@ __all__ = [
     "ensure_collector_image",
     "load_connection",
     "load_aggregate_status",
+    "load_scheduler_state",
+    "load_upload_state",
+    "load_volume_snapshot",
     "load_pricing",
     "load_registry",
     "load_split_status",
@@ -2857,11 +4064,14 @@ __all__ = [
     "save_connection",
     "save_pricing",
     "save_registry",
+    "save_scheduler_state",
     "save_split_status",
+    "save_upload_state",
     "scan_registration",
     "scan_all_registrations",
     "set_model_pricing",
     "session_provider",
+    "try_coordinator_lease",
     "migrate_legacy_devices",
     "project_id_for",
     "update_registration",

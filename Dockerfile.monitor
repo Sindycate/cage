@@ -7,8 +7,8 @@ LABEL org.opencontainers.image.description="Cage's network-disabled Token Monito
 
 RUN set -eux; \
     mkdir -p /opt/token-monitor /scan/codex/sessions /scan/codex/archived_sessions /state /out; \
-    curl -fsSL --max-time 120 'https://github.com/Javis603/token-monitor/archive/refs/tags/v0.48.0.tar.gz' -o /tmp/token-monitor.tar.gz; \
-    echo '019b9dede6daa9e34a306dac0e3a6f90ca25ca900a298bb5205cdbe8a25a3cda  /tmp/token-monitor.tar.gz' | sha256sum -c -; \
+    curl -fsSL --max-time 120 'https://github.com/Javis603/token-monitor/archive/refs/tags/v0.49.0.tar.gz' -o /tmp/token-monitor.tar.gz; \
+    echo 'c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e  /tmp/token-monitor.tar.gz' | sha256sum -c -; \
     tar -xzf /tmp/token-monitor.tar.gz --strip-components=1 -C /opt/token-monitor; \
     rm -f /tmp/token-monitor.tar.gz; \
     cd /opt/token-monitor; \

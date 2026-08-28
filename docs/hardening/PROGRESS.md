@@ -3,6 +3,37 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Host-wide Token Monitor scheduler prepared for v0.35.0
+
+Replaced per-launch all-volume collector polling with a host-wide coordinator,
+per-volume fingerprint-bound sanitized snapshots, and a crash-recoverable
+private upload-generation journal. Normal launches refresh only their current
+volume and reuse trusted peer snapshots; a single coordinator performs the
+bounded wall-clock full safety reconciliation. Exit performs only a bounded
+current-volume refresh. `cage monitor sync` remains the explicit forced full
+reconciliation and repair path.
+
+Exact unchanged recovered registrations now progressively receive the real
+project-basename-plus-target display label without changing logical/project
+IDs, fingerprints, private history, provider attribution, or totals. Provider
+partial uploads roll back exact attempted devices when possible and retain a
+repair marker for deterministic next-run recovery when the v0.49.0 hub's
+per-device API cannot provide a transaction. Mixed-model sessions retain token
+counts but remain unpriced without sufficient per-model component or
+authoritative cost evidence.
+
+The collector pin is official Token Monitor v0.49.0 at commit
+`7c74e61fd8f9d592e647f14107738746a51e49ff` with archive SHA-256
+`c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e`; the
+official Tokscale 4.14 dependency and headless-agent wire checks are retained.
+The existing no-network, exact read-only subpath, host-secret, provider-stream,
+deduplication, fingerprint, and `--net off` uploader boundaries remain.
+
+Focused scheduler, concurrency, recovery, pricing, recovered-label, and
+collector-wire regressions are included. Full release validation and canonical
+publication are recorded by the release publisher after the consolidated
+commit.
+
 ## 2026-08-28 — Reuse recovered monitor volumes automatically in v0.34.4
 
 The normal Codex launch path now reuses an exact `Recovered` registration when
@@ -11,8 +42,8 @@ active registration and no conflicting ownership label. This starts the
 host-owned collector without requiring a manual `cage monitor sync`; changed,
 replaced, or ambiguous volumes still fail closed.
 
-Validation: focused monitor tests pass locally; full release gates and public
-publication remain pending.
+Validation: focused monitor tests pass locally. Public publication reached
+`public_verified` for v0.34.4.
 
 ## 2026-08-28 — Long missing-subpath diagnostic patch prepared for v0.34.3
 
@@ -20,7 +51,7 @@ The v0.34.2 retry reached a long recovered volume name. Its Docker diagnostic
 was truncated before the missing-path marker, so Cage still rejected the
 known-empty optional subpath. Classification now uses the full captured
 diagnostic before shortening only the displayed error. A regression test covers
-the long path. Publication is pending the canonical publisher.
+the long path. Public publication reached `public_verified` for v0.34.3.
 
 ## 2026-08-28 — Collector tmpfs ownership patch prepared for v0.34.2
 
@@ -84,8 +115,8 @@ migration; an external host scheduler may invoke only the explicit
 
 Validation: complete Python suite `567 passed, 14 skipped`; real-Docker smoke
 suite `9 passed, 1 skipped`; Python compilation, Bash/Node syntax, Compose
-rendering, and `git diff --check` pass. Publication remains pending until the
-canonical publisher reaches `public_verified`.
+rendering, and `git diff --check` pass. Public publication reached
+`public_verified` for v0.33.0.
 
 ## 2026-08-28 — Token Monitor archive period-boundary repair prepared for v0.32.3
 
@@ -98,8 +129,8 @@ state migration is required.
 
 Validation: focused monitor/bootstrap tests pass; complete Python suite passes
 (`576 passed, 13 skipped`); Python compilation, Bash/Node syntax, Compose
-rendering, and `git diff --check` pass. Publication remains pending until the
-canonical publisher reaches `public_verified`.
+rendering, and `git diff --check` pass. Public publication reached
+`public_verified` for v0.32.3.
 
 ## 2026-08-28 — Token Monitor empty-subpath ownership repair prepared for v0.32.2
 
@@ -125,8 +156,7 @@ guide.
 Validation: complete Python suite `575 passed, 13 skipped`; Gitleaks complete
 history scan found no leaks; Python compilation, Bash and Node syntax, Compose
 rendering, reproducible source archives, and `git diff --check` passed.
-Publication remains pending until the canonical publisher reaches
-`public_verified`.
+Public publication reached `public_verified` for v0.32.1.
 
 ## 2026-08-27 — aggregate Token Monitor device prepared for v0.32.0
 
@@ -154,7 +184,7 @@ payload without contacting the hub. The exact 0.32.0 collector image built and
 returned a zero-token Codex-only summary from a disposable volume with no
 network. Python 3.12 compilation, Bash and Node syntax, Compose rendering,
 source-archive creation and checksum verification, and `git diff --check` pass.
-Public publication remains pending.
+Public publication reached `public_verified` for v0.32.0.
 
 ## 2026-08-27 — Token Monitor interactive prompt compatibility prepared for v0.31.2
 
@@ -165,8 +195,8 @@ IDE/sandbox terminals can expose stdin as read-only, causing the raw
 stderr while preserving hidden input where possible, and reports a clear
 `--secret-stdin` fallback if interactive prompting is unavailable.
 
-Focused monitor prompt coverage passes; full release validation and public
-publication remain pending.
+Focused monitor prompt coverage passes; public publication reached
+`public_verified` for v0.31.2.
 
 ## 2026-08-27 — Token Monitor audit corrections prepared for v0.31.1
 
@@ -188,9 +218,9 @@ Validation: focused monitor/Desktop tests `57 passed`; complete supported suite
 `550 passed, 13 skipped`; real Docker smoke `8 passed, 1 skipped`; and a
 disposable network-disabled collector scan returned Codex-only zero totals with
 no unexpected fields. Python compilation, Bash/Node syntax, isolated Desktop
-startup, Compose rendering, and `git diff --check` also pass. Publication
-remains owned by the canonical publisher; the accepted host-side uploader
-behavior under `--net off` is documented and unchanged.
+startup, Compose rendering, and `git diff --check` also pass. Public publication
+reached `public_verified` for v0.31.1; the accepted host-side uploader behavior
+under `--net off` is documented and unchanged.
 
 ## 2026-08-27 — optional host-owned Token Monitor aggregation prepared for v0.31.0
 
@@ -217,8 +247,7 @@ Codex volume, returning the expected Codex-only identity and empty-provider
 limits. The real Docker smoke suite passed `8 tests` with one intentional
 Desktop skip; the complete supported suite passed `540 tests` with `13 skips`.
 Python compilation, Bash/Node syntax, Compose validation, and `git diff --check`
-also pass. Publication remains owned by the canonical publisher and is not
-complete until `public_verified`.
+also pass. Public publication reached `public_verified` for v0.31.0.
 
 ## 2026-08-26 — v0.30.2 AWS CLI settings moved to reusable presets for the TUI
 
@@ -230,9 +259,8 @@ AWS settings. The TUI now edits and displays the effective preset-level relay.
 
 Verification: focused resolver/TUI suite `94 passed`; complete suite `540
 passed, 13 skipped`; Python compilation, shell syntax, Compose rendering, and
-`git diff --check` passed. This versioned release checkpoint is the clean input
-to the canonical publisher; handoff remains pending until it reaches
-`public_verified`.
+`git diff --check` passed. Public publication reached `public_verified` for
+v0.30.2.
 
 ## 2026-08-26 — v0.30.0 CI caught upstream OpenCode contract drift; v0.30.1 prepared
 

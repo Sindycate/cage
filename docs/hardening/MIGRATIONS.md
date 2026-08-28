@@ -6,6 +6,66 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.35.0 — 2026-08-28
+
+### Host-wide Token Monitor scheduling and provider-generation repair
+
+No central configuration migration is required. Cage creates the following
+private monitor state lazily under `~/.config/cage/monitor/`: one scheduler
+record, one fingerprint-bound sanitized snapshot per logical volume, and
+prepared provider-upload generations plus a repair marker. Do not copy these
+files between hosts or remove them while a repair is pending.
+
+Normal launches refresh only their exact registered volume. A cross-process
+coordinator serializes aggregate construction and provider publication, while
+trusted snapshots serve inactive or unchanged volumes. The coordinator runs a
+bounded full safety reconciliation once per wall-clock hour; its deadline is
+not shifted by scan duration. The exit hook performs only a bounded current
+volume refresh. `cage monitor sync` is the explicit forced full
+reconciliation/repair operation. A crashed coordinator is recovered by the
+kernel lock and a subsequent launch; a stale owner record cannot prevent
+takeover.
+
+When a normal launch resolves the exact unchanged Docker volume recorded as
+`Cage: Recovered …`, and no ownership conflict exists, Cage promotes only the
+display metadata to the project basename plus target label. The logical ID,
+project ID, volume name/fingerprint, private cache, provider attribution,
+history, and accumulated totals remain unchanged. Replacement, conflicting,
+or ambiguous volumes continue to require explicit `cage monitor add` adoption.
+
+Token Monitor v0.49.0 has one-device ingest and no transaction spanning
+provider devices. Cage prepares a local generation and records exact provider
+device IDs and attempted writes. A partial update rolls back each exact
+attempted device to its last-good payload when available. If the hub or
+rollback is unavailable, the repair marker remains and the next successful
+sync repairs the last-good generation before publishing a complete new one.
+It never deletes or zeroes an unrelated provider device. Intentional zero
+summaries are still limited to provider devices already present in the prior
+aggregate.
+
+The collector is now pinned to official Token Monitor v0.49.0, commit
+`7c74e61fd8f9d592e647f14107738746a51e49ff`, archive SHA-256
+`c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e`, and
+official Tokscale 4.14. Its network-disabled, exact read-only subpath mounts,
+host-side hub authentication, and headless-agent allowlist are unchanged.
+
+Mixed-model sessions retain their token counts. Cage prices them only when
+the schema supplies sufficient per-model components or authoritative per-model
+cost evidence; otherwise the affected session remains unpriced. It never
+allocates input/output/cache tokens across models.
+
+#### Recovery and rollback
+
+For an upload failure, leave the private generation and repair marker in place
+and retry `cage monitor sync` after the hub is reachable. The retry first
+repairs exact attempted devices, then publishes the complete current
+generation. If reverting to an older Cage binary is necessary, stop active
+launches and run `cage monitor disconnect` before the downgrade; preserve the
+private monitor state. The older binary ignores the new scheduler/generation
+files but may use the older sequential uploader. Reconnect with Cage 0.35.0
+and run the forced sync before resuming automatic uploads so any pending
+generation is repaired deterministically.
+
 ## 0.34.4 — 2026-08-28
 
 ### Automatically monitor discovered volumes on launch

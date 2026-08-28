@@ -5,6 +5,28 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.35.0 — 2026-08-28
+
+- replace per-launch all-volume monitor polling with a host-wide,
+  cross-process coordinator: launches refresh only their current exact volume,
+  reuse private fingerprint-bound snapshots for unchanged peers, and perform a
+  bounded wall-clock full reconciliation once per hour; explicit `monitor sync`
+  remains the forced full-reconciliation and repair path, and exit refreshes
+  only the current volume;
+- progressively promote an exact unchanged recovered volume's display label to
+  the real project basename plus target without changing its logical/project
+  identity, fingerprint, cached history, or totals; replacements and ambiguous
+  claims remain explicit-adoption cases;
+- add private provider-upload generations, last-good payload rollback, and
+  resumable repair markers for the Token Monitor v0.49.0 per-device ingest API;
+  partial failures never delete or zero an unrelated provider device;
+- pin the collector to official Token Monitor v0.49.0 and Tokscale 4.14 with
+  verified commit/archive digest, while retaining the network-disabled,
+  exact-subpath read-only collector boundary;
+- keep mixed-model sessions' token counts while leaving their cost unpriced
+  unless per-model component or authoritative cost evidence is sufficient;
+  Cage never allocates aggregate input/output/cache tokens across models.
+
 ## 0.34.4 — 2026-08-28
 
 - automatically reuse an exact, unchanged recovered Codex volume during a

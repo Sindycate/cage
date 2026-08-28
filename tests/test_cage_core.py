@@ -375,7 +375,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.34.4")
+        self.assertEqual(result.stdout.strip(), "cage 0.35.0")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):

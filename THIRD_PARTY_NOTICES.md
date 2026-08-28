@@ -1,10 +1,12 @@
 # Third-party notices
 
-## Javis603/token-monitor v0.48.0
+## Javis603/token-monitor v0.49.0
 
 Cage's optional Token Monitor collector image contains the upstream
 `Javis603/token-monitor` source at commit
-`6121585f5d5e7fa98385f8a5ac7f8639660e4965`, distributed under the MIT License.
+`7c74e61fd8f9d592e647f14107738746a51e49ff`, distributed under the MIT License.
+The pinned v0.49.0 source archive has SHA-256
+`c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e`.
 The image retains the upstream `/opt/token-monitor/LICENSE` file. The license
 text is reproduced here so the source release carries the same notice.
 

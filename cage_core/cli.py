@@ -603,6 +603,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     registrations = monitor.load_registry(config_root)
     rows = [item.public_dict_for(config_root) for item in registrations]
     aggregate = monitor.load_aggregate_status(config_root)
+    scheduler = monitor.load_scheduler_state(config_root)
+    pending_upload = monitor.load_upload_state(config_root)
     hub: dict[str, object] | None = None
     hub_device_ids: set[str] = set()
     if connection is not None and connection.enabled:
@@ -654,6 +656,25 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         "migration_pending": sum(bool(item.legacy_device_id) for item in registrations),
         "aggregate": aggregate,
         "hub": hub,
+        "scheduler": {
+            "next_full_reconciliation_at": scheduler["next_full_reconciliation_at"],
+            "last_full_reconciliation_at": scheduler["last_full_reconciliation_at"],
+            "last_generation": scheduler["last_generation"],
+            "last_error": scheduler["last_error"],
+            "full_reconciliation_in_progress": scheduler["full_reconciliation_in_progress"]
+            is not None,
+            "full_reconciliation_interval_seconds": monitor.FULL_RECONCILIATION_INTERVAL_SECONDS,
+        },
+        "upload_repair": (
+            {
+                "state": pending_upload["state"],
+                "generation": pending_upload["generation"],
+                "attempted": pending_upload["attempted"],
+                "last_error": pending_upload["last_error"],
+            }
+            if pending_upload is not None
+            else None
+        ),
     }
     if as_json:
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
@@ -661,7 +682,12 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     if connection is None or not connection.enabled:
         print("Token Monitor: disconnected")
     else:
-        print(f"Token Monitor: connected to {connection.hub_url} (every {connection.interval_seconds}s)")
+        print(
+            f"Token Monitor: connected to {connection.hub_url} "
+            f"(current volume every {connection.interval_seconds}s; "
+            f"host-wide full reconciliation every "
+            f"{monitor.FULL_RECONCILIATION_INTERVAL_SECONDS}s)"
+        )
         if hub and "error" in hub:
             print(f"Hub: unavailable ({hub['error']})")
         elif hub:
@@ -712,6 +738,14 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         )
     if split_pending:
         print("Provider split migration: pending; run cage monitor migrate --yes")
+    if pending_upload is not None:
+        print(
+            "Provider upload repair: pending for "
+            f"{len(pending_upload['attempted'])} attempted stream(s); "
+            "the next successful sync will repair the prepared generation"
+        )
+    if scheduler["last_error"]:
+        print(f"Automatic full reconciliation: retry pending ({scheduler['last_error']})")
     return 0
 
 

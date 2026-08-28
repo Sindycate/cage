@@ -1472,6 +1472,7 @@ def _monitor_final_scan_before_remove(
             storage_policy=policy,
             allow_build=False,
             force=True,
+            final=True,
         )
     except (DesktopError, cage_config.ConfigError, monitor.MonitorError, storage.StorageError, OSError, ValueError) as exc:
         print(f"WARNING: final Token Monitor Desktop scan skipped: {exc}", file=sys.stderr)

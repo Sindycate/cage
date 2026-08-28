@@ -140,6 +140,60 @@ class OpenCodeConfigTests(unittest.TestCase):
             self.assertEqual(tmpfs_for("claude"), "/tmp")
             self.assertEqual(tmpfs_for("codex"), "/tmp")
 
+    def test_host_monitor_starts_when_tool_container_uses_net_off(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            config_root = root / "config"
+            repo.mkdir()
+            config_root.mkdir()
+            resolved = ResolvedConfig(
+                config_path=config_root / "config.toml",
+                repo_path=str(repo),
+                preset_name="codex",
+                preset_source="test",
+                tool="codex",
+                target="container",
+            )
+            prepared = build_launch_plan(
+                LaunchRequest(repo_operand=str(repo), network="off"),
+                resolved,
+                cage_version="0.35.0",
+                config_root=config_root,
+                install_root=Path(__file__).resolve().parents[1],
+            )
+            runtime = container_target.ContainerRuntime(
+                prepared=prepared,
+                install_root=Path(__file__).resolve().parents[1],
+                config_root=config_root,
+                docker="docker",
+            )
+            runtime.monitor_record = container_target.monitor.VolumeRegistration(
+                "a" * 32,
+                "cage-" + "b" * 32,
+                "codex-state-test",
+                "container",
+                str(repo),
+                "Cage: repo (Container)",
+                {
+                    "name": "codex-state-test",
+                    "driver": "local",
+                    "scope": "local",
+                    "created_at": "2026-08-28T00:00:00Z",
+                    "label_identity": "",
+                },
+            )
+            connection = container_target.monitor.MonitorConnection(
+                "https://monitor.example", "test", interval_seconds=60
+            )
+            with patch.object(
+                container_target.monitor, "load_connection", return_value=connection
+            ), patch.object(container_target.monitor, "ActiveMonitor") as worker:
+                container_target._start_codex_monitor(runtime)
+
+            worker.assert_called_once()
+            self.assertEqual(worker.call_args.args[1], 60)
+
     def test_callback_ports_are_fixed_scoped_and_readiness_checked(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

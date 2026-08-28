@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, build_opener as urllib_build_opener
@@ -937,6 +939,39 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(streams["zllm"][1]["unpriced_tokens"], 100)
             self.assertEqual(manifest["cost_usd"], 0.0)
 
+    def test_multi_model_session_keeps_tokens_but_stays_unpriced_without_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            session = self._session(
+                "multi",
+                total=100,
+                input_tokens=80,
+                output_tokens=20,
+                cost=3,
+            )
+            session["models"] = {"gpt-a": 60, "gpt-b": 40}
+            session["modelCosts"] = {}
+            payload, status = monitor.aggregate_summaries(
+                root,
+                [(record, self._summary(record.device_id, {"codex:multi": session}))],
+            )
+
+            self.assertEqual(payload["allTime"]["totalTokens"], 100)
+            self.assertEqual(payload["allTime"]["costUsd"], 0.0)
+            self.assertEqual(payload["allTime"]["modelCosts"], {})
+            self.assertEqual(status["priced_tokens"], 0)
+            self.assertEqual(status["unpriced_tokens"], 100)
+            self.assertEqual(status["missing_models"], ["gpt-a", "gpt-b"])
+
     def test_scan_clears_a_provider_stream_that_has_no_remaining_sessions(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1183,6 +1218,16 @@ class MonitorStateTests(unittest.TestCase):
                     volume_name="codex-state-recovered",
                 )
 
+            historical = self._summary(
+                recovered.device_id,
+                {
+                    "codex:historical": self._session(
+                        "historical", total=42, input_tokens=32, output_tokens=10
+                    )
+                },
+            )
+            monitor._save_volume_snapshot(root, recovered, historical)
+
             reused = monitor.register_volume(
                 root,
                 "docker",
@@ -1195,8 +1240,30 @@ class MonitorStateTests(unittest.TestCase):
                 reuse_recovered=True,
             )
 
-            self.assertEqual(reused, recovered)
-            self.assertEqual(monitor.load_registry(root), [recovered])
+            self.assertEqual(reused.logical_id, recovered.logical_id)
+            self.assertEqual(
+                monitor.project_id_for(root, reused.logical_id),
+                monitor.project_id_for(root, recovered.logical_id),
+            )
+            self.assertEqual(reused.device_id, recovered.device_id)
+            self.assertEqual(reused.volume_name, recovered.volume_name)
+            self.assertEqual(reused.fingerprint, recovered.fingerprint)
+            self.assertEqual(reused.display_name, "Cage: recovered (Container)")
+            stored = monitor.load_registry(root)[0]
+            self.assertEqual(stored.logical_id, recovered.logical_id)
+            self.assertEqual(stored.display_name, "Cage: recovered (Container)")
+            self.assertEqual(stored.repository, recovered.repository)
+            self.assertEqual(stored.fingerprint, recovered.fingerprint)
+            self.assertEqual(monitor.load_volume_snapshot(root, reused), historical)
+            aggregate, aggregate_status = monitor.aggregate_summaries(
+                root, [(reused, historical)]
+            )
+            self.assertEqual(aggregate["allTime"]["totalTokens"], 42)
+            self.assertEqual(aggregate_status["total_tokens"], 42)
+            self.assertEqual(
+                aggregate["today"]["sessions"]["codex:historical"]["projectLabel"],
+                "Cage: recovered (Container)",
+            )
 
     def test_normal_launch_does_not_reuse_a_replaced_volume(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1521,6 +1588,459 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(manifest["device_ids"], [uploaded["deviceId"]])
             self.assertEqual(manifest["providers"]["openai-api"]["total_tokens"], 200)
 
+    def test_incremental_scan_refreshes_current_and_reuses_cached_peer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    f"{index:032x}",
+                    device_id,
+                    f"codex-state-{value}",
+                    "container",
+                    f"/work/{value}",
+                    f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                )
+                for index, value in enumerate(("current", "peer"))
+            ]
+            monitor.save_registry(root, records)
+            current, peer = records
+            peer_payload = self._summary(
+                peer.device_id,
+                {
+                    "codex:peer": self._session(
+                        "peer", total=11, input_tokens=8, output_tokens=3
+                    )
+                },
+            )
+            monitor._save_volume_snapshot(root, peer, peer_payload)
+            scheduler = monitor._default_scheduler_state()
+            scheduler["next_full_reconciliation_at"] = time.time() + 3600
+            monitor.save_scheduler_state(root, scheduler)
+            current_payload = self._summary(
+                current.device_id,
+                {
+                    "codex:current": self._session(
+                        "current", total=7, input_tokens=5, output_tokens=2
+                    )
+                },
+            )
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                self.assertEqual(record.logical_id, current.logical_id)
+                return current_payload
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload, patch.object(
+                monitor,
+                "scan_all_registrations",
+                side_effect=AssertionError("incremental scan called full reconciliation"),
+            ):
+                updated, status = monitor.scan_registration(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    current,
+                    version="0.35.0",
+                    storage_policy=object(),
+                    allow_build=False,
+                )
+
+            self.assertEqual(updated.logical_id, current.logical_id)
+            self.assertEqual(collector.call_count, 1)
+            upload.assert_called_once()
+            self.assertEqual(status["total_tokens"], 18)
+            self.assertEqual(
+                monitor.load_volume_snapshot(root, peer)["allTime"]["totalTokens"],
+                11,
+            )
+
+    def test_incremental_scan_rejects_replaced_cached_peer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    f"{index:032x}",
+                    device_id,
+                    f"codex-state-{value}",
+                    "container",
+                    f"/work/{value}",
+                    f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                )
+                for index, value in enumerate(("current", "peer"))
+            ]
+            monitor.save_registry(root, records)
+            monitor.save_split_status(root, {"complete": True, "device_ids": []})
+            for item in records:
+                monitor._save_volume_snapshot(root, item, self._summary(item.device_id, {}))
+            scheduler = monitor._default_scheduler_state()
+            scheduler["next_full_reconciliation_at"] = time.time() + 3600
+            monitor.save_scheduler_state(root, scheduler)
+            changed = dict(records[1].fingerprint, created_at="2026-08-28T00:00:00Z")
+            fingerprints = {
+                records[0].volume_name: records[0].fingerprint,
+                records[1].volume_name: changed,
+            }
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ):
+                with self.assertRaisesRegex(monitor.MonitorError, "volume changed"):
+                    monitor.scan_registration(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        records[0],
+                        version="0.35.0",
+                        storage_policy=object(),
+                        allow_build=False,
+                    )
+            self.assertEqual(monitor.load_registry(root)[1].status, "needs-adoption")
+
+    def test_ten_staggered_launches_share_one_host_wide_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    f"{index:032x}",
+                    device_id,
+                    f"codex-state-{index}",
+                    "container",
+                    f"/work/{index}",
+                    f"Cage: {index} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{index}"),
+                )
+                for index in range(10)
+            ]
+            monitor.save_registry(root, records)
+            monitor.save_split_status(root, {"complete": True, "device_ids": []})
+            for item in records:
+                monitor._save_volume_snapshot(root, item, self._summary(item.device_id, {}))
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            barrier = threading.Barrier(len(records))
+            results = []
+            errors = []
+            result_lock = threading.Lock()
+
+            def launch(item):
+                try:
+                    barrier.wait(timeout=5)
+                    result = monitor.scan_registration(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        item,
+                        version="0.35.0",
+                        storage_policy=object(),
+                        allow_build=False,
+                    )
+                    with result_lock:
+                        results.append(result)
+                except BaseException as exc:
+                    with result_lock:
+                        errors.append(exc)
+
+            def collect(_docker, _image, item, _root, **_kwargs):
+                session = self._session(
+                    item.logical_id, total=1, input_tokens=1, output_tokens=0
+                )
+                return self._summary(item.device_id, {f"codex:{item.logical_id}": session})
+
+            threads = [threading.Thread(target=launch, args=(item,)) for item in records]
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), len(records))
+            # The first launch owns the due full reconciliation. Its current
+            # snapshot is reused as the one fresh input, so nine peers need a
+            # collector; no launch rescans all ten volumes independently.
+            self.assertLessEqual(collector.call_count, len(records))
+            upload.assert_called_once()
+            self.assertTrue(monitor.load_scheduler_state(root)["last_generation"])
+
+    def test_coordinator_lease_is_taken_over_after_owner_crash(self):
+        if not hasattr(os, "fork"):
+            self.skipTest("process fork is unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    with monitor.try_coordinator_lease(root) as acquired:
+                        os._exit(0 if acquired else 2)
+                except BaseException:
+                    os._exit(3)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertTrue(
+                (root / "monitor" / "locks" / "coordinator-lease.json").exists()
+            )
+            with monitor.try_coordinator_lease(root) as acquired:
+                self.assertTrue(acquired)
+            self.assertFalse(
+                (root / "monitor" / "locks" / "coordinator-lease.json").exists()
+            )
+
+    def test_active_monitor_uses_wall_clock_boundaries_and_current_only_exit(self):
+        calls = []
+        clock = [100.0]
+
+        class FakeStop:
+            def __init__(self):
+                self.waits = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                if len(self.waits) == 1:
+                    # The first scan took five seconds. The next wait should
+                    # catch the already-passed boundary, not add one interval.
+                    clock[0] = 150.0
+                    return False
+                return True
+
+        stop = FakeStop()
+
+        def scan(force):
+            calls.append(force)
+            if len(calls) == 1:
+                clock[0] = 125.0
+
+        worker = object.__new__(monitor.ActiveMonitor)
+        worker._scan = scan
+        worker._interval = 30
+        worker._stop = stop
+        with patch.object(monitor.time, "time", side_effect=lambda: clock[0]):
+            worker._run()
+
+        self.assertEqual(calls, [False, False])
+        self.assertEqual(stop.waits[0], 0.0)
+        self.assertEqual(stop.waits[1], 30.0)
+
+    def test_failed_full_reconciliation_waits_for_next_wall_clock_slot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = monitor._default_scheduler_state()
+            state["next_full_reconciliation_at"] = 100.0
+            state["full_reconciliation_in_progress"] = {
+                "owner": "owner",
+                "scheduled_at": 100.0,
+                "started_at": 100.0,
+                "expires_at": 200.0,
+            }
+            monitor.save_scheduler_state(root, state)
+            with patch.object(monitor.time, "time", return_value=101.0):
+                monitor._fail_full_reconciliation(root, state, "hub unavailable")
+
+            updated = monitor.load_scheduler_state(root)
+            self.assertEqual(
+                updated["next_full_reconciliation_at"],
+                100.0 + monitor.FULL_RECONCILIATION_INTERVAL_SECONDS,
+            )
+            self.assertIsNone(updated["full_reconciliation_in_progress"])
+
+    def test_final_refresh_does_not_take_due_full_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            device_id = monitor.host_device_id(root)
+            records = [
+                monitor.VolumeRegistration(
+                    f"{index:032x}",
+                    device_id,
+                    f"codex-state-{value}",
+                    "container",
+                    f"/work/{value}",
+                    f"Cage: {value} (Container)",
+                    dict(FINGERPRINT, name=f"codex-state-{value}"),
+                )
+                for index, value in enumerate(("current", "peer"))
+            ]
+            monitor.save_registry(root, records)
+            monitor.save_split_status(root, {"complete": True, "device_ids": []})
+            for item in records:
+                monitor._save_volume_snapshot(root, item, self._summary(item.device_id, {}))
+            scheduler = monitor._default_scheduler_state()
+            scheduler["next_full_reconciliation_at"] = 1.0
+            monitor.save_scheduler_state(root, scheduler)
+            current, peer = records
+            current_payload = self._summary(
+                current.device_id,
+                {
+                    "codex:current": self._session(
+                        "current", total=3, input_tokens=2, output_tokens=1
+                    )
+                },
+            )
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", return_value=current_payload
+            ) as collector, patch.object(
+                monitor, "_collect_registered_summaries",
+                side_effect=AssertionError("final refresh performed a full scan"),
+            ) as full, patch.object(
+                monitor, "upload_summary"
+            ) as upload:
+                updated, status = monitor.scan_registration(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    current,
+                    version="0.35.0",
+                    storage_policy=object(),
+                    allow_build=False,
+                    force=True,
+                    final=True,
+                )
+
+            self.assertEqual(updated.logical_id, current.logical_id)
+            self.assertEqual(status["total_tokens"], 3)
+            collector.assert_called_once()
+            full.assert_not_called()
+            upload.assert_called_once()
+            self.assertEqual(
+                monitor.load_volume_snapshot(root, peer)["allTime"]["totalTokens"],
+                0,
+            )
+
+    def test_provider_upload_partial_failure_preserves_last_good_and_repairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection = monitor.MonitorConnection("https://hub.example", "secret")
+            device_id = monitor.host_device_id(root)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                device_id,
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            first_summary = self._summary(
+                device_id,
+                {
+                    "codex:openai": self._session(
+                        "openai", total=80, input_tokens=60, output_tokens=20
+                    ),
+                    "codex:zllm": self._session(
+                        "zllm", total=20, input_tokens=15, output_tokens=5, provider="zllm"
+                    ),
+                },
+            )
+            second_summary = self._summary(
+                device_id,
+                {
+                    "codex:openai": self._session(
+                        "openai", total=100, input_tokens=75, output_tokens=25
+                    ),
+                    "codex:zllm": self._session(
+                        "zllm", total=30, input_tokens=20, output_tokens=10, provider="zllm"
+                    ),
+                },
+            )
+            first_payloads, first_status = monitor.aggregate_provider_summaries(
+                root, [(record, first_summary)]
+            )
+            second_payloads, second_status = monitor.aggregate_provider_summaries(
+                root, [(record, second_summary)]
+            )
+            first_status["split_complete"] = True
+            second_status["split_complete"] = True
+            with patch.object(monitor, "upload_summary"):
+                good = monitor._publish_provider_payloads(
+                    root, connection, first_payloads, first_status, None
+                )
+            old_generation = good["generation"]
+            old_status = monitor.load_aggregate_status(root)
+
+            with patch.object(
+                monitor,
+                "upload_summary",
+                side_effect=[
+                    None,
+                    monitor.MonitorError("new provider upload failed"),
+                    monitor.MonitorError("rollback failed"),
+                ],
+            ) as upload, patch.object(monitor, "delete_device") as delete:
+                with self.assertRaisesRegex(monitor.MonitorError, "repair is pending"):
+                    monitor._publish_provider_payloads(
+                        root, connection, second_payloads, second_status, old_status
+                    )
+            self.assertEqual(
+                monitor.load_aggregate_status(root)["generation"], old_generation
+            )
+            pending = monitor.load_upload_state(root)
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["state"], "repair_pending")
+            delete.assert_not_called()
+            self.assertEqual(
+                {call.args[1]["deviceId"] for call in upload.call_args_list},
+                {
+                    monitor.provider_device_id(root, "openai-api"),
+                    monitor.provider_device_id(root, "zllm"),
+                },
+            )
+
+            with patch.object(monitor, "upload_summary") as repaired:
+                repaired_status = monitor._publish_provider_payloads(
+                    root, connection, second_payloads, second_status, old_status
+                )
+            self.assertNotEqual(repaired_status["generation"], old_generation)
+            self.assertIsNone(monitor.load_upload_state(root))
+            self.assertEqual(repaired.call_count, 4)
+
     def test_empty_account_limits_may_have_probe_timestamp(self):
         payload = {
             "deviceId": "cage-aaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1537,6 +2057,40 @@ class MonitorStateTests(unittest.TestCase):
         self.assertEqual(
             monitor._validate_summary(payload, payload["deviceId"])["limits"]["providers"],
             [],
+        )
+
+    def test_v049_headless_summary_wire_is_allowlisted_and_pinned(self):
+        self.assertEqual(monitor.COLLECTOR_SOURCE_VERSION, "0.49.0")
+        self.assertEqual(
+            monitor.COLLECTOR_SOURCE_COMMIT,
+            "7c74e61fd8f9d592e647f14107738746a51e49ff",
+        )
+        self.assertEqual(
+            monitor.COLLECTOR_SOURCE_SHA256,
+            "c2f72a31e372b495c0816af561ff789233e0cb2cae2e7e8098d686f9b7fd441e",
+        )
+        payload = {
+            "deviceId": "cage-aaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "hostname": "headless-agent",
+            "platform": "linux",
+            "osName": "Linux",
+            "osVersion": "",
+            "updatedAt": "2026-08-28T00:00:00.000Z",
+            "agentVersion": "0.49.0",
+            "agentRuntime": "headless-agent",
+            "projectsEnabled": False,
+            "trackedClients": ["codex"],
+            "clientStatus": {"codex": {"status": "ok"}},
+            "historyAvailable": False,
+            "history": None,
+            "limits": {"updatedAt": "", "refreshMs": 0, "providers": []},
+            "today": {"totalTokens": 0, "costUsd": 0},
+            "month": {"totalTokens": 0, "costUsd": 0},
+            "allTime": {"totalTokens": 0, "costUsd": 0},
+        }
+        self.assertEqual(
+            monitor._validate_summary(payload, payload["deviceId"])["agentRuntime"],
+            "headless-agent",
         )
 
     def test_summary_rejects_unexpected_wire_fields_and_source_paths(self):

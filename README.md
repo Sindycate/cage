@@ -156,19 +156,41 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
 ```
 
 After connecting, Codex Container and Desktop launches register their logical
-target automatically and scan immediately, every five minutes, and at exit.
-Volumes recovered by `monitor discover` or a prior migration are also reused
+target automatically. The host refreshes only that launch's exact volume
+immediately, at the configured interval (five minutes by default), and once at
+exit. A cross-process coordinator serializes aggregate publication; trusted,
+sanitized per-volume snapshots supply inactive or unchanged peers. One
+coordinator performs a bounded full safety reconciliation each hour, anchored
+to wall-clock time, so scan duration does not shift the next deadline. Normal
+use does not require `monitor sync`; `cage monitor sync` is the explicit forced
+full-reconciliation and repair path.
+
+Volumes recovered by `monitor discover` or a prior migration are reused
 automatically on a normal launch when their exact Docker fingerprint is still
-unchanged; no manual `monitor sync` is needed for ordinary use.
+unchanged and there is no ownership conflict. The safe display label is then
+promoted from `Cage: Recovered …` to the project basename plus target label;
+the logical ID, project ID, volume fingerprint, cached history, and totals do
+not change. Replacements or ambiguous registrations remain fail-closed and
+require explicit `monitor add` adoption.
+
 Each provider used by a Cage installation has one readable hub device, for
 example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each registered Codex
 volume remains a project under the provider device that owns its sessions. A
 repository can therefore appear under more than one provider device. Cage
-scans all active volumes before each upload, deduplicates sessions first, then
-replaces each provider device summary. It never uploads both the old unsplit
-aggregate and its provider partitions. If a provider no longer has any retained
-session, Cage uploads a zero summary for that provider so the hub cannot keep a
-stale cost or token total.
+deduplicates sessions before partitioning them, then replaces each provider
+device summary. It never uploads both the old unsplit aggregate and its
+provider partitions. If a provider no longer has any retained session, Cage
+uploads a zero summary for that exact, previously-known provider device so the
+hub cannot keep a stale total.
+
+Token Monitor v0.49.0 exposes one-device ingest rather than a transaction. Cage
+therefore prepares a private local generation and keeps the last-good provider
+payloads. If a provider upload fails, only the exact attempted provider devices
+are rolled back when their last-good payload is available. If rollback is not
+possible, a private repair marker causes the next successful sync to repair the
+old generation before publishing a complete new one. No unrelated provider
+device is deleted or zeroed, and the local last-good aggregate remains the
+authority until a complete generation succeeds.
 
 The aggregate is session-aware. Identical copies count once. If one copy is a
 strictly newer cumulative copy, Cage keeps it. Incompatible copies stop the
@@ -184,8 +206,8 @@ cage monitor split --dry-run     # preview the provider split, no hub change
 cage monitor split --dry-run --json
 cage monitor add ~/projects/myapp --preset codex-company --container
 cage monitor add --volume codex-state-old  # adopt an exact recovered volume
-cage monitor sync                 # optional forced one-shot upload/repair
-cage monitor sync ~/projects/myapp # optional resolve, then forced upload
+cage monitor sync                 # forced full reconciliation and repair
+cage monitor sync ~/projects/myapp # resolve, then forced full reconciliation
 cage monitor pricing status
 cage monitor pricing set openai-api:gpt-5.4 --input 1.25 --output 10
 cage monitor pricing set zllm:gpt-5.6-luna --input 1.25 --output 10
@@ -199,13 +221,15 @@ cage monitor forget DEVICE_ID --yes
 register a dormant target. `monitor discover` is read-only and lists all
 existing `codex-state-*` volumes, including older or unmapped volumes. Adopt an
 unmapped volume with its exact name using `monitor add --volume`; Cage labels it
-as recovered without inventing a host path. Cost is always uploaded when
-Token Monitor can price the model. `monitor status` shows the total and each
-provider stream, price coverage, and provider-qualified model IDs that still
-need a price. Custom rates are USD per million tokens; they are stored
-privately and passed only to the network-disabled collector when they use the
-legacy model-only form. Provider-qualified prices are applied by Cage after
-collection. Cage does not invent rates for private or aliased model IDs.
+as recovered without inventing a host path. Cost is uploaded only when the
+session has sufficient per-model component evidence or an authoritative cost
+record. For a multi-model session, exact model-level costs can be used when
+the schema supplies them; otherwise token counts remain visible but that
+session stays unpriced. Cage never allocates input/output/cache tokens or one
+model's rate across another model. `monitor status` shows the total and each
+provider stream, price coverage, upload-repair state, and
+provider-qualified model IDs that still need a price. Custom rates are USD per
+million tokens, stored privately, and never sent to the hub.
 
 Versions before 0.34.0 used one `cage-local-…` device for the aggregate. After
 upgrade, normal sync pauses if that unsplit device is still on the hub. Run
