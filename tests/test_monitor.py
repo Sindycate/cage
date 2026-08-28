@@ -655,6 +655,55 @@ class MonitorStateTests(unittest.TestCase):
                      (records[1], self._summary(device_id, {"codex:shared": right}))],
                 )
 
+    def test_aggregate_accepts_empty_period_without_session_details(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            device_id = monitor.host_device_id(root)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                device_id,
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            summary = self._summary(device_id, {})
+            for period_name in ("today", "month", "allTime"):
+                summary[period_name].pop("sessions")
+
+            payload, status = monitor.aggregate_summaries(root, [(record, summary)])
+
+            self.assertEqual(payload["allTime"]["totalTokens"], 0)
+            self.assertEqual(status["price_coverage_percent"], 100.0)
+            self.assertEqual(status["missing_models"], [])
+
+    def test_aggregate_rejects_missing_session_details_for_nonempty_period(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            device_id = monitor.host_device_id(root)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                device_id,
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            summary = self._summary(
+                device_id,
+                {"codex:session": self._session(
+                    "session", total=10, input_tokens=8, output_tokens=2
+                )},
+            )
+            summary["allTime"].pop("sessions")
+
+            with self.assertRaisesRegex(
+                monitor.MonitorError, "collector did not provide complete session details"
+            ):
+                monitor.aggregate_summaries(root, [(record, summary)])
+
     def test_custom_pricing_is_private_and_reports_coverage(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

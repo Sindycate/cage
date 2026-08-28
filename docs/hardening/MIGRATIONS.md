@@ -6,6 +6,17 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.32.1 — 2026-08-28
+
+### Empty new-project monitor scan
+
+No user action is required. A newly registered Codex Container or Desktop
+volume can have no session files when its first monitor scan starts. Token
+Monitor may omit the `sessions` object for that zero-token period. Cage now
+accepts that empty representation and continues to reject missing session
+details when a period reports any tokens. Existing monitor registrations and
+archives are unchanged.
+
 ## 0.32.0 — 2026-08-27
 
 ### One Cage device with volume projects

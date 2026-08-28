@@ -1772,6 +1772,18 @@ def aggregate_summaries(
         for period_name in occurrences:
             period = payload.get(period_name)
             sessions = period.get("sessions") if isinstance(period, dict) else None
+            # Token Monitor omits the sessions object for an empty period.  A
+            # newly registered Cage volume commonly has no Codex session yet,
+            # so accept that representation only when its explicit token total
+            # is zero.  A non-empty period still requires complete details.
+            if isinstance(period, dict) and "sessions" not in period:
+                total = period.get("totalTokens")
+                if (
+                    type(total) in (int, float)
+                    and math.isfinite(total)
+                    and total == 0
+                ):
+                    sessions = {}
             if not isinstance(sessions, dict):
                 raise MonitorError("collector did not provide complete session details")
             session_total = 0

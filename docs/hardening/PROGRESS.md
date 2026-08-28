@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — empty Token Monitor project scan prepared for v0.32.1
+
+Accepted the pinned Token Monitor representation for a newly registered Codex
+volume with zero tokens and no `sessions` object. Non-empty periods still
+require complete session details, so the last-good-snapshot protection remains
+unchanged. Added focused regressions for both the empty representation and the
+fail-closed non-empty case. Updated the patch version, changelog, and migration
+guide.
+
+Validation: complete Python suite `575 passed, 13 skipped`; Gitleaks complete
+history scan found no leaks; Python compilation, Bash and Node syntax, Compose
+rendering, reproducible source archives, and `git diff --check` passed.
+Publication remains pending until the canonical publisher reaches
+`public_verified`.
+
 ## 2026-08-27 — aggregate Token Monitor device prepared for v0.32.0
 
 Replaced the per-volume hub identity with one stable `cage-local-…` identity

@@ -913,6 +913,12 @@ class ReleaseTagGateTests(unittest.TestCase):
 
     SHA = "a" * 40
     TAG_OBJECT = "b" * 40
+    VERSION = re.search(
+        r'^CAGE_VERSION="([^"]+)"$',
+        (ROOT / "cage").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    ).group(1)
+    TAG = f"v{VERSION}"
 
     @classmethod
     def setUpClass(cls):
@@ -948,13 +954,13 @@ git() {
   fi
   return 127
 }
-'''
+'''.replace("v0.32.0", self.TAG)
         script_file = base / "gate.sh"
         script_file.write_text(git_stub + "\n" + self.script, encoding="utf-8")
         env = dict(os.environ)
         env.update(
             {
-                "GITHUB_REF": "refs/tags/v0.32.0",
+                "GITHUB_REF": f"refs/tags/{self.TAG}",
                 "GITHUB_SHA": self.SHA,
                 "GITHUB_OUTPUT": str(github_output),
                 "TAG_STUB_MODE": mode,
@@ -973,8 +979,8 @@ git() {
     def test_remote_annotated_tag_passes_even_without_local_tag_object(self):
         result, output = self._run_gate("annotated")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version=0.32.0", output)
-        self.assertIn("tag=v0.32.0", output)
+        self.assertIn(f"version={self.VERSION}", output)
+        self.assertIn(f"tag={self.TAG}", output)
 
     def test_remote_lightweight_tag_fails_closed(self):
         result, _ = self._run_gate("lightweight")

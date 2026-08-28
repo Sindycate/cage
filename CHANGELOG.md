@@ -5,6 +5,14 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.32.1 — 2026-08-28
+
+- accept the empty Token Monitor summary that a newly registered Codex volume
+  produces before its first session, while continuing to reject incomplete
+  details for non-empty periods;
+- prevent the expected first-run monitor race from displaying a warning over
+  the Codex input interface;
+
 ## 0.32.0 — 2026-08-27
 
 - replace opaque per-volume Token Monitor devices with one readable Cage
