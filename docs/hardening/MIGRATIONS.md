@@ -6,6 +6,15 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.34.3 — 2026-08-28
+
+### Classify long missing-subpath diagnostics
+
+No user configuration migration is required. Cage now identifies the known
+missing-subpath markers before truncating Docker's diagnostic for display, so
+long volume names are handled like other empty legacy inputs. The exact
+read-only, subpath-scoped scan boundary is unchanged.
+
 ## 0.34.2 — 2026-08-28
 
 ### Scan volumes with no session directories

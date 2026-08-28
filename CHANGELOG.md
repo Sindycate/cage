@@ -5,6 +5,11 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.34.3 — 2026-08-28
+
+- classify missing Docker volume subpaths before shortening daemon diagnostics,
+  so long recovered volume names do not turn an empty scan into a hard error;
+
 ## 0.34.2 — 2026-08-28
 
 - make the collector's private scan tmpfs writable by its unprivileged UID/GID,

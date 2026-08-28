@@ -533,6 +533,27 @@ class MonitorStateTests(unittest.TestCase):
                 )
             )
 
+    def test_missing_volume_subpath_long_daemon_error_classifies_before_display_truncation(self):
+        volume_name = "codex-state-" + ("x" * 180)
+        volume_path = f"/var/lib/docker/volumes/{volume_name}/_data/archived_sessions"
+        result = type(
+            "Result",
+            (),
+            {
+                "returncode": 1,
+                "stderr": (
+                    f"docker: Error response from daemon: cannot access path {volume_path}: "
+                    f"lstat {volume_path}: no such file or directory"
+                ),
+            },
+        )()
+        with patch("cage_core.monitor.subprocess.run", return_value=result):
+            self.assertFalse(
+                monitor._subpath_available(
+                    "docker", "cage-token-monitor:dev", volume_name, "archived_sessions"
+                )
+            )
+
     def test_forget_requires_local_registration_and_leaves_tombstone_on_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

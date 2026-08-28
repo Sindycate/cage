@@ -3,14 +3,22 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Long missing-subpath diagnostic patch prepared for v0.34.3
+
+The v0.34.2 retry reached a long recovered volume name. Its Docker diagnostic
+was truncated before the missing-path marker, so Cage still rejected the
+known-empty optional subpath. Classification now uses the full captured
+diagnostic before shortening only the displayed error. A regression test covers
+the long path. Publication is pending the canonical publisher.
+
 ## 2026-08-28 — Collector tmpfs ownership patch prepared for v0.34.2
 
 The v0.34.1 all-volume retry reached an older volume with neither session
 directory. The collector could not create its empty scan directories because
 `/scan/codex` was root-owned. Cage now assigns that private tmpfs to the
 unprivileged scan UID/GID; volume mounts remain read-only and exact-subpath
-scoped. A regression assertion covers the mount options. Publication is
-pending the canonical publisher.
+scoped. A regression assertion covers the mount options. Public publication
+reached `public_verified` for v0.34.2.
 
 ## 2026-08-28 — Missing-volume-subpath patch prepared for v0.34.1
 

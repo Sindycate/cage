@@ -1330,8 +1330,9 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
         raise MonitorError(f"cannot probe Codex volume subpath: {exc}") from exc
     if result.returncode == 0:
         return True
-    message = result.stderr.strip().replace("\n", " ")[:300]
-    lower = message.lower()
+    raw_message = result.stderr.strip().replace("\n", " ")
+    lower = raw_message.lower()
+    message = raw_message[:300]
     if "volume-subpath" in lower and any(
         marker in lower
         for marker in (
