@@ -5,6 +5,13 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.34.4 — 2026-08-28
+
+- automatically reuse an exact, unchanged recovered Codex volume during a
+  normal launch, so the host collector starts and uploads without a manual
+  `cage monitor sync`; conflicting labels, replacements, and competing
+  registrations still fail closed;
+
 ## 0.34.3 — 2026-08-28
 
 - classify missing Docker volume subpaths before shortening daemon diagnostics,

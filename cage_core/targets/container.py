@@ -1199,6 +1199,7 @@ def _prepare_codex_monitor(runtime: ContainerRuntime) -> None:
             preset=plan.preset_name,
             display_name=display_name,
             fingerprint=fingerprint,
+            reuse_recovered=True,
         )
     except monitor.MonitorError as exc:
         print(f"WARNING: Token Monitor registration skipped: {exc}", file=sys.stderr)

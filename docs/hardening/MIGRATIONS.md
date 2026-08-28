@@ -6,6 +6,22 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.34.4 — 2026-08-28
+
+### Automatically monitor discovered volumes on launch
+
+No user configuration migration is required. If `cage monitor discover` or
+the earlier bulk recovery already recorded an exact Codex volume as
+`Recovered`, a normal Cage Codex launch now reuses that registration when the
+Docker volume name and fingerprint still match. The host-owned collector then
+starts its normal immediate, periodic, and final scans; no manual
+`cage monitor sync` is required.
+
+Cage does not rename the recovered project or adopt a replacement volume in
+this automatic path. A changed fingerprint, a conflicting ownership label, or
+another active registration for the same volume still stops automatic reuse.
+Use explicit adoption only when you intentionally replace or rename a volume.
+
 ## 0.34.3 — 2026-08-28
 
 ### Classify long missing-subpath diagnostics
@@ -306,8 +322,11 @@ replacement is explicitly adopted:
 
 ```bash
 cage monitor add ~/projects/myapp --preset codex-company --container
-cage monitor sync
 ```
+
+The `add` command performs its own bounded scan. A later normal Cage launch
+also starts the background collector automatically; `cage monitor sync` is
+only an optional forced one-shot upload for repair or verification.
 
 `add` is also the way to register a dormant target that is not currently
 running. `cage monitor disconnect` removes the local hub credential and pauses
@@ -324,8 +343,9 @@ Migration and verification:
    its own secret; prefer HTTPS for non-loopback hubs.
 2. Run `cage monitor connect URL`, then `cage monitor status` and inspect that
    only the intended Codex Container/Desktop devices are registered.
-3. Launch a monitored Codex target or use explicit `monitor add`, then run
-   `cage monitor sync` to force a bounded one-shot update.
+3. Launch a monitored Codex target or use explicit `monitor add`; the normal
+   launch path starts the collector and performs the bounded upload itself.
+   `cage monitor sync` is only an optional forced one-shot update.
 4. If a state volume was intentionally replaced, use `monitor add` to adopt it;
    do not delete or edit the private registry by hand.
 

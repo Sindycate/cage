@@ -1172,6 +1172,85 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(record.target, "container")
             self.assertEqual(monitor.load_registry(root), [record])
 
+    def test_normal_launch_reuses_an_exact_recovered_volume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fingerprint = dict(FINGERPRINT, name="codex-state-recovered")
+            with patch.object(monitor, "volume_fingerprint", return_value=fingerprint):
+                recovered = monitor.register_recovered_volume(
+                    root,
+                    "docker",
+                    volume_name="codex-state-recovered",
+                )
+
+            reused = monitor.register_volume(
+                root,
+                "docker",
+                volume_name="codex-state-recovered",
+                repository="/work/recovered",
+                target="container",
+                preset="main",
+                display_name="Cage: recovered (Container)",
+                fingerprint=fingerprint,
+                reuse_recovered=True,
+            )
+
+            self.assertEqual(reused, recovered)
+            self.assertEqual(monitor.load_registry(root), [recovered])
+
+    def test_normal_launch_does_not_reuse_a_replaced_volume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovered_fingerprint = dict(FINGERPRINT, name="codex-state-recovered")
+            with patch.object(
+                monitor, "volume_fingerprint", return_value=recovered_fingerprint
+            ):
+                monitor.register_recovered_volume(
+                    root,
+                    "docker",
+                    volume_name="codex-state-recovered",
+                )
+
+            changed = dict(recovered_fingerprint, created_at="2026-08-28T00:00:00Z")
+            with self.assertRaisesRegex(monitor.MonitorError, "already registered"):
+                monitor.register_volume(
+                    root,
+                    "docker",
+                    volume_name="codex-state-recovered",
+                    repository="/work/recovered",
+                    target="container",
+                    preset="main",
+                    display_name="Cage: recovered (Container)",
+                    fingerprint=changed,
+                    reuse_recovered=True,
+                )
+
+            conflicting_label = dict(recovered_fingerprint, label_identity="b" * 32)
+            with self.assertRaisesRegex(monitor.MonitorError, "different logical target"):
+                monitor.register_volume(
+                    root,
+                    "docker",
+                    volume_name="codex-state-recovered",
+                    repository="/work/recovered",
+                    target="container",
+                    preset="main",
+                    display_name="Cage: recovered (Container)",
+                    fingerprint=conflicting_label,
+                    reuse_recovered=True,
+                )
+
+            real = monitor.register_volume(
+                root,
+                "docker",
+                volume_name="codex-state-other",
+                repository="/work/other",
+                target="container",
+                preset="main",
+                display_name="Cage: other (Container)",
+                fingerprint=dict(FINGERPRINT, name="codex-state-other"),
+            )
+            self.assertEqual(real.status, "active")
+
     def test_aggregate_accepts_empty_period_without_session_details(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

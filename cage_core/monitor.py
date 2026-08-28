@@ -942,6 +942,46 @@ def ensure_codex_volume_labels(
         raise MonitorError(f"cannot create Codex state volume: {result.stderr.strip()[:300]}")
 
 
+def _recovered_registration_for_launch(
+    registrations: list[VolumeRegistration],
+    *,
+    volume_name: str,
+    target: str,
+    fingerprint: dict[str, str],
+) -> VolumeRegistration | None:
+    """Return one safe discovery record that a normal launch can reuse.
+
+    Discovery cannot know the host path for an old volume, so it stores a
+    synthetic ``Recovered`` project.  A launch may reuse that record only when
+    the exact volume and Docker fingerprint still match and no other active
+    registration claims the volume.  This keeps automatic monitoring useful
+    without silently moving a real project or adopting a replacement volume.
+    """
+
+    if target != "container":
+        return None
+    candidates = [
+        item
+        for item in registrations
+        if item.volume_name == volume_name
+        and item.status not in {"retired", "disabled"}
+    ]
+    if len(candidates) != 1:
+        return None
+    record = candidates[0]
+    if (
+        record.status != "active"
+        or record.target != "container"
+        or record.repository != recovered_repository(volume_name)
+        or record.fingerprint != fingerprint
+    ):
+        return None
+    label_identity = fingerprint.get("label_identity", "")
+    if label_identity and label_identity != record.logical_id:
+        return None
+    return record
+
+
 def register_volume(
     config_root: Path,
     docker: str,
@@ -953,6 +993,7 @@ def register_volume(
     display_name: str,
     fingerprint: dict[str, str] | None = None,
     allow_replacement: bool = False,
+    reuse_recovered: bool = False,
 ) -> VolumeRegistration:
     if (
         not Path(repository).is_absolute()
@@ -968,10 +1009,19 @@ def register_volume(
     if current["name"] != volume_name:
         raise MonitorError("Docker volume fingerprint name mismatch")
     label_identity = current.get("label_identity", "")
-    if label_identity and label_identity != logical_id and not allow_replacement:
-        raise MonitorError("monitor volume label belongs to a different logical target; run cage monitor add explicitly")
     with _registry_write_lock(config_root):
         registrations = load_registry(config_root)
+        if reuse_recovered:
+            recovered = _recovered_registration_for_launch(
+                registrations,
+                volume_name=volume_name,
+                target=target,
+                fingerprint=current,
+            )
+            if recovered is not None:
+                return recovered
+        if label_identity and label_identity != logical_id and not allow_replacement:
+            raise MonitorError("monitor volume label belongs to a different logical target; run cage monitor add explicitly")
         existing = next((item for item in registrations if item.logical_id == logical_id), None)
         if existing is not None:
             if existing.volume_name != volume_name:

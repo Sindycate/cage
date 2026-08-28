@@ -157,6 +157,9 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
 
 After connecting, Codex Container and Desktop launches register their logical
 target automatically and scan immediately, every five minutes, and at exit.
+Volumes recovered by `monitor discover` or a prior migration are also reused
+automatically on a normal launch when their exact Docker fingerprint is still
+unchanged; no manual `monitor sync` is needed for ordinary use.
 Each provider used by a Cage installation has one readable hub device, for
 example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each registered Codex
 volume remains a project under the provider device that owns its sessions. A
@@ -181,8 +184,8 @@ cage monitor split --dry-run     # preview the provider split, no hub change
 cage monitor split --dry-run --json
 cage monitor add ~/projects/myapp --preset codex-company --container
 cage monitor add --volume codex-state-old  # adopt an exact recovered volume
-cage monitor sync                 # all active projects, provider uploads
-cage monitor sync ~/projects/myapp # add/resolve this project, then sync all
+cage monitor sync                 # optional forced one-shot upload/repair
+cage monitor sync ~/projects/myapp # optional resolve, then forced upload
 cage monitor pricing status
 cage monitor pricing set openai-api:gpt-5.4 --input 1.25 --output 10
 cage monitor pricing set zllm:gpt-5.6-luna --input 1.25 --output 10

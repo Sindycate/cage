@@ -3,6 +3,17 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Reuse recovered monitor volumes automatically in v0.34.4
+
+The normal Codex launch path now reuses an exact `Recovered` registration when
+the deterministic volume name and Docker fingerprint match, with no competing
+active registration and no conflicting ownership label. This starts the
+host-owned collector without requiring a manual `cage monitor sync`; changed,
+replaced, or ambiguous volumes still fail closed.
+
+Validation: focused monitor tests pass locally; full release gates and public
+publication remain pending.
+
 ## 2026-08-28 — Long missing-subpath diagnostic patch prepared for v0.34.3
 
 The v0.34.2 retry reached a long recovered volume name. Its Docker diagnostic
