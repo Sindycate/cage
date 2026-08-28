@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.34.1 — 2026-08-28
+
+- handle Docker daemon diagnostics that report a missing `sessions/` or
+  `archived_sessions/` directory through the volume `_data` path, so recovered
+  older volumes scan as empty inputs without widening the read-only mount;
+
 ## 0.34.0 — 2026-08-28
 
 - split the host-owned Token Monitor upload into readable provider devices such

@@ -3,6 +3,15 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Missing-volume-subpath patch prepared for v0.34.1
+
+The all-volume scan found an older recovered volume without
+`archived_sessions/`. Docker reported the missing path through its host
+`_data` path, which the v0.34.0 matcher did not recognize. The collector now
+treats that exact missing subpath as empty and keeps the volume boundary
+scoped. A regression test covers the daemon diagnostic. Publication is
+pending the canonical publisher.
+
 ## 2026-08-28 — Token Monitor provider split and volume discovery prepared for v0.34.0
 
 Token Monitor publication now uses one readable Cage device per observed
@@ -27,8 +36,7 @@ Validation: focused monitor tests pass (`44 passed`); the complete supported
 Python suite passes (`577 passed, 14 skipped`), and the real-Docker smoke suite
 is unavailable on this host (`10 skipped`). Python compilation, Bash/Node
 syntax, Compose rendering, archive checksum, Gitleaks, and `git diff --check`
-pass. Public publication remains pending until the canonical publisher reaches
-`public_verified`.
+pass. Public publication reached `public_verified` for v0.34.0.
 
 ## 2026-08-28 — Scheduler-friendly storage maintenance prepared for v0.33.0
 

@@ -508,6 +508,27 @@ class MonitorStateTests(unittest.TestCase):
             )
         self.assertIn("volume-nocopy", " ".join(run.call_args.args[0]))
 
+    def test_missing_volume_subpath_daemon_lstat_error_is_empty_directory_case(self):
+        result = type(
+            "Result",
+            (),
+            {
+                "returncode": 1,
+                "stderr": (
+                    "docker: Error response from daemon: cannot access path "
+                    "/var/lib/docker/volumes/codex-state-demo/_data/archived_sessions: "
+                    "lstat /var/lib/docker/volumes/codex-state-demo/_data/archived_sessions: "
+                    "no such file or directory"
+                ),
+            },
+        )()
+        with patch("cage_core.monitor.subprocess.run", return_value=result):
+            self.assertFalse(
+                monitor._subpath_available(
+                    "docker", "cage-token-monitor:dev", "codex-state-demo", "archived_sessions"
+                )
+            )
+
     def test_forget_requires_local_registration_and_leaves_tombstone_on_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

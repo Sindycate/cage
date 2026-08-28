@@ -6,6 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.34.1 — 2026-08-28
+
+### Scan older volumes with missing session directories
+
+No user configuration migration is required. Some older Docker volumes do not
+contain `archived_sessions/` (or `sessions/`). Cage now recognizes both Docker
+daemon error formats for an absent exact subpath and treats that input as
+empty. It still refuses to mount the whole volume, so the read-only scan
+boundary is unchanged.
+
 ## 0.34.0 — 2026-08-28
 
 ### Split Token Monitor totals by observed provider

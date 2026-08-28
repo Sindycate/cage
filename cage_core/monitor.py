@@ -1346,8 +1346,12 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
         raise MonitorError(
             "Docker does not support volume-subpath; refusing an unscoped Codex scan"
         )
-    if "volume-subpath" in lower and any(
-        marker in lower for marker in ("does not exist", "no such file or directory")
+    # Docker daemon versions differ here: some mention volume-subpath, while
+    # others report only the host volume _data path from lstat. Both forms
+    # mean that this exact optional directory is absent. Treat it as an empty
+    # scan input; never fall back to an unscoped volume mount.
+    if any(marker in lower for marker in ("does not exist", "no such file or directory")) and (
+        "volume-subpath" in lower or "/_data/" in lower
     ):
         return False
     raise MonitorError(f"Codex volume subpath probe failed: {message or 'unknown error'}")
