@@ -90,7 +90,7 @@ class LaunchPlanContractTests(unittest.TestCase):
             payload = plan.public_dict()
             serialized = json.dumps(payload, sort_keys=True)
         self.assertEqual(payload["schema"], "cage.launch-plan")
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertIn("aws-host-cli", payload["selected_capabilities"]["runtime"])
         self.assertEqual(
             payload["storage"],
@@ -100,6 +100,7 @@ class LaunchPlanContractTests(unittest.TestCase):
                 "min_build_free_gib": 20,
                 "keep_versions": 2,
                 "dangling_min_age_hours": 24,
+                "ephemeral_min_age_hours": 168,
             },
         )
         self.assertEqual(
@@ -374,7 +375,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.32.3")
+        self.assertEqual(result.stdout.strip(), "cage 0.33.0")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):

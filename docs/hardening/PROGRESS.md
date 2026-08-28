@@ -3,6 +3,27 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Scheduler-friendly storage maintenance prepared for v0.33.0
+
+Added `cage storage maintain` as a preview-only command and
+`cage storage maintain --apply` as its noninteractive, scheduler-friendly
+counterpart. It reuses Cage's exact managed-image retention and race-checked
+deletion path. Future CI smoke images carry `io.cage.lifecycle=ephemeral` and
+become candidates only after the configured 168-hour age, when their label
+history is terminal, every tag is an exact Cage-owned reference, and no running
+or stopped container refers to them. Volumes, containers, third-party images,
+legacy unlabeled images, and custom-tagged images remain excluded.
+
+Added `[storage].ephemeral_min_age_hours` and bumped the versioned launch-plan
+contract to schema 3. Existing configuration and Docker state need no
+migration; an external host scheduler may invoke only the explicit
+`maintain --apply` command.
+
+Validation: complete Python suite `567 passed, 14 skipped`; real-Docker smoke
+suite `9 passed, 1 skipped`; Python compilation, Bash/Node syntax, Compose
+rendering, and `git diff --check` pass. Publication remains pending until the
+canonical publisher reaches `public_verified`.
+
 ## 2026-08-28 — Token Monitor archive period-boundary repair prepared for v0.32.3
 
 When upstream repricing refreshes a session archive, its shared `day` marker

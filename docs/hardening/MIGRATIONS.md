@@ -6,6 +6,52 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.33.0 — 2026-08-28
+
+### Scheduler-friendly safe image maintenance
+
+Who is affected: users who periodically accumulate old managed Cage releases
+or Cage test/CI images and want a host scheduler to perform the narrow cleanup
+without reviewing Docker objects interactively.
+
+Previous behavior: `cage storage clean` always required an interactive `CLEAN`
+confirmation. Non-semantic test/CI images, including images with labels such as
+`ci`, were not eligible for automatic classification unless they also matched
+the managed semantic-version rules.
+
+New behavior: `cage storage maintain` prints the same exact candidate preview
+without changing Docker state. `cage storage maintain --apply` is the
+noninteractive form suitable for a host scheduler. It can remove old
+unreferenced managed image versions, old terminal Cage build leftovers, and
+explicitly ephemeral images after `ephemeral_min_age_hours` (default 168
+hours). Ephemeral images must carry `io.cage.lifecycle=ephemeral` in addition
+to Cage-managed role identity, have terminal Cage label history, contain only
+exact Cage-owned tags, and be unreferenced by every running or stopped
+container.
+
+Maintenance never removes volumes, containers, referenced images, unrelated or
+legacy unlabeled images, or custom-tagged images. Existing unlabeled test/CI
+images remain report-only until rebuilt with the lifecycle label. No existing
+configuration or Docker state requires migration. The versioned
+`cage.launch-plan` public contract increments from schema version 2 to 3 to
+carry the new storage-policy field; consumers of that internal contract should
+accept schema 3.
+
+Migration and scheduling:
+
+1. Run `cage storage maintain` once and inspect the preview.
+2. If the default 168-hour retention is appropriate, schedule
+   `cage storage maintain --apply` with the host scheduler. Do not schedule
+   Docker prune or the interactive `cage storage clean` command.
+3. To change the age, add `ephemeral_min_age_hours = N` under `[storage]` and
+   run `cage config doctor PATH`.
+4. Keep normal `*-state-*` volumes and third-party application images outside
+   automatic deletion; they remain visible through the status/report output.
+
+Rollback: stop scheduling `storage maintain --apply` and install the previous
+release. No volumes, sessions, credentials, or repository files are changed by
+this feature.
+
 ## 0.32.3 — 2026-08-28
 
 ### Preserve Token Monitor period boundaries after repricing

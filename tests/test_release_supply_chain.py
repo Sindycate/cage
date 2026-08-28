@@ -758,9 +758,13 @@ class SharedBaseImageTests(unittest.TestCase):
 
     def test_ci_builds_base_before_desktop_codex_smoke_image(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        base_build = "docker build --build-arg CAGE_VERSION=ci -t cage-base:ci -f Dockerfile.base ."
+        base_build = (
+            "docker build --label io.cage.lifecycle=ephemeral "
+            "--build-arg CAGE_VERSION=ci -t cage-base:ci -f Dockerfile.base ."
+        )
         leaf_build = (
-            "docker build --build-arg CAGE_BASE=cage-base:ci "
+            "docker build --label io.cage.lifecycle=ephemeral "
+            "--build-arg CAGE_BASE=cage-base:ci "
             "--build-arg CAGE_VERSION=ci "
             "-t codex:desktop-smoke -f Dockerfile.codex ."
         )

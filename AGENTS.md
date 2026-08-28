@@ -44,6 +44,9 @@ cage update opencode
 # Inspect capacity/retention and run exact, confirmation-gated image cleanup
 cage storage status
 cage storage clean
+# Preview/apply noninteractive maintenance of exact safe image candidates
+cage storage maintain
+cage storage maintain --apply
 
 # Run Claude Code against a repo (default)
 cage ~/path/to/repo
@@ -169,11 +172,15 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   coordinator owns reverse-order cleanup. Pure policy/model modules do not
   execute processes or mutate the filesystem
 - `cage_core.storage` owns portable Docker capacity probing, image/container
-  inventory, managed role/version classification, semantic retention, and exact
-  race-rechecked cleanup candidates. Launch and update paths apply its immutable
-  global policy before container/Desktop effects or builds; host-native execution
-  bypasses it. Cleanup never prunes or deletes volumes, containers, referenced
-  images, unrelated images, legacy unlabeled Cage images, or custom derived tags
+  inventory, managed role/version classification, semantic retention, explicit
+  ephemeral-image lifecycle classification, and exact race-rechecked cleanup
+  candidates. Launch and update paths apply its immutable global policy before
+  container/Desktop effects or builds; host-native execution bypasses it.
+  Interactive cleanup remains confirmation-gated; noninteractive maintenance
+  may remove only exact managed candidates and explicitly labelled, aged
+  ephemeral images. Cleanup never prunes or deletes volumes, containers,
+  referenced images, unrelated images, legacy unlabeled Cage images, or custom
+  derived tags
 - `cage_core.monitor` is an optional host-owned Token Monitor integration. It
   stores its hub credential, host identity, logical-target registry, locks,
   per-project collector state, custom prices, and aggregate status under private
@@ -212,8 +219,9 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   `[projects]` mappings. Project mappings use longest-prefix matching
 - The optional top-level `[storage]` policy defaults to a 20 GiB warning/build
   floor, 5 GiB critical floor, two retained semantic versions per managed image
-  role, and a 24-hour dangling-build minimum age. The TUI edits it through the
-  same concurrency-checked atomic transaction path as other configuration
+  role, a 24-hour dangling-build minimum age, and a 168-hour minimum age for
+  explicitly ephemeral images. The TUI edits it through the same
+  concurrency-checked atomic transaction path as other configuration
 - Codex presets may select a native `$CODEX_HOME/<name>.config.toml` layer with
   `codex_profile = "<name>"`; Cage validates the file and forwards
   `--profile <name>` to either execution target

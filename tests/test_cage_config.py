@@ -201,6 +201,7 @@ class CageConfigTests(unittest.TestCase):
 
         self.assertEqual(resolved.storage_policy.warn_free_gib, 30)
         self.assertEqual(resolved.storage_policy.keep_versions, 3)
+        self.assertEqual(resolved.storage_policy.ephemeral_min_age_hours, 168)
 
     def test_storage_policy_rejects_unknown_noninteger_and_invalid_thresholds(self):
         cases = [
@@ -213,6 +214,10 @@ class CageConfigTests(unittest.TestCase):
             (
                 {"warn_free_gib": 20, "min_build_free_gib": 10},
                 "at least warn",
+            ),
+            (
+                {"ephemeral_min_age_hours": True},
+                "must be an integer",
             ),
         ]
         for policy, message in cases:

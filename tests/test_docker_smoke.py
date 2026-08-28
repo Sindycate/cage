@@ -338,6 +338,67 @@ class DockerSmokeTests(unittest.TestCase):
                 check=False,
             )
 
+    def test_explicit_ephemeral_image_is_an_aged_maintenance_candidate(self):
+        version = f"ci-smoke-{os.getpid()}"
+        reference = f"cage-base:{version}"
+        try:
+            with tempfile.TemporaryDirectory(dir=ROOT) as raw:
+                context = Path(raw)
+                dockerfile = context / "Dockerfile"
+                dockerfile.write_text(
+                    "FROM busybox:1.36\n"
+                    "ARG VERSION\n"
+                    "LABEL io.cage.managed=\"true\" "
+                    "io.cage.role=\"base\" io.cage.version=\"${VERSION}\"\n",
+                    encoding="utf-8",
+                )
+                built = subprocess.run(
+                    [
+                        "docker", "build",
+                        "--label", f"{storage.LIFECYCLE_LABEL}={storage.EPHEMERAL_LIFECYCLE}",
+                        "--build-arg", f"VERSION={version}",
+                        "-t", reference, "-f", str(dockerfile), str(context),
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(built.returncode, 0, built.stderr)
+
+            images = tuple(
+                item
+                for item in storage.inventory_images("docker")
+                if reference in item.tags
+            )
+            self.assertEqual(len(images), 1)
+            candidates, _, legacy = storage.cleanup_candidates(
+                images,
+                frozenset(),
+                storage.StoragePolicy(ephemeral_min_age_hours=0),
+            )
+
+            self.assertEqual([item.reference for item in candidates], [reference])
+            self.assertEqual(legacy, 0)
+            removed, failures = storage.delete_candidates("docker", candidates)
+            self.assertEqual((removed, failures), (1, ()))
+            self.assertNotEqual(
+                subprocess.run(
+                    ["docker", "image", "inspect", reference],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                ).returncode,
+                0,
+            )
+        finally:
+            subprocess.run(
+                ["docker", "image", "rm", "-f", reference],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
     def test_desktop_remote_ssh_injects_profile_provider_and_yolo(self):
         image = os.environ.get("CAGE_DESKTOP_SMOKE_IMAGE")
         if not image:

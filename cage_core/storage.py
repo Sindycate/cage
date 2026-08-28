@@ -18,7 +18,10 @@ from .models import StoragePolicy
 MANAGED_LABEL = "io.cage.managed"
 ROLE_LABEL = "io.cage.role"
 VERSION_LABEL = "io.cage.version"
+LIFECYCLE_LABEL = "io.cage.lifecycle"
+EPHEMERAL_LIFECYCLE = "ephemeral"
 GIB = 1024 ** 3
+MANAGED_ROLES = frozenset({"base", "claude", "codex", "opencode", "monitor"})
 KNOWN_REPOSITORIES = {
     "cage-base": "base",
     "claude-code": "claude",
@@ -60,8 +63,18 @@ class ImageRecord:
     def managed(self) -> bool:
         return (
             self.labels.get(MANAGED_LABEL) == "true"
-            and self.labels.get(ROLE_LABEL) in {"base", "claude", "codex", "opencode", "monitor"}
+            and self.labels.get(ROLE_LABEL) in MANAGED_ROLES
             and bool(SEMVER_RE.fullmatch(self.labels.get(VERSION_LABEL, "")))
+        )
+
+    @property
+    def ephemeral(self) -> bool:
+        """Whether Cage explicitly authorized this image for aged cleanup."""
+
+        return (
+            self.labels.get(MANAGED_LABEL) == "true"
+            and self.labels.get(ROLE_LABEL) in MANAGED_ROLES
+            and self.labels.get(LIFECYCLE_LABEL) == EPHEMERAL_LIFECYCLE
         )
 
 
@@ -167,13 +180,15 @@ def _terminal_managed_history(docker: str, image_id: str) -> bool:
     )
     if result.returncode != 0:
         return False
-    first = next((line for line in result.stdout.splitlines() if line.strip()), "")
-    return (
-        "LABEL" in first.upper()
-        and MANAGED_LABEL in first
-        and ROLE_LABEL in first
-        and VERSION_LABEL in first
-    )
+    label_layers: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if "LABEL" not in line.upper():
+            break
+        label_layers.append(line)
+    history = " ".join(label_layers)
+    return all(label in history for label in (MANAGED_LABEL, ROLE_LABEL, VERSION_LABEL))
 
 
 def inventory_images(docker: str) -> tuple[ImageRecord, ...]:
@@ -251,7 +266,7 @@ def cleanup_candidates(
             if not parts:
                 continue
             _, version, role = parts
-            if not image.managed:
+            if not image.managed and not image.ephemeral:
                 legacy_ids.add(image.image_id)
                 continue
             if (
@@ -270,6 +285,14 @@ def cleanup_candidates(
         )
 
     candidates: list[CleanupCandidate] = []
+    candidate_keys: set[tuple[str, str]] = set()
+
+    def add_candidate(candidate: CleanupCandidate) -> None:
+        key = (candidate.reference, candidate.image_id)
+        if key not in candidate_keys:
+            candidate_keys.add(key)
+            candidates.append(candidate)
+
     for image in images:
         if image.image_id in referenced:
             continue
@@ -286,7 +309,7 @@ def cleanup_candidates(
                 and _semantic_version(version) is not None
                 and version not in retained[role]
             ):
-                candidates.append(
+                add_candidate(
                     CleanupCandidate(
                         reference=tag,
                         image_id=image.image_id,
@@ -301,7 +324,7 @@ def cleanup_candidates(
             and image.terminal_managed
             and age_hours >= policy.dangling_min_age_hours
         ):
-            candidates.append(
+            add_candidate(
                 CleanupCandidate(
                     reference=image.image_id,
                     image_id=image.image_id,
@@ -309,6 +332,32 @@ def cleanup_candidates(
                     size_bytes=image.size_bytes,
                 )
             )
+        if image.ephemeral and image.terminal_managed:
+            role = image.labels.get(ROLE_LABEL, "")
+            version = image.labels.get(VERSION_LABEL, "")
+            # A disposable image may carry only exact Cage-owned references.
+            # A custom tag such as :latest makes the image report-only until a
+            # person removes that tag deliberately.
+            exact_tags = True
+            for tag in image.tags:
+                parts = _tag_parts(tag)
+                if not parts or parts[2] != role or parts[1] != version:
+                    exact_tags = False
+                    break
+            if exact_tags and age_hours >= policy.ephemeral_min_age_hours:
+                references = image.tags or (image.image_id,)
+                for reference in references:
+                    add_candidate(
+                        CleanupCandidate(
+                            reference=reference,
+                            image_id=image.image_id,
+                            reason=(
+                                f"explicit ephemeral Cage image is at least "
+                                f"{policy.ephemeral_min_age_hours}h old"
+                            ),
+                            size_bytes=image.size_bytes,
+                        )
+                    )
     return tuple(sorted(candidates, key=lambda item: (item.reason, item.reference))), retained, len(legacy_ids)
 
 
@@ -406,7 +455,8 @@ def print_status(state: StorageSnapshot, policy: StoragePolicy) -> None:
     print(
         "Policy: warning < "
         f"{policy.warn_free_gib} GiB; critical < {policy.critical_free_gib} GiB; "
-        f"build floor {policy.min_build_free_gib} GiB"
+        f"build floor {policy.min_build_free_gib} GiB; "
+        f"ephemeral age {policy.ephemeral_min_age_hours}h"
     )
     retained = "; ".join(
         f"{role}={','.join(versions) or 'none'}"
@@ -475,24 +525,37 @@ def run_storage_command(
     *,
     docker: str | None = None,
     input_stream=None,
+    apply: bool = False,
 ) -> int:
     executable = docker or docker_command()
     state = snapshot(executable, policy)
     print_status(state, policy)
     if action == "status":
         return 0
-    if action != "clean":
-        raise StorageError("storage accepts 'status' or 'clean'")
+    if action not in {"clean", "maintain"}:
+        raise StorageError("storage accepts 'status', 'clean', or 'maintain'")
     if not state.candidates:
         return 0
+    if action == "maintain" and not apply:
+        print(
+            "Maintenance is preview-only; no changes made. "
+            "Use 'cage storage maintain --apply' to remove exactly these candidates."
+        )
+        return 0
+    if action == "maintain":
+        print(
+            "Automatic maintenance will remove only the exact candidates above; "
+            "volumes, containers, references, and unrelated images are untouched."
+        )
     stream = input_stream or sys.stdin
-    if not stream.isatty():
+    if action == "clean" and not stream.isatty():
         raise StorageError("storage clean requires an interactive TTY for confirmation")
-    print("No volumes, containers, referenced images, unrelated images, or custom tags will be removed.")
-    print("Type CLEAN to remove exactly the candidates above: ", end="", flush=True)
-    confirmation = stream.readline().strip()
-    if confirmation != "CLEAN":
-        raise StorageError("cleanup aborted; confirmation did not match CLEAN")
+    if action == "clean":
+        print("No volumes, containers, referenced images, unrelated images, or custom tags will be removed.")
+        print("Type CLEAN to remove exactly the candidates above: ", end="", flush=True)
+        confirmation = stream.readline().strip()
+        if confirmation != "CLEAN":
+            raise StorageError("cleanup aborted; confirmation did not match CLEAN")
     removed, failures = delete_candidates(executable, state.candidates)
     print(f"Removed {removed} exact image reference(s).")
     if failures:

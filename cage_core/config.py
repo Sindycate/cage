@@ -75,6 +75,7 @@ STORAGE_KEYS = {
     "min_build_free_gib",
     "keep_versions",
     "dangling_min_age_hours",
+    "ephemeral_min_age_hours",
 }
 AUTH_KEYS = {
     "tool",
@@ -1883,7 +1884,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         f"critical={storage.critical_free_gib}GiB "
         f"build={storage.min_build_free_gib}GiB "
         f"keep={storage.keep_versions} "
-        f"dangling-age={storage.dangling_min_age_hours}h"
+        f"dangling-age={storage.dangling_min_age_hours}h "
+        f"ephemeral-age={storage.ephemeral_min_age_hours}h"
         + (" (Docker targets only)" if resolved.target == "host" else "")
     )
     if resolved.yolo:
@@ -2342,6 +2344,7 @@ critical_free_gib = 5
 min_build_free_gib = 20
 keep_versions = 2
 dangling_min_age_hours = 24
+ephemeral_min_age_hours = 168
 
 [auth.codex-local]
 tool = "codex"

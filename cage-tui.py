@@ -1818,6 +1818,7 @@ class CursesView:
                     ("min_build_free_gib", "Build free-space floor (GiB)"),
                     ("keep_versions", "Retained versions per role"),
                     ("dangling_min_age_hours", "Dangling-image minimum age (hours)"),
+                    ("ephemeral_min_age_hours", "Ephemeral-image minimum age (hours)"),
                 ]
                 action = self.menu(
                     "Docker storage guardrails",
@@ -1826,9 +1827,10 @@ class CursesView:
                         for name, label in fields
                     ],
                     [
-                        "Cleanup is always previewed and confirmation-gated.",
+                        "Interactive cleanup is always previewed and confirmation-gated.",
                         "Volumes, containers, referenced images, unrelated images,",
                         "and custom derived images are never cleanup candidates.",
+                        "Automatic maintenance requires an explicit ephemeral label.",
                     ],
                 )
                 if action:

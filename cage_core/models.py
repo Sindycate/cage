@@ -21,6 +21,7 @@ class StoragePolicy:
     min_build_free_gib: int = 20
     keep_versions: int = 2
     dangling_min_age_hours: int = 24
+    ephemeral_min_age_hours: int = 168
 
     def __post_init__(self) -> None:
         values = {
@@ -29,6 +30,7 @@ class StoragePolicy:
             "min_build_free_gib": self.min_build_free_gib,
             "keep_versions": self.keep_versions,
             "dangling_min_age_hours": self.dangling_min_age_hours,
+            "ephemeral_min_age_hours": self.ephemeral_min_age_hours,
         }
         if any(type(value) is not int for value in values.values()):
             raise ContractError("storage policy values must be integers")
@@ -42,6 +44,8 @@ class StoragePolicy:
             raise ContractError("keep_versions must be between 1 and 100")
         if not 0 <= self.dangling_min_age_hours <= 24 * 3650:
             raise ContractError("dangling_min_age_hours must be between 0 and 87600")
+        if not 0 <= self.ephemeral_min_age_hours <= 24 * 3650:
+            raise ContractError("ephemeral_min_age_hours must be between 0 and 87600")
 
     def public_dict(self) -> dict[str, int]:
         return {
@@ -50,6 +54,7 @@ class StoragePolicy:
             "min_build_free_gib": self.min_build_free_gib,
             "keep_versions": self.keep_versions,
             "dangling_min_age_hours": self.dangling_min_age_hours,
+            "ephemeral_min_age_hours": self.ephemeral_min_age_hours,
         }
 
 
@@ -351,7 +356,7 @@ class LaunchPlan:
     """Complete, immutable launch description validated before side effects."""
 
     SCHEMA: ClassVar[str] = "cage.launch-plan"
-    SCHEMA_VERSION: ClassVar[int] = 2
+    SCHEMA_VERSION: ClassVar[int] = 3
 
     cage_version: str
     repository: str
@@ -502,6 +507,7 @@ class LaunchPlan:
                 "min_build_free_gib",
                 "keep_versions",
                 "dangling_min_age_hours",
+                "ephemeral_min_age_hours",
             },
             "selected_capabilities": {
                 "mcp",

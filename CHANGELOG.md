@@ -5,6 +5,19 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.33.0 — 2026-08-28
+
+- add `cage storage maintain` as a preview-only command with an explicit
+  `--apply` mode for noninteractive, scheduler-friendly cleanup of exact safe
+  image candidates;
+- recognize `io.cage.lifecycle=ephemeral` only when paired with Cage-managed
+  image identity, a terminal label history, exact Cage-owned tags, no container
+  reference, and the configured age; normal state volumes and unknown images
+  remain outside automatic cleanup;
+- add the 168-hour `ephemeral_min_age_hours` storage policy and mark CI smoke
+  images as ephemeral so future test artifacts do not require case-by-case
+  review;
+
 ## 0.32.3 — 2026-08-28
 
 - use Token Monitor's per-period session window markers when restoring

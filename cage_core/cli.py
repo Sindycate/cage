@@ -51,6 +51,8 @@ Commands:
   update [claude|codex|opencode] Refresh the tool binary only (fast; no full rebuild)
   storage status             Show Docker capacity and exact cleanup candidates
   storage clean              Preview and confirm narrow Cage image cleanup
+  storage maintain           Preview automatic safe image maintenance
+  storage maintain --apply   Apply exact managed/ephemeral image maintenance
   monitor connect URL         Connect the optional host-owned Token Monitor hub
   monitor disconnect          Remove the local hub credential and pause uploads
   monitor status [--json]     Show the Cage device, projects, cost, and migration state
@@ -395,9 +397,34 @@ def _dispatch_management(
 
 
 def _run_storage(arguments: list[str], *, config_root: Path) -> int:
-    if len(arguments) != 1 or arguments[0] not in {"status", "clean"}:
-        print("Usage: cage storage status|clean", file=sys.stderr)
+    if not arguments or arguments[0] not in {"status", "clean", "maintain"}:
+        print(
+            "Usage: cage storage status|clean\n"
+            "       cage storage maintain [--apply|--dry-run]",
+            file=sys.stderr,
+        )
         return 1
+    action = arguments[0]
+    apply = False
+    if action in {"status", "clean"} and len(arguments) != 1:
+        print(
+            "Usage: cage storage status|clean\n"
+            "       cage storage maintain [--apply|--dry-run]",
+            file=sys.stderr,
+        )
+        return 1
+    if action == "maintain":
+        if len(arguments) == 2 and arguments[1] == "--apply":
+            apply = True
+        elif len(arguments) == 2 and arguments[1] in {"--dry-run", "--preview"}:
+            pass
+        elif len(arguments) != 1:
+            print(
+                "Usage: cage storage status|clean\n"
+                "       cage storage maintain [--apply|--dry-run]",
+                file=sys.stderr,
+            )
+            return 1
     try:
         config_path = config_root / "config.toml"
         policy = (
@@ -405,7 +432,7 @@ def _run_storage(arguments: list[str], *, config_root: Path) -> int:
             if config_path.is_file()
             else storage.StoragePolicy()
         )
-        return storage.run_storage_command(arguments[0], policy)
+        return storage.run_storage_command(action, policy, apply=apply)
     except (config.ConfigError, storage.StorageError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

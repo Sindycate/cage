@@ -269,6 +269,7 @@ critical_free_gib = 5
 min_build_free_gib = 20
 keep_versions = 2
 dangling_min_age_hours = 24
+ephemeral_min_age_hours = 168
 
 [auth.codex-work]
 tool = "codex"
@@ -997,7 +998,8 @@ Cage measures free space in Docker's backing filesystem before container and
 Desktop launches. Host-native Codex execution does not use Docker and bypasses
 this policy. The optional top-level `[storage]` table shown above defaults to a
 20 GiB warning and build floor, a 5 GiB critical floor, two retained semantic
-versions per Cage image role, and a 24-hour minimum age for dangling builds.
+versions per Cage image role, a 24-hour minimum age for dangling builds, and a
+168-hour minimum age for explicitly ephemeral images.
 
 Interactive launches below the warning floor can preview cleanup, proceed, or
 abort. Critical launches and image builds must recover enough space or abort;
@@ -1008,16 +1010,27 @@ limitation rather than inventing a free-space value.
 ```bash
 cage storage status
 cage storage clean
+cage storage maintain
+cage storage maintain --apply
 ```
 
 `status` lists capacity, retained versions, protected container image IDs, and
 exact cleanup candidates. `clean` repeats that preview and requires typing
-`CLEAN`. It removes only explicitly labeled Cage image tags outside retention
-and old terminal Cage build leftovers. It never uses Docker prune, never uses
-forced removal, and never deletes volumes, containers, images referenced by a
-running or stopped container, unrelated images, legacy unlabeled Cage images,
-or custom derived image tags. Every candidate is rechecked immediately before
-removal so a newly created container makes deletion fail safe.
+`CLEAN`. `maintain` is a non-destructive preview; `maintain --apply` is the
+noninteractive form suitable for a host scheduler. It removes only exact
+managed image tags outside retention, old terminal Cage build leftovers, and
+images explicitly labelled `io.cage.lifecycle=ephemeral` after the configured
+age. Ephemeral cleanup also requires a valid Cage-managed role, terminal image
+identity, no container reference, and no extra/custom tag. Existing unlabeled
+test/CI images remain report-only until they are rebuilt with that label.
+
+Maintenance never uses Docker prune or forced removal, and never deletes
+volumes, containers, images referenced by running or stopped containers,
+unrelated images, legacy unlabeled Cage images, or custom derived image tags.
+Every candidate is rechecked immediately before removal so a newly created
+container makes deletion fail safe. On macOS or Linux, a host scheduler may
+invoke `cage storage maintain --apply`; schedule only that command, not Docker
+prune or the interactive `storage clean` command.
 
 ### Verify release provenance
 

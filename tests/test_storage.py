@@ -27,22 +27,28 @@ def image(
     image_id: str | None = None,
     age_hours: int = 1,
     terminal: bool = True,
+    lifecycle: str = "",
 ) -> storage.ImageRecord:
     repository = {
         "base": "cage-base",
         "claude": "claude-code",
         "codex": "codex",
+        "opencode": "opencode",
+        "monitor": "cage-token-monitor",
     }[role]
+    labels = {
+        storage.MANAGED_LABEL: "true",
+        storage.ROLE_LABEL: role,
+        storage.VERSION_LABEL: version,
+    }
+    if lifecycle:
+        labels[storage.LIFECYCLE_LABEL] = lifecycle
     return storage.ImageRecord(
         image_id=image_id or f"sha256:{role}-{version}",
         tags=tags if tags is not None else (f"{repository}:{version}",),
         created=datetime.now(timezone.utc) - timedelta(hours=age_hours),
         size_bytes=1024,
-        labels={
-            storage.MANAGED_LABEL: "true",
-            storage.ROLE_LABEL: role,
-            storage.VERSION_LABEL: version,
-        },
+        labels=labels,
         terminal_managed=terminal,
     )
 
@@ -109,6 +115,51 @@ class CandidatePolicyTests(unittest.TestCase):
         )
 
         self.assertEqual([item.reference for item in candidates], ["sha256:terminal"])
+
+    def test_ephemeral_images_require_age_terminal_identity_and_exact_tags(self):
+        old = image(
+            "ci",
+            role="codex",
+            tags=("codex:ci",),
+            age_hours=169,
+            lifecycle=storage.EPHEMERAL_LIFECYCLE,
+            image_id="sha256:old-ephemeral",
+        )
+        young = image(
+            "ci",
+            role="codex",
+            tags=("codex:ci-young",),
+            age_hours=167,
+            lifecycle=storage.EPHEMERAL_LIFECYCLE,
+            image_id="sha256:young-ephemeral",
+        )
+        young.labels[storage.VERSION_LABEL] = "ci-young"
+        custom_tagged = image(
+            "ci",
+            role="codex",
+            tags=("codex:ci", "codex:latest"),
+            age_hours=169,
+            lifecycle=storage.EPHEMERAL_LIFECYCLE,
+            image_id="sha256:custom-ephemeral",
+        )
+        referenced = image(
+            "ci",
+            role="codex",
+            tags=("codex:ci-ref",),
+            age_hours=169,
+            lifecycle=storage.EPHEMERAL_LIFECYCLE,
+            image_id="sha256:referenced-ephemeral",
+        )
+        referenced.labels[storage.VERSION_LABEL] = "ci-ref"
+
+        candidates, _, legacy = storage.cleanup_candidates(
+            (old, young, custom_tagged, referenced),
+            frozenset({referenced.image_id}),
+            StoragePolicy(ephemeral_min_age_hours=168),
+        )
+
+        self.assertEqual([item.reference for item in candidates], ["codex:ci"])
+        self.assertEqual(legacy, 0)
 
 
 class ProbeAndPreflightTests(unittest.TestCase):
@@ -180,6 +231,19 @@ class ProbeAndPreflightTests(unittest.TestCase):
 
 
 class CleanupExecutionTests(unittest.TestCase):
+    def test_cli_dispatches_maintenance_apply_without_a_tty(self):
+        with tempfile.TemporaryDirectory() as raw, patch(
+            "cage_core.cli.storage.run_storage_command", return_value=0
+        ) as run:
+            status = cli._run_storage(
+                ["maintain", "--apply"], config_root=Path(raw)
+            )
+
+        self.assertEqual(status, 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], "maintain")
+        self.assertTrue(run.call_args.kwargs["apply"])
+
     def test_clean_requires_tty_and_exact_confirmation(self):
         candidate = storage.CleanupCandidate("cage-base:1.0.0", "sha256:old", "old", 1)
         state = ProbeAndPreflightTests().state(50)
@@ -220,6 +284,39 @@ class CleanupExecutionTests(unittest.TestCase):
         ) as delete:
             status = storage.run_storage_command(
                 "clean", StoragePolicy(), docker="docker", input_stream=Terminal("CLEAN\n")
+            )
+
+        self.assertEqual(status, 0)
+        delete.assert_called_once_with("docker", (candidate,))
+
+    def test_maintain_preview_is_default_and_apply_is_noninteractive(self):
+        candidate = storage.CleanupCandidate("codex:ci", "sha256:old", "old", 1)
+        state = ProbeAndPreflightTests().state(50)
+        state = storage.StorageSnapshot(
+            capacity=state.capacity,
+            images=(),
+            referenced_image_ids=frozenset(),
+            candidates=(candidate,),
+            retained_versions=state.retained_versions,
+            legacy_cage_images=0,
+        )
+        noninteractive = Mock()
+        noninteractive.isatty.return_value = False
+        with patch("cage_core.storage.snapshot", return_value=state), patch(
+            "cage_core.storage.delete_candidates", return_value=(1, ())
+        ) as delete:
+            status = storage.run_storage_command(
+                "maintain", StoragePolicy(), docker="docker", input_stream=noninteractive
+            )
+            self.assertEqual(status, 0)
+            delete.assert_not_called()
+
+        with patch("cage_core.storage.snapshot", return_value=state), patch(
+            "cage_core.storage.delete_candidates", return_value=(1, ())
+        ) as delete:
+            status = storage.run_storage_command(
+                "maintain", StoragePolicy(), docker="docker", input_stream=noninteractive,
+                apply=True,
             )
 
         self.assertEqual(status, 0)
