@@ -3,6 +3,33 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Token Monitor provider split and volume discovery prepared for v0.34.0
+
+Token Monitor publication now uses one readable Cage device per observed
+provider, such as `cage-openai-api-mac-…` and `cage-zllm-mac-…`. Cage collects
+all active Codex state volumes, deduplicates identical or monotonic session
+copies before partitioning, and sends missing or multi-provider sessions to an
+explicit `unattributed` stream. The collector remains network-disabled and
+the hub credential remains host-only.
+
+Added `cage monitor discover` for every `codex-state-*` volume,
+`cage monitor add --volume NAME` for explicit recovered-volume adoption, and
+`cage monitor split --dry-run` for a no-hub-change preview. Provider-qualified
+private pricing (`PROVIDER:MODEL`) is applied after collection; legacy
+model-only prices remain limited to unambiguous OpenAI sessions.
+
+Migration from the old `cage-local-…` device is fail-closed and resumable. Cage
+uploads provider devices, reads authenticated per-device hub totals, verifies
+each new device and the combined token total against the old device, and only
+then deletes exact legacy records. Any failed check preserves the old device.
+
+Validation: focused monitor tests pass (`44 passed`); the complete supported
+Python suite passes (`577 passed, 14 skipped`), and the real-Docker smoke suite
+is unavailable on this host (`10 skipped`). Python compilation, Bash/Node
+syntax, Compose rendering, archive checksum, Gitleaks, and `git diff --check`
+pass. Public publication remains pending until the canonical publisher reaches
+`public_verified`.
+
 ## 2026-08-28 — Scheduler-friendly storage maintenance prepared for v0.33.0
 
 Added `cage storage maintain` as a preview-only command and

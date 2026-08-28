@@ -365,7 +365,16 @@ class Controller:
         *,
         interactive: bool = False,
     ) -> tuple[int, str]:
-        if action not in {"connect", "disconnect", "sync", "add", "migrate", "forget"}:
+        if action not in {
+            "connect",
+            "disconnect",
+            "sync",
+            "split",
+            "discover",
+            "add",
+            "migrate",
+            "forget",
+        }:
             raise UiError(f"unsupported Token Monitor action: {action}")
         launcher = self.backend.with_name("cage")
         command = [str(launcher), "monitor", action, *(arguments or [])]
@@ -1654,13 +1663,28 @@ class CursesView:
             else "Disconnected"
         )
         projects = status.get("projects", [])
-        device_id = str(status.get("device_id", ""))
+        device_ids = status.get("device_ids", [])
+        if not isinstance(device_ids, list):
+            device_ids = []
+        device_ids = [item for item in device_ids if isinstance(item, str) and item]
+        compatibility_device_id = str(status.get("device_id", ""))
+        if not device_ids and compatibility_device_id:
+            device_ids = [compatibility_device_id]
+        # The aggregate compatibility ID is retained in local JSON for old
+        # callers, but after migration a one-device UI action must use the
+        # actual provider device shown by the hub.
+        forget_device_id = (
+            compatibility_device_id
+            if status.get("split_migration_pending")
+            else (device_ids[0] if len(device_ids) == 1 else compatibility_device_id)
+        )
         details = [
             connection_label,
-            f"Cage device: {device_id}",
+            f"Cage provider devices: {len(device_ids)}",
+            *[f"  {item}" for item in device_ids if isinstance(item, str)],
             f"Registered Cage projects: {len(projects)}",
             "Only Codex Container/Desktop state is collected; host Codex, Claude, and OpenCode are excluded.",
-            "Cage deduplicates shared sessions before it replaces the hub device summary.",
+            "Cage deduplicates shared sessions before it replaces provider summaries.",
         ]
         aggregate = status.get("aggregate")
         if isinstance(aggregate, dict):
@@ -1672,12 +1696,14 @@ class CursesView:
             ("refresh", "Refresh status"),
             ("connect", "Connect or replace hub"),
             ("disconnect", "Disconnect and preserve registrations"),
-            ("sync", "Synchronize the Cage device"),
+            ("sync", "Synchronize provider devices"),
+            ("split", "Preview provider split"),
+            ("discover", "Discover existing state volumes"),
             ("add", "Explicitly add this project's Codex volume"),
         ]
-        if int(status.get("migration_pending", 0) or 0) > 0:
-            options.append(("migrate", "Replace legacy per-volume devices"))
-        if projects:
+        if int(status.get("migration_pending", 0) or 0) > 0 or status.get("split_migration_pending"):
+            options.append(("migrate", "Replace legacy monitor devices"))
+        if projects and (status.get("split_migration_pending") or len(device_ids) <= 1):
             options.append(("forget", "Forget the Cage device"))
         action = self.menu("Token Monitor", options, details, initial_key="refresh")
         if not action:
@@ -1723,6 +1749,18 @@ class CursesView:
                 self.show_text("Token Monitor synchronization", output.splitlines())
             self.message = "Token Monitor synchronization completed." if code == 0 else "Synchronization failed."
             return
+        if action == "split":
+            code, output = self.controller.run_monitor_action("split", ["--dry-run"])
+            if output:
+                self.show_text("Token Monitor provider split preview", output.splitlines())
+            self.message = "Provider split preview completed." if code == 0 else "Split preview failed."
+            return
+        if action == "discover":
+            code, output = self.controller.run_monitor_action("discover")
+            if output:
+                self.show_text("Token Monitor volume discovery", output.splitlines())
+            self.message = "State-volume discovery completed." if code == 0 else "Discovery failed."
+            return
         if action == "add":
             name, preset = self.controller.effective_preset()
             effective = self.controller.snapshot.get("effective", {})
@@ -1740,8 +1778,8 @@ class CursesView:
             if not self.confirm(
                 "Migrate Token Monitor devices",
                 [
-                    "Cage will upload and verify one aggregate device first.",
-                    "It will then delete only the legacy device IDs in the private registry.",
+                    "Cage will upload and verify provider devices first.",
+                    "It will then delete only exact old device IDs after totals match.",
                 ],
                 phrase="MIGRATE",
                 case_sensitive=True,
@@ -1753,18 +1791,26 @@ class CursesView:
             self.message = "Token Monitor migration completed." if code == 0 else "Migration failed."
             return
         if action == "forget":
+            forget_notice = (
+                "This deletes the selected provider device; a later sync may "
+                "recreate it if matching sessions remain."
+                if not status.get("split_migration_pending")
+                else "This deletes the old shared device and disables all registered projects."
+            )
             if not self.confirm(
                 "Forget Token Monitor device",
                 [
-                    f"Device: {device_id}",
+                    f"Device: {forget_device_id}",
                     f"Projects: {len(projects)}",
-                    "This deletes the aggregate device and disables all registered projects.",
+                    forget_notice,
                 ],
                 phrase="FORGET",
                 case_sensitive=True,
             ):
                 return
-            code, output = self.controller.run_monitor_action("forget", [device_id, "--yes"])
+            code, output = self.controller.run_monitor_action(
+                "forget", [forget_device_id, "--yes"]
+            )
             if output:
                 self.show_text("Token Monitor forget", output.splitlines())
             self.message = "Token Monitor device forgotten." if code == 0 else "Forget failed."

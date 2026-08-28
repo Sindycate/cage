@@ -39,6 +39,7 @@ from . import storage
 STATE_VERSION = 1
 REGISTRY_VERSION = 2
 PRICING_VERSION = 1
+SPLIT_STATUS_VERSION = 1
 COLLECTOR_IMAGE = "cage-token-monitor"
 COLLECTOR_REGISTRY = "ghcr.io/sindycate/cage/token-monitor"
 COLLECTOR_DOCKERFILE = "Dockerfile.monitor"
@@ -109,9 +110,13 @@ PROJECT_DIR = "projects"
 RUN_DIR = "runs"
 PRICING_FILE = "pricing.json"
 AGGREGATE_STATUS_FILE = "aggregate-status.json"
+SPLIT_STATUS_FILE = "split-status.json"
 VOLUME_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 DEVICE_ID_PATTERN = re.compile(r"^cage-[a-z0-9_-]{1,120}$")
 LOGICAL_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+PROVIDER_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+CODEX_VOLUME_PREFIX = "codex-state-"
+UNATTRIBUTED_PROVIDER = "unattributed"
 
 
 class MonitorError(RuntimeError):
@@ -681,6 +686,51 @@ def host_device_id(config_root: Path) -> str:
     return f"cage-local-{host_install_id(config_root)[:8]}"
 
 
+def _platform_slug() -> str:
+    if sys.platform == "darwin":
+        return "mac"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    value = re.sub(r"[^a-z0-9]+", "-", sys.platform.lower()).strip("-")
+    return value[:16] or "host"
+
+
+def _provider_slug(value: object) -> str | None:
+    """Return a safe stable provider label, or ``None`` for unsafe input."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "openai": "openai-api",
+        "openai-api": "openai-api",
+        "openai-compatible": "openai-compatible",
+        "zllm": "zllm",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if not PROVIDER_SLUG_PATTERN.fullmatch(normalized):
+        return None
+    return normalized
+
+
+def provider_device_id(config_root: Path, provider: str) -> str:
+    """Return a readable device identity for one provider stream."""
+
+    provider_id = _provider_slug(provider)
+    if provider_id is None:
+        raise MonitorError("invalid monitor provider identity")
+    return f"cage-{provider_id}-{_platform_slug()}-{host_install_id(config_root)[:8]}"
+
+
+def provider_display_name(provider: str) -> str:
+    provider_id = _provider_slug(provider) or UNATTRIBUTED_PROVIDER
+    if provider_id == "openai-api":
+        return "OpenAI API"
+    if provider_id == UNATTRIBUTED_PROVIDER:
+        return "Unattributed"
+    return provider_id.upper() if provider_id == "zllm" else provider_id
+
+
 def device_id_for(config_root: Path, logical_id: str = "") -> str:
     """Compatibility wrapper for callers that previously passed a target id."""
 
@@ -1066,6 +1116,16 @@ def _validate_model_id(value: object) -> str:
     return value.strip()
 
 
+def _validate_pricing_key(value: object) -> str:
+    key = _validate_model_id(value)
+    if ":" not in key:
+        return key
+    provider, model = key.split(":", 1)
+    if _provider_slug(provider) is None or not model or ":" in model:
+        raise MonitorError("invalid pricing provider/model key")
+    return f"{_provider_slug(provider)}:{model}"
+
+
 def _validate_unit_price(value: object, *, optional: bool = False) -> float | None:
     if value is None and optional:
         return None
@@ -1088,7 +1148,7 @@ def load_pricing(config_root: Path) -> dict[str, dict[str, float]]:
     result: dict[str, dict[str, float]] = {}
     allowed = {"input_per_million", "output_per_million", "cache_read_per_million"}
     for raw_model, raw_rates in models.items():
-        model = _validate_model_id(raw_model)
+        model = _validate_pricing_key(raw_model)
         if not isinstance(raw_rates, dict) or set(raw_rates).difference(allowed):
             raise MonitorError("monitor pricing entry has an invalid shape")
         if not ({"input_per_million", "output_per_million"} & set(raw_rates)):
@@ -1105,7 +1165,7 @@ def save_pricing(config_root: Path, models: dict[str, dict[str, float]]) -> None
     if not isinstance(models, dict) or len(models) > 1024:
         raise MonitorError("monitor pricing models are invalid")
     for model, rates in models.items():
-        model_id = _validate_model_id(model)
+        model_id = _validate_pricing_key(model)
         if not isinstance(rates, dict):
             raise MonitorError("monitor pricing entry has an invalid shape")
         allowed = {"input_per_million", "output_per_million", "cache_read_per_million"}
@@ -1126,7 +1186,7 @@ def set_model_pricing(
     output_per_million: float | None,
     cache_read_per_million: float | None,
 ) -> None:
-    model_id = _validate_model_id(model)
+    model_id = _validate_pricing_key(model)
     if input_per_million is None and output_per_million is None:
         raise MonitorError("pricing needs --input or --output")
     rates = {
@@ -1144,7 +1204,7 @@ def set_model_pricing(
 
 
 def remove_model_pricing(config_root: Path, model: str) -> bool:
-    model_id = _validate_model_id(model)
+    model_id = _validate_pricing_key(model)
     models = load_pricing(config_root)
     existed = model_id in models
     models.pop(model_id, None)
@@ -1163,6 +1223,11 @@ def _write_tokscale_pricing(config_root: Path, state_path: Path) -> None:
         "cache_read_per_million": "cache_read_input_token_cost_per_million_tokens",
     }
     for model, rates in models.items():
+        # Tokscale accepts model-only keys.  Provider-qualified prices are
+        # applied by Cage after collection, so they must not be handed to the
+        # upstream collector as if they were model IDs.
+        if ":" in model:
+            continue
         upstream[model] = {mapping[key]: value for key, value in rates.items()}
     _write_json(destination / "custom-pricing.json", {"models": upstream})
 
@@ -1595,6 +1660,27 @@ def _session_map(session: dict[str, Any], field: str) -> dict[str, float]:
     return result
 
 
+def session_provider(session: dict[str, Any]) -> str:
+    """Return the only trustworthy provider for a session.
+
+    Token Monitor records provider totals in a session-level map.  One key is
+    safe to attribute.  Missing, unsafe, or multi-provider maps stay in the
+    explicit unattributed stream so Cage never guesses or duplicates tokens.
+    """
+
+    providers = _session_map(session, "providers")
+    normalized = {_provider_slug(key) for key in providers}
+    if len(normalized) == 1 and None not in normalized:
+        provider = next(iter(normalized))
+        if provider:
+            return provider
+    return UNATTRIBUTED_PROVIDER
+
+
+def provider_device_ids(config_root: Path, providers: Iterator[str] | list[str] | set[str]) -> list[str]:
+    return [provider_device_id(config_root, provider) for provider in sorted(set(providers))]
+
+
 def _session_dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
     for field in SESSION_NUMBER_FIELDS:
         if _session_number(left, field) < _session_number(right, field):
@@ -1675,12 +1761,20 @@ def _custom_session_cost(
 ) -> tuple[str, float, int] | None:
     """Price an exactly attributable single-model session from its components."""
 
+    provider = session_provider(session)
+    if provider == UNATTRIBUTED_PROVIDER:
+        return None
     models = _session_map(session, "models")
     total = round(_session_number(session, "totalTokens"))
     if len(models) != 1:
         return None
     model, model_tokens = next(iter(models.items()))
-    rates = pricing.get(model)
+    # Provider-qualified prices take precedence.  The old model-only form is
+    # retained only for an unambiguous OpenAI session.  Applying a legacy rate
+    # to a proxy provider could produce a plausible but wrong cost.
+    rates = pricing.get(f"{provider}:{model}")
+    if rates is None and provider == "openai-api":
+        rates = pricing.get(model)
     if rates is None or round(model_tokens) != total:
         return None
     input_tokens = round(_session_number(session, "inputTokens"))
@@ -1707,6 +1801,8 @@ def _custom_session_cost(
 def _period_from_sessions(
     config_root: Path,
     occurrences: dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]],
+    *,
+    winners: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], int]:
     period = _empty_aggregate_period()
     pricing = load_pricing(config_root)
@@ -1714,12 +1810,20 @@ def _period_from_sessions(
     for key in sorted(occurrences):
         candidates = occurrences[key]
         duplicates += max(0, len(candidates) - 1)
-        session = _select_session(candidates)
+        session = dict(winners[key]) if winners is not None and key in winners else _select_session(candidates)
+        provider = session_provider(session)
         custom_cost = _custom_session_cost(session, pricing)
         if custom_cost is not None:
             custom_model, custom_value, _ = custom_cost
             session["costUsd"] = custom_value
             session["modelCosts"] = {custom_model: custom_value}
+        elif provider != "openai-api":
+            # Tokscale's model catalog has no trustworthy account context.  A
+            # proxy may report the same model name while charging a different
+            # rate, so never carry an unqualified upstream cost into a
+            # non-OpenAI stream.
+            session["costUsd"] = 0.0
+            session["modelCosts"] = {}
         client = str(session.get("client") or "")
         session_id = str(session.get("sessionId") or "")
         if client != "codex" or not session_id:
@@ -1775,10 +1879,14 @@ def _period_from_sessions(
     return period, duplicates
 
 
-def aggregate_summaries(
-    config_root: Path,
+def _collect_occurrences(
     summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]],
+]:
+    """Validate collector results and index all session copies by ID."""
+
     if not summaries:
         raise MonitorError("no active Token Monitor projects")
     occurrences: dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]] = {
@@ -1821,15 +1929,32 @@ def aggregate_summaries(
                 raise MonitorError(
                     f"collector {period_name} sessions do not cover its token total; hub snapshot was preserved"
                 )
+    return summaries[0][1], occurrences
+
+
+def _build_device_payload(
+    config_root: Path,
+    first: dict[str, Any],
+    summaries_count: int,
+    occurrences: dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]],
+    device_id: str,
+    *,
+    provider: str = "",
+    winners_by_period: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     periods: dict[str, dict[str, Any]] = {}
     duplicate_counts: dict[str, int] = {}
     for period_name, values in occurrences.items():
-        periods[period_name], duplicate_counts[period_name] = _period_from_sessions(config_root, values)
+        winners = winners_by_period.get(period_name) if winners_by_period else None
+        periods[period_name], duplicate_counts[period_name] = _period_from_sessions(
+            config_root, values, winners=winners
+        )
     now = _now()
-    first = summaries[0][1]
     payload: dict[str, Any] = {
-        "deviceId": host_device_id(config_root),
-        "hostname": "Cage (local)",
+        "deviceId": device_id,
+        "hostname": (
+            f"Cage ({provider_display_name(provider)})" if provider else "Cage (local)"
+        ),
         "platform": "cage",
         "osName": "Cage",
         "osVersion": "",
@@ -1851,15 +1976,18 @@ def aggregate_summaries(
     all_time = periods["allTime"]
     priced_tokens = 0
     missing_models: set[str] = set()
+    missing_prices: set[str] = set()
     for session in all_time["sessions"].values():
         models = _session_map(session, "models")
         model_costs = _session_map(session, "modelCosts")
+        session_provider_id = session_provider(session)
         custom_cost = _custom_session_cost(session, pricing)
         if custom_cost is not None:
             custom_model, _, covered = custom_cost
             priced_tokens += covered
             if covered < round(_session_number(session, "totalTokens")):
                 missing_models.add(custom_model)
+                missing_prices.add(f"{session_provider_id}:{custom_model}")
             continue
         if not models:
             if _session_number(session, "costUsd") > 0:
@@ -1871,13 +1999,14 @@ def aggregate_summaries(
                 priced_tokens += tokens
             else:
                 missing_models.add(model)
+                missing_prices.add(f"{session_provider_id}:{model}")
     total_tokens = all_time["totalTokens"]
     priced_tokens = min(total_tokens, priced_tokens)
     status = {
         "version": STATE_VERSION,
         "device_id": payload["deviceId"],
         "updated_at": now,
-        "project_count": len(summaries),
+        "project_count": summaries_count,
         "duplicate_sessions": duplicate_counts["allTime"],
         "total_tokens": total_tokens,
         "cost_usd": all_time["costUsd"],
@@ -1885,7 +2014,11 @@ def aggregate_summaries(
         "unpriced_tokens": total_tokens - priced_tokens,
         "price_coverage_percent": round((priced_tokens * 100 / total_tokens) if total_tokens else 100.0, 2),
         "missing_models": sorted(missing_models),
+        "missing_prices": sorted(missing_prices),
     }
+    if provider:
+        status["provider"] = provider
+        status["provider_label"] = provider_display_name(provider)
     # Match the upstream wire contract: all-time session detail is local-only.
     # The exact all-time project rollup remains in the upload.
     payload["allTime"].pop("sessions", None)
@@ -1900,6 +2033,107 @@ def aggregate_summaries(
     if omitted:
         payload["sessionDetailsOmitted"] = omitted
     return _validate_summary(payload, payload["deviceId"]), status
+
+
+def _empty_provider_payload(
+    config_root: Path,
+    first: dict[str, Any],
+    device_id: str,
+    provider: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    empty_occurrences = {name: {} for name in ("today", "month", "allTime")}
+    return _build_device_payload(
+        config_root,
+        first,
+        0,
+        empty_occurrences,
+        device_id,
+        provider=provider,
+        winners_by_period={name: {} for name in empty_occurrences},
+    )
+
+
+def _provider_partitions(
+    occurrences: dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]],
+) -> tuple[
+    dict[str, dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]]],
+    dict[str, dict[str, dict[str, dict[str, Any]]]],
+]:
+    """Deduplicate first, then assign each winning session to one stream."""
+
+    partitions: dict[str, dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]]] = {}
+    winners: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    for period_name, values in occurrences.items():
+        for key, candidates in values.items():
+            winner = _select_session(candidates)
+            provider = session_provider(winner)
+            partitions.setdefault(provider, {name: {} for name in occurrences})
+            winners.setdefault(provider, {name: {} for name in occurrences})
+            partitions[provider][period_name][key] = candidates
+            winners[provider][period_name][key] = winner
+    return partitions, winners
+
+
+def aggregate_summaries(
+    config_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the compatibility unsplit aggregate without uploading it."""
+
+    first, occurrences = _collect_occurrences(summaries)
+    return _build_device_payload(
+        config_root,
+        first,
+        len(summaries),
+        occurrences,
+        host_device_id(config_root),
+    )
+
+
+def aggregate_provider_summaries(
+    config_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+) -> tuple[dict[str, tuple[dict[str, Any], dict[str, Any]]], dict[str, Any]]:
+    """Build one hub payload per provider after cross-volume deduplication."""
+
+    first, occurrences = _collect_occurrences(summaries)
+    partitions, winners = _provider_partitions(occurrences)
+    result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for provider in sorted(partitions):
+        result[provider] = _build_device_payload(
+            config_root,
+            first,
+            len(summaries),
+            partitions[provider],
+            provider_device_id(config_root, provider),
+            provider=provider,
+            winners_by_period=winners[provider],
+        )
+    total_tokens = sum(item[1]["total_tokens"] for item in result.values())
+    total_cost = round(sum(item[1]["cost_usd"] for item in result.values()), 9)
+    duplicate_sessions = sum(item[1]["duplicate_sessions"] for item in result.values())
+    priced_tokens = sum(item[1]["priced_tokens"] for item in result.values())
+    missing_models = sorted({model for _, status in result.values() for model in status.get("missing_models", [])})
+    missing_prices = sorted({key for _, status in result.values() for key in status.get("missing_prices", [])})
+    manifest = {
+        "version": STATE_VERSION,
+        "device_id": host_device_id(config_root),
+        "device_ids": [status["device_id"] for _, status in result.values()],
+        "providers": {provider: status for provider, (_, status) in result.items()},
+        "project_count": len(summaries),
+        "duplicate_sessions": duplicate_sessions,
+        "total_tokens": total_tokens,
+        "cost_usd": total_cost,
+        "priced_tokens": min(total_tokens, priced_tokens),
+        "unpriced_tokens": max(0, total_tokens - priced_tokens),
+        "price_coverage_percent": round(
+            (priced_tokens * 100 / total_tokens) if total_tokens else 100.0, 2
+        ),
+        "missing_models": missing_models,
+        "missing_prices": missing_prices,
+        "updated_at": _now(),
+    }
+    return result, manifest
 
 
 @contextmanager
@@ -1932,6 +2166,239 @@ def load_aggregate_status(config_root: Path) -> dict[str, Any] | None:
     return value
 
 
+def load_split_status(config_root: Path) -> dict[str, Any] | None:
+    value = _read_json(
+        monitor_root(config_root) / SPLIT_STATUS_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("version") != SPLIT_STATUS_VERSION:
+        raise MonitorError("monitor provider split status is invalid")
+    if type(value.get("complete")) is not bool:
+        raise MonitorError("monitor provider split status is invalid")
+    device_ids = value.get("device_ids", [])
+    if not isinstance(device_ids, list) or any(
+        not isinstance(item, str) for item in device_ids
+    ):
+        raise MonitorError("monitor provider split device list is invalid")
+    for item in device_ids:
+        validate_device_id(item)
+    legacy_device_id = value.get("legacy_device_id", "")
+    if not isinstance(legacy_device_id, str) or (
+        legacy_device_id and validate_device_id(legacy_device_id) != legacy_device_id
+    ):
+        raise MonitorError("monitor provider split legacy device is invalid")
+    updated_at = value.get("updated_at", "")
+    if not isinstance(updated_at, str) or len(updated_at) > 128:
+        raise MonitorError("monitor provider split timestamp is invalid")
+    total_tokens = value.get("total_tokens", 0)
+    if (
+        type(total_tokens) not in (int, float)
+        or not math.isfinite(total_tokens)
+        or total_tokens < 0
+    ):
+        raise MonitorError("monitor provider split total is invalid")
+    return value
+
+
+def save_split_status(config_root: Path, value: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or type(value.get("complete")) is not bool:
+        raise MonitorError("monitor provider split status is invalid")
+    device_ids = value.get("device_ids", [])
+    if not isinstance(device_ids, list) or any(
+        not isinstance(item, str) for item in device_ids
+    ):
+        raise MonitorError("monitor provider split device list is invalid")
+    for item in device_ids:
+        validate_device_id(item)
+    legacy_device_id = value.get("legacy_device_id", "")
+    if not isinstance(legacy_device_id, str):
+        raise MonitorError("monitor provider split legacy device is invalid")
+    if legacy_device_id:
+        validate_device_id(legacy_device_id)
+    updated_at = value.get("updated_at", _now())
+    if not isinstance(updated_at, str) or len(updated_at) > 128:
+        raise MonitorError("monitor provider split timestamp is invalid")
+    total_tokens = value.get("total_tokens", 0)
+    if (
+        type(total_tokens) not in (int, float)
+        or not math.isfinite(total_tokens)
+        or total_tokens < 0
+    ):
+        raise MonitorError("monitor provider split total is invalid")
+    _write_json(
+        monitor_root(config_root) / SPLIT_STATUS_FILE,
+        {
+            "version": SPLIT_STATUS_VERSION,
+            "complete": value["complete"],
+            "legacy_device_id": legacy_device_id,
+            "device_ids": sorted(set(device_ids)),
+            "updated_at": updated_at,
+            "total_tokens": total_tokens,
+        },
+    )
+
+
+def _hub_stats(connection: MonitorConnection) -> dict[str, Any]:
+    stats = _hub_request(connection, "GET", "/api/stats")
+    if not isinstance(stats, dict):
+        raise MonitorError("Token Monitor hub returned invalid device statistics")
+    devices = stats.get("devices")
+    if not isinstance(devices, list):
+        raise MonitorError("Token Monitor hub returned invalid device statistics")
+    return stats
+
+
+def _hub_device_ids_from_stats(stats: dict[str, Any]) -> set[str]:
+    devices = stats.get("devices")
+    if not isinstance(devices, list):
+        raise MonitorError("Token Monitor hub returned invalid device statistics")
+    result: set[str] = set()
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+        device_id = item.get("deviceId")
+        if isinstance(device_id, str):
+            try:
+                result.add(validate_device_id(device_id))
+            except MonitorError:
+                continue
+    return result
+
+
+def _hub_device_ids(connection: MonitorConnection) -> set[str]:
+    return _hub_device_ids_from_stats(_hub_stats(connection))
+
+
+def _hub_device_total_from_stats(stats: dict[str, Any], device_id: str) -> float | None:
+    """Return one device's all-time token total from authenticated hub stats."""
+
+    validate_device_id(device_id)
+    devices = stats.get("devices")
+    if not isinstance(devices, list):
+        raise MonitorError("Token Monitor hub returned invalid device statistics")
+    for item in devices:
+        if not isinstance(item, dict) or item.get("deviceId") != device_id:
+            continue
+        periods = item.get("periods")
+        all_time = periods.get("allTime") if isinstance(periods, dict) else None
+        total = all_time.get("totalTokens") if isinstance(all_time, dict) else None
+        if type(total) not in (int, float) or not math.isfinite(total) or total < 0:
+            raise MonitorError(
+                f"Token Monitor hub has no valid all-time total for device {device_id}"
+            )
+        return float(total)
+    return None
+
+
+def provider_split_pending(config_root: Path, connection: MonitorConnection) -> bool:
+    """Return whether the old unsplit device still exists on the hub."""
+
+    state = load_split_status(config_root)
+    if state is not None and state.get("complete") is True:
+        return False
+    return host_device_id(config_root) in _hub_device_ids(connection)
+
+
+def _mark_split_complete(
+    config_root: Path,
+    manifest: dict[str, Any],
+    *,
+    legacy_device_id: str = "",
+) -> None:
+    save_split_status(
+        config_root,
+        {
+            "complete": True,
+            "legacy_device_id": legacy_device_id,
+            "device_ids": list(manifest.get("device_ids", [])),
+            "updated_at": manifest.get("updated_at", _now()),
+            "total_tokens": manifest.get("total_tokens", 0),
+        },
+    )
+
+
+def discover_codex_volumes(
+    docker: str,
+    config_root: Path,
+) -> list[dict[str, Any]]:
+    """List Cage Codex state volumes without changing Docker or monitor state."""
+
+    try:
+        result = subprocess.run(
+            [docker, "volume", "ls", "--format", "{{.Name}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MonitorError(f"Docker monitor operation failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip().replace("\n", " ")[:300]
+        raise MonitorError(f"Docker monitor operation failed: {detail or 'unknown error'}")
+    registrations = {item.volume_name: item for item in load_registry(config_root)}
+    discovered: list[dict[str, Any]] = []
+    names = sorted(
+        {
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith(CODEX_VOLUME_PREFIX)
+        }
+    )
+    for volume_name in names:
+        validate_volume_name(volume_name)
+        fingerprint = volume_fingerprint(docker, volume_name)
+        record = registrations.get(volume_name)
+        discovered.append(
+            {
+                "volume_name": volume_name,
+                "fingerprint": fingerprint,
+                "registered": record is not None,
+                "status": record.status if record is not None else "unregistered",
+                "display_name": record.display_name if record is not None else "",
+                "logical_id": record.logical_id if record is not None else "",
+                "label_identity": fingerprint.get("label_identity", ""),
+            }
+        )
+    return discovered
+
+
+def recovered_repository(volume_name: str) -> str:
+    validate_volume_name(volume_name)
+    return f"/__cage_recovered__/{volume_name}"
+
+
+def register_recovered_volume(
+    config_root: Path,
+    docker: str,
+    *,
+    volume_name: str,
+    display_name: str = "",
+) -> VolumeRegistration:
+    """Adopt an exact dormant volume without inventing a host path."""
+
+    validate_volume_name(volume_name)
+    fingerprint = volume_fingerprint(docker, volume_name)
+    if not display_name:
+        suffix = volume_name.removeprefix(CODEX_VOLUME_PREFIX)
+        display_name = f"Cage: Recovered {suffix}"
+    validate_display_name(display_name)
+    return register_volume(
+        config_root,
+        docker,
+        volume_name=volume_name,
+        repository=recovered_repository(volume_name),
+        target="container",
+        preset="recovered",
+        display_name=display_name,
+        fingerprint=fingerprint,
+        allow_replacement=True,
+    )
+
+
 def _scan_is_recent(config_root: Path) -> bool:
     status = load_aggregate_status(config_root)
     if not status or not isinstance(status.get("updated_at"), str):
@@ -1941,6 +2408,87 @@ def _scan_is_recent(config_root: Path) -> bool:
     except ValueError:
         return False
     return time.time() - timestamp < MIN_INTERVAL_SECONDS
+
+
+def _collect_registered_summaries(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    active: list[VolumeRegistration],
+    *,
+    version: str,
+    storage_policy: object,
+    allow_build: bool,
+    uid: int | None,
+    gid: int | None,
+) -> list[tuple[VolumeRegistration, dict[str, Any]]]:
+    for record in active:
+        current_fingerprint = volume_fingerprint(docker, record.volume_name)
+        if current_fingerprint != record.fingerprint:
+            updated = replace(
+                record,
+                status="needs-adoption",
+                last_error="volume fingerprint changed; run cage monitor add explicitly",
+                last_scan_at=_now(),
+            )
+            update_registration(config_root, updated)
+            raise MonitorError(f"monitor volume changed for {record.display_name}")
+    image = ensure_collector_image(
+        docker,
+        install_root,
+        version=version,
+        storage_policy=storage_policy,
+        allow_build=allow_build,
+    )
+    return [
+        (
+            record,
+            _run_collector(
+                docker,
+                image,
+                record,
+                config_root,
+                uid=os.getuid() if uid is None else uid,
+                gid=os.getgid() if gid is None else gid,
+            ),
+        )
+        for record in active
+    ]
+
+
+def preview_provider_split(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    *,
+    version: str,
+    storage_policy: object,
+    allow_build: bool,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> dict[str, Any]:
+    """Collect and calculate a provider split without hub or volume writes."""
+
+    registrations = load_registry(config_root)
+    active = [item for item in registrations if item.status == "active"]
+    if not active:
+        raise MonitorError("no active Token Monitor projects")
+    with try_aggregate_lock(config_root) as acquired:
+        if not acquired:
+            raise MonitorError("monitor aggregate scan already running")
+        summaries = _collect_registered_summaries(
+            config_root,
+            docker,
+            install_root,
+            active,
+            version=version,
+            storage_policy=storage_policy,
+            allow_build=allow_build,
+            uid=uid,
+            gid=gid,
+        )
+        _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
+        return manifest
 
 
 def scan_all_registrations(
@@ -1954,6 +2502,7 @@ def scan_all_registrations(
     uid: int | None = None,
     gid: int | None = None,
     force: bool = False,
+    migration: bool = False,
 ) -> tuple[list[VolumeRegistration], dict[str, Any]]:
     connection = load_connection(config_root)
     if connection is None or not connection.enabled:
@@ -1965,44 +2514,62 @@ def scan_all_registrations(
         active = [item for item in registrations if item.status == "active"]
         if not active:
             raise MonitorError("no active Token Monitor projects")
+        if not migration and provider_split_pending(config_root, connection):
+            raise MonitorError(
+                "provider split migration is pending; run cage monitor migrate --yes"
+            )
         if not force and _scan_is_recent(config_root):
             return active, {}
         try:
-            for record in active:
-                current_fingerprint = volume_fingerprint(docker, record.volume_name)
-                if current_fingerprint != record.fingerprint:
-                    updated = replace(
-                        record,
-                        status="needs-adoption",
-                        last_error="volume fingerprint changed; run cage monitor add explicitly",
-                        last_scan_at=_now(),
-                    )
-                    update_registration(config_root, updated)
-                    raise MonitorError(f"monitor volume changed for {record.display_name}")
-            image = ensure_collector_image(
+            previous_status = load_aggregate_status(config_root)
+            summaries = _collect_registered_summaries(
+                config_root,
                 docker,
                 install_root,
+                active,
                 version=version,
                 storage_policy=storage_policy,
                 allow_build=allow_build,
+                uid=uid,
+                gid=gid,
             )
-            summaries = [
-                (
-                    record,
-                    _run_collector(
-                        docker,
-                        image,
-                        record,
-                        config_root,
-                        uid=os.getuid() if uid is None else uid,
-                        gid=os.getgid() if gid is None else gid,
-                    ),
+            split_payloads, status = aggregate_provider_summaries(config_root, summaries)
+            previous_providers = (
+                previous_status.get("providers")
+                if isinstance(previous_status, dict)
+                and isinstance(previous_status.get("providers"), dict)
+                else {}
+            )
+            current_providers = set(split_payloads)
+            for raw_provider, previous_provider_status in previous_providers.items():
+                provider = _provider_slug(raw_provider)
+                if provider is None or provider in current_providers:
+                    continue
+                if not isinstance(previous_provider_status, dict):
+                    continue
+                previous_device = previous_provider_status.get("device_id")
+                expected_device = provider_device_id(config_root, provider)
+                if previous_device != expected_device:
+                    raise MonitorError(
+                        "previous provider device identity was invalid; hub snapshot was preserved"
+                    )
+                empty_payload, empty_status = _empty_provider_payload(
+                    config_root,
+                    summaries[0][1],
+                    expected_device,
+                    provider,
                 )
-                for record in active
-            ]
-            payload, status = aggregate_summaries(config_root, summaries)
-            upload_summary(connection, payload)
+                split_payloads[provider] = (empty_payload, empty_status)
+                status.setdefault("providers", {})[provider] = empty_status
+                status.setdefault("device_ids", []).append(expected_device)
+            status["device_ids"] = sorted(set(status.get("device_ids", [])))
+            for provider in sorted(split_payloads):
+                payload, _provider_status = split_payloads[provider]
+                upload_summary(connection, payload)
+            status["split_complete"] = False if migration else True
             _write_json(monitor_root(config_root) / AGGREGATE_STATUS_FILE, status)
+            if not migration:
+                _mark_split_complete(config_root, status)
             success_at = _now()
             active_ids = {item.logical_id for item in active}
             with _registry_write_lock(config_root):
@@ -2013,7 +2580,7 @@ def scan_all_registrations(
                     for item in current
                 ]
                 save_registry(config_root, updated_all)
-            return [item for item in updated_all if item.logical_id in active_ids], payload
+            return [item for item in updated_all if item.logical_id in active_ids], status
         except MonitorError as exc:
             for record in active:
                 _record_scan_error(config_root, record, str(exc))
@@ -2062,9 +2629,22 @@ def migrate_legacy_devices(
     if connection is None or not connection.enabled:
         raise MonitorError("Token Monitor is not connected")
     pending = [item for item in load_registry(config_root) if item.legacy_device_id]
-    if not pending:
+    legacy_device = host_device_id(config_root)
+    split_state = load_split_status(config_root)
+    hub_stats = _hub_stats(connection)
+    hub_devices = _hub_device_ids_from_stats(hub_stats)
+    split_pending = (
+        not (split_state and split_state.get("complete") is True)
+        and legacy_device in hub_devices
+    )
+    old_total = (
+        _hub_device_total_from_stats(hub_stats, legacy_device)
+        if split_pending
+        else None
+    )
+    if not pending and not split_pending:
         return 0
-    scan_all_registrations(
+    _updated, manifest = scan_all_registrations(
         config_root,
         docker,
         install_root,
@@ -2072,14 +2652,56 @@ def migrate_legacy_devices(
         storage_policy=storage_policy,
         allow_build=True,
         force=True,
+        migration=True,
     )
-    stats = _hub_request(connection, "GET", "/api/stats")
-    devices = stats.get("devices") if isinstance(stats, dict) else None
-    if not isinstance(devices, list) or not any(
-        isinstance(item, dict) and item.get("deviceId") == host_device_id(config_root)
-        for item in devices
-    ):
-        raise MonitorError("new Cage device was not visible on the hub; legacy devices were preserved")
+    visible_stats = _hub_stats(connection)
+    visible = _hub_device_ids_from_stats(visible_stats)
+    expected_provider_devices = set(manifest.get("device_ids", []))
+    if not expected_provider_devices.issubset(visible):
+        raise MonitorError(
+            "new provider Cage devices were not visible on the hub; legacy devices were preserved"
+        )
+    for provider, provider_status in manifest.get("providers", {}).items():
+        if not isinstance(provider_status, dict):
+            raise MonitorError(
+                "provider status was invalid; legacy devices were preserved"
+            )
+        provider_device = provider_status.get("device_id")
+        provider_total = provider_status.get("total_tokens")
+        if (
+            not isinstance(provider_device, str)
+            or type(provider_total) not in (int, float)
+            or not math.isfinite(provider_total)
+            or provider_total < 0
+        ):
+            raise MonitorError(
+                "provider token total was invalid; legacy devices were preserved"
+            )
+        hub_total = _hub_device_total_from_stats(visible_stats, provider_device)
+        if hub_total is None or round(hub_total) != round(float(provider_total)):
+            raise MonitorError(
+                f"provider device {provider_device} did not reconcile; legacy devices were preserved"
+            )
+    if split_pending:
+        new_total = manifest.get("total_tokens")
+        if old_total is None or type(new_total) not in (int, float):
+            raise MonitorError(
+                "cannot verify the old aggregate token total; legacy device was preserved"
+            )
+        if round(float(old_total)) != round(float(new_total)):
+            raise MonitorError(
+                "provider split token total does not match the old aggregate; legacy device was preserved"
+            )
+        delete_device(connection, legacy_device)
+        _mark_split_complete(
+            config_root,
+            manifest,
+            legacy_device_id=legacy_device,
+        )
+        status = load_aggregate_status(config_root)
+        if isinstance(status, dict):
+            status["split_complete"] = True
+            _write_json(monitor_root(config_root) / AGGREGATE_STATUS_FILE, status)
     deleted = 0
     for pending_record in pending:
         legacy_id = pending_record.legacy_device_id
@@ -2097,6 +2719,8 @@ def migrate_legacy_devices(
                 [replace(item, legacy_device_id="") if item.logical_id == current.logical_id else item for item in registrations],
             )
         remove_device_state(config_root, legacy_id)
+        deleted += 1
+    if split_pending:
         deleted += 1
     return deleted
 
@@ -2144,6 +2768,7 @@ __all__ = [
     "collector_image",
     "collector_registry_image",
     "aggregate_summaries",
+    "aggregate_provider_summaries",
     "clear_legacy_device_id",
     "delete_device",
     "device_id_for",
@@ -2156,11 +2781,20 @@ __all__ = [
     "load_aggregate_status",
     "load_pricing",
     "load_registry",
+    "load_split_status",
     "logical_target_id",
     "monitor_root",
     "host_device_id",
+    "provider_device_id",
+    "provider_device_ids",
+    "provider_display_name",
+    "provider_split_pending",
+    "preview_provider_split",
     "normalize_hub_url",
     "register_volume",
+    "register_recovered_volume",
+    "discover_codex_volumes",
+    "recovered_repository",
     "remove_device_state",
     "remove_model_pricing",
     "remove_project_state",
@@ -2168,9 +2802,11 @@ __all__ = [
     "save_connection",
     "save_pricing",
     "save_registry",
+    "save_split_status",
     "scan_registration",
     "scan_all_registrations",
     "set_model_pricing",
+    "session_provider",
     "migrate_legacy_devices",
     "project_id_for",
     "update_registration",

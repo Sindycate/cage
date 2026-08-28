@@ -6,6 +6,65 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.34.0 — 2026-08-28
+
+### Split Token Monitor totals by observed provider
+
+Who is affected: users upgrading from Cage 0.33.x or earlier who have a
+Token Monitor hub record named `cage-local-<id>`, and users who want to see
+OpenAI API and proxy-provider usage separately.
+
+New Cage installations publish one readable device per observed provider on a
+host, for example `cage-openai-api-mac-<id>` and `cage-zllm-mac-<id>`. Cage
+deduplicates identical or monotonic copies of a Codex session across all
+registered volumes before assigning the winning session to one provider. A
+missing or multi-provider session goes to `cage-unattributed-mac-<id>`; Cage
+never guesses or counts it twice. A repository can appear under more than one
+provider device when its history contains both providers. Credentials and
+provider secrets never enter a device ID or the collector container.
+
+Run the read-only checks first:
+
+```bash
+cage monitor discover
+cage monitor split --dry-run
+```
+
+`discover` lists every existing `codex-state-*` Docker volume, including
+stopped or previously unmapped volumes. Adopt a volume only when its exact
+name is known:
+
+```bash
+cage monitor add --volume codex-state-old
+```
+
+This records a recovered project with a synthetic private repository marker;
+it does not start a coding container or alter the volume. Normal sync scans
+all active registrations. Provider-qualified custom prices use
+`PROVIDER:MODEL`, such as `zllm:gpt-5.6-luna`. A model-only legacy price is
+used only for an unambiguous OpenAI API session. Run `cage monitor sync` after
+changing a price to recalculate historical cost; token counts do not change.
+
+If the old unsplit device is still on the hub, ordinary sync pauses with a
+migration message. Run:
+
+```bash
+cage monitor migrate --yes
+```
+
+Migration uploads every provider device while retaining the old device. It
+reads the authenticated per-device `allTime.totalTokens` values from the hub,
+checks each new provider device, and checks that their combined total equals
+the old unsplit device before deleting that exact old device. Existing legacy
+per-volume device IDs are removed only after the same verified upload. If any
+check fails, the old device and unprocessed legacy IDs remain; rerun the
+command after fixing the cause.
+
+Rollback: run `cage monitor disconnect` and install the previous Cage release.
+Codex volumes and session files are not changed by this migration. If the old
+device was deleted manually, no migration is required; the next sync writes
+provider devices directly.
+
 ## 0.33.0 — 2026-08-28
 
 ### Scheduler-friendly safe image maintenance

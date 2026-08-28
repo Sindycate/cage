@@ -157,9 +157,15 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
 
 After connecting, Codex Container and Desktop launches register their logical
 target automatically and scan immediately, every five minutes, and at exit.
-One Cage installation reports one readable `cage-local-…` hub device. Each
-registered Codex volume is a project under that device. Cage scans all active
-volumes before each upload and replaces the device summary once.
+Each provider used by a Cage installation has one readable hub device, for
+example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each registered Codex
+volume remains a project under the provider device that owns its sessions. A
+repository can therefore appear under more than one provider device. Cage
+scans all active volumes before each upload, deduplicates sessions first, then
+replaces each provider device summary. It never uploads both the old unsplit
+aggregate and its provider partitions. If a provider no longer has any retained
+session, Cage uploads a zero summary for that provider so the hub cannot keep a
+stale cost or token total.
 
 The aggregate is session-aware. Identical copies count once. If one copy is a
 strictly newer cumulative copy, Cage keeps it. Incompatible copies stop the
@@ -170,35 +176,49 @@ once. A recreated volume is marked `needs-adoption` until explicitly accepted:
 
 ```bash
 cage monitor status
+cage monitor discover             # list every codex-state-* volume
+cage monitor split --dry-run     # preview the provider split, no hub change
+cage monitor split --dry-run --json
 cage monitor add ~/projects/myapp --preset codex-company --container
-cage monitor sync                 # all active projects, one aggregate upload
-cage monitor sync ~/projects/myapp # add/resolve this project, then aggregate all
+cage monitor add --volume codex-state-old  # adopt an exact recovered volume
+cage monitor sync                 # all active projects, provider uploads
+cage monitor sync ~/projects/myapp # add/resolve this project, then sync all
 cage monitor pricing status
-cage monitor pricing set MODEL --input 1.25 --output 10 --cache-read 0.125
-cage monitor pricing remove MODEL
-cage monitor migrate --yes        # one-time v0.31.x hub cleanup
+cage monitor pricing set openai-api:gpt-5.4 --input 1.25 --output 10
+cage monitor pricing set zllm:gpt-5.6-luna --input 1.25 --output 10
+cage monitor pricing remove zllm:gpt-5.6-luna
+cage monitor migrate --yes        # verified old-device replacement
 cage monitor disconnect           # pause uploads, preserve hub device records
 cage monitor forget DEVICE_ID --yes
 ```
 
 `monitor add` is the explicit replacement-volume adoption path and can also
-register a dormant target. Cost is always uploaded when Token Monitor can price
-the model. `monitor status` shows the estimated cost, priced-token coverage,
-and model IDs that still need a price. Custom rates are USD per million tokens;
-they are stored privately and passed only to the network-disabled collector.
-Cage does not invent rates for private or aliased model IDs.
+register a dormant target. `monitor discover` is read-only and lists all
+existing `codex-state-*` volumes, including older or unmapped volumes. Adopt an
+unmapped volume with its exact name using `monitor add --volume`; Cage labels it
+as recovered without inventing a host path. Cost is always uploaded when
+Token Monitor can price the model. `monitor status` shows the total and each
+provider stream, price coverage, and provider-qualified model IDs that still
+need a price. Custom rates are USD per million tokens; they are stored
+privately and passed only to the network-disabled collector when they use the
+legacy model-only form. Provider-qualified prices are applied by Cage after
+collection. Cage does not invent rates for private or aliased model IDs.
 
-Versions before 0.32.0 created one opaque hub device per volume. After upgrade,
-`monitor status` shows how many legacy records remain. `monitor migrate --yes`
-first uploads the new aggregate device, verifies that the hub returns it, and
-then deletes only the exact legacy IDs recorded by this Cage installation. The
-operation is resumable. A failure keeps all unprocessed legacy IDs.
+Versions before 0.34.0 used one `cage-local-…` device for the aggregate. After
+upgrade, normal sync pauses if that unsplit device is still on the hub. Run
+`monitor migrate --yes`: Cage uploads the provider devices, verifies every
+provider token total against the hub's old device record and the combined
+total against that old device, and only then deletes the exact old device. The
+operation is resumable. A failure keeps the old device and all unprocessed
+legacy IDs.
 
 `disconnect` removes the local hub credential but keeps registrations and
-existing hub records. `forget` can delete the shared Cage device; Cage disables
-all its projects before the remote delete and removes local project archives
-only after success. A failed remote delete leaves disabled tombstones for
-explicit recovery. Monitor state is private under
+existing hub records. `forget` deletes the exact requested hub device. For the
+old shared device, Cage disables all its projects before the remote delete and
+removes local project archives only after success. A provider-device delete may
+be recreated by a later sync when matching sessions remain. A failed remote
+delete leaves disabled tombstones for explicit recovery. Monitor state is private
+under
 `~/.config/cage/monitor/` and never enters the launch-plan or container
 environment.
 

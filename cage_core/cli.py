@@ -55,10 +55,13 @@ Commands:
   storage maintain --apply   Apply exact managed/ephemeral image maintenance
   monitor connect URL         Connect the optional host-owned Token Monitor hub
   monitor disconnect          Remove the local hub credential and pause uploads
-  monitor status [--json]     Show the Cage device, projects, cost, and migration state
-  monitor sync [PATH]         Scan and aggregate all registered Codex volumes
+  monitor status [--json]     Show Cage devices, projects, cost, and migration state
+  monitor sync [PATH]         Scan and split all registered Codex volumes
+  monitor split --dry-run     Preview provider totals without hub changes
+  monitor discover [--json]   List all existing Cage Codex state volumes
   monitor add PATH            Explicitly adopt/register a Codex volume
-  monitor migrate --yes       Replace legacy per-volume hub devices safely
+  monitor add --volume NAME   Adopt an exact dormant or recovered volume
+  monitor migrate --yes       Replace legacy hub devices safely
   monitor pricing ...         Manage private custom model prices
   monitor forget DEVICE_ID    Delete a Cage-owned hub device
 
@@ -517,6 +520,37 @@ def _monitor_target_and_preset(arguments: list[str]) -> tuple[str, str, str, boo
     return path, preset, target, json_output
 
 
+def _monitor_volume_arguments(arguments: list[str]) -> tuple[str, str, bool]:
+    volume_name = ""
+    display_name = ""
+    json_output = False
+    index = 0
+    while index < len(arguments):
+        item = arguments[index]
+        if item == "--volume":
+            if index + 1 >= len(arguments) or not arguments[index + 1]:
+                raise CliError("Missing value after --volume")
+            volume_name = arguments[index + 1]
+            index += 1
+        elif item.startswith("--volume="):
+            volume_name = item.partition("=")[2]
+        elif item == "--display-name":
+            if index + 1 >= len(arguments) or not arguments[index + 1]:
+                raise CliError("Missing value after --display-name")
+            display_name = arguments[index + 1]
+            index += 1
+        elif item.startswith("--display-name="):
+            display_name = item.partition("=")[2]
+        elif item == "--json":
+            json_output = True
+        else:
+            raise CliError(f"Unknown monitor volume option: {item}")
+        index += 1
+    if not volume_name:
+        raise CliError("monitor add --volume requires a volume name")
+    return volume_name, display_name, json_output
+
+
 def _resolve_monitor_registration(
     path: str,
     preset: str,
@@ -570,10 +604,18 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     rows = [item.public_dict_for(config_root) for item in registrations]
     aggregate = monitor.load_aggregate_status(config_root)
     hub: dict[str, object] | None = None
+    hub_device_ids: set[str] = set()
     if connection is not None and connection.enabled:
         try:
             raw = monitor._hub_request(connection, "GET", "/api/stats")
             if isinstance(raw, dict):
+                raw_devices = raw.get("devices")
+                if isinstance(raw_devices, list):
+                    hub_device_ids = {
+                        item.get("deviceId")
+                        for item in raw_devices
+                        if isinstance(item, dict) and isinstance(item.get("deviceId"), str)
+                    }
                 hub = {
                     "device_count": len(raw.get("devices", []))
                     if isinstance(raw.get("devices"), list)
@@ -583,11 +625,31 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
                 }
         except monitor.MonitorError as exc:
             hub = {"error": str(exc)}
+    split_complete = bool(
+        isinstance(aggregate, dict) and aggregate.get("split_complete") is True
+    )
+    split_pending = (
+        not split_complete
+        and monitor.host_device_id(config_root) in hub_device_ids
+    )
+    device_ids = (
+        aggregate.get("device_ids")
+        if isinstance(aggregate, dict) and isinstance(aggregate.get("device_ids"), list)
+        else [monitor.host_device_id(config_root)]
+    )
+    providers = (
+        aggregate.get("providers")
+        if isinstance(aggregate, dict) and isinstance(aggregate.get("providers"), dict)
+        else {}
+    )
     payload = {
         "connected": bool(connection is not None and connection.enabled),
         "hub_url": connection.hub_url if connection is not None else "",
         "interval_seconds": connection.interval_seconds if connection is not None else None,
         "device_id": monitor.host_device_id(config_root),
+        "device_ids": device_ids,
+        "providers": providers,
+        "split_migration_pending": split_pending,
         "projects": rows,
         "migration_pending": sum(bool(item.legacy_device_id) for item in registrations),
         "aggregate": aggregate,
@@ -604,7 +666,22 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             print(f"Hub: unavailable ({hub['error']})")
         elif hub:
             print(f"Hub devices: {hub.get('device_count', '?')}")
-    print(f"Cage device: {monitor.host_device_id(config_root)}")
+    if len(device_ids) == 1:
+        print(f"Cage device: {device_ids[0]}")
+    else:
+        print(f"Cage devices: {len(device_ids)}")
+        for device_id in device_ids:
+            print(f"  {device_id}")
+    if isinstance(providers, dict) and providers:
+        print(f"Provider streams: {len(providers)}")
+        for provider, provider_status in sorted(providers.items()):
+            if not isinstance(provider_status, dict):
+                continue
+            print(
+                f"  {provider_status.get('provider_label', provider)}: "
+                f"${provider_status.get('cost_usd', 0):.6f} for "
+                f"{provider_status.get('total_tokens', 0):,} tokens"
+            )
     if not rows:
         print("Registered Cage projects: none")
     else:
@@ -623,7 +700,7 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             f"Price coverage: {aggregate.get('price_coverage_percent', 0):.2f}% "
             f"({aggregate.get('unpriced_tokens', 0):,} unpriced tokens)"
         )
-        missing = aggregate.get("missing_models")
+        missing = aggregate.get("missing_prices") or aggregate.get("missing_models")
         if isinstance(missing, list) and missing:
             print("Missing prices: " + ", ".join(str(item) for item in missing))
         print(f"Deduplicated session copies: {aggregate.get('duplicate_sessions', 0)}")
@@ -633,6 +710,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             f"Legacy migration: {pending} old hub device(s) remain; "
             "run cage monitor migrate --yes"
         )
+    if split_pending:
+        print("Provider split migration: pending; run cage monitor migrate --yes")
     return 0
 
 
@@ -662,7 +741,10 @@ def _run_monitor_pricing(arguments: list[str], *, config_root: Path) -> int:
         print(f"Removed custom price for {rest[0]}")
         return 0
     if action != "set" or not rest:
-        raise CliError("Usage: cage monitor pricing set MODEL --input N --output N [--cache-read N]")
+        raise CliError(
+            "Usage: cage monitor pricing set [PROVIDER:]MODEL "
+            "--input N --output N [--cache-read N]"
+        )
     model_id = rest.pop(0)
     values: dict[str, float | None] = {"input": None, "output": None, "cache_read": None}
     index = 0
@@ -696,7 +778,7 @@ def _run_monitor(
 ) -> int:
     if not arguments:
         print(
-            "Usage: cage monitor connect|disconnect|status|sync|add|migrate|pricing|forget ...",
+            "Usage: cage monitor connect|disconnect|status|sync|discover|add|migrate|pricing|forget ...",
             file=sys.stderr,
         )
         return 1
@@ -746,6 +828,23 @@ def _run_monitor(
             if rest not in ([], ["--json"]):
                 raise CliError("monitor status accepts only --json")
             return _monitor_status(config_root, as_json=rest == ["--json"])
+        if action == "discover":
+            if rest not in ([], ["--json"]):
+                raise CliError("monitor discover accepts only --json")
+            discovered = monitor.discover_codex_volumes(
+                storage.docker_command(), config_root
+            )
+            if rest == ["--json"]:
+                print(json.dumps({"volumes": discovered}, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            elif not discovered:
+                print("Cage Codex state volumes: none")
+            else:
+                print(f"Cage Codex state volumes: {len(discovered)}")
+                for item in discovered:
+                    state = "registered" if item["registered"] else "unregistered"
+                    label = item.get("display_name") or "Recovered candidate"
+                    print(f"  {item['volume_name']}  {state}  {label}")
+            return 0
         if action == "migrate":
             if rest != ["--yes"]:
                 raise CliError("monitor migrate requires --yes")
@@ -765,7 +864,7 @@ def _run_monitor(
             )
             print(f"Token Monitor migration complete; removed {count} legacy hub device(s).")
             return 0
-        if action not in {"sync", "add"}:
+        if action not in {"sync", "add", "split"}:
             if action == "forget":
                 if not rest:
                     raise CliError("monitor forget requires a device ID")
@@ -781,12 +880,17 @@ def _run_monitor(
                     raise CliError("Token Monitor is disconnected")
                 registrations = monitor.load_registry(config_root)
                 host_id = monitor.host_device_id(config_root)
+                split_state = monitor.load_split_status(config_root)
                 legacy_record = next(
                     (item for item in registrations if item.legacy_device_id == device_id),
                     None,
                 )
                 is_host_device = device_id == host_id and bool(registrations)
-                if not is_host_device and legacy_record is None:
+                is_provider_device = bool(
+                    split_state
+                    and device_id in split_state.get("device_ids", [])
+                )
+                if not is_host_device and legacy_record is None and not is_provider_device:
                     raise CliError("monitor device was not found")
                 if not assume_yes:
                     if not sys.stdin.isatty():
@@ -810,16 +914,42 @@ def _run_monitor(
                         monitor.remove_project_state(config_root, record.logical_id)
                     monitor.remove_aggregate_status(config_root)
                 else:
-                    assert legacy_record is not None
-                    monitor.remove_device_state(config_root, device_id)
-                    monitor.clear_legacy_device_id(
-                        config_root, legacy_record.logical_id, device_id
+                    if is_provider_device:
+                        monitor.remove_device_state(config_root, device_id)
+                        assert split_state is not None
+                        remaining = [
+                            item for item in split_state.get("device_ids", [])
+                            if item != device_id
+                        ]
+                        monitor.save_split_status(
+                            config_root,
+                            {
+                                **split_state,
+                                "device_ids": remaining,
+                                "updated_at": monitor._now(),
+                            },
+                        )
+                    else:
+                        assert legacy_record is not None
+                        monitor.remove_device_state(config_root, device_id)
+                        monitor.clear_legacy_device_id(
+                            config_root, legacy_record.logical_id, device_id
+                        )
+                if is_provider_device:
+                    print(
+                        f"Forgot Token Monitor provider device {device_id}; "
+                        "a later sync may recreate it if matching sessions remain."
                     )
-                print(f"Forgot Token Monitor device {device_id}; disabled projects require explicit add.")
+                elif is_host_device:
+                    print(
+                        f"Forgot Token Monitor device {device_id}; "
+                        "disabled projects require explicit add."
+                    )
+                else:
+                    print(f"Forgot legacy Token Monitor device {device_id}.")
                 return 0
             raise CliError(f"unknown monitor action: {action}")
 
-        path, preset, target, _ = _monitor_target_and_preset(rest)
         docker = storage.docker_command()
         config_path = config_root / "config.toml"
         policy = (
@@ -827,6 +957,68 @@ def _run_monitor(
             if config_path.is_file()
             else storage.StoragePolicy()
         )
+        if action == "split":
+            if any(item not in {"--dry-run", "--json"} for item in rest) or "--dry-run" not in rest:
+                raise CliError("monitor split requires --dry-run; optional output flag is --json")
+            manifest = monitor.preview_provider_split(
+                config_root,
+                docker,
+                install_root,
+                version=cage_version,
+                storage_policy=policy,
+                allow_build=True,
+            )
+            if "--json" in rest:
+                print(json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            else:
+                print(
+                    f"Dry-run provider split: {manifest.get('total_tokens', 0):,} tokens, "
+                    f"${manifest.get('cost_usd', 0):.6f}"
+                )
+                for provider, provider_status in sorted(manifest.get("providers", {}).items()):
+                    print(
+                        f"  {provider_status.get('provider_label', provider)}: "
+                        f"{provider_status.get('total_tokens', 0):,} tokens, "
+                        f"${provider_status.get('cost_usd', 0):.6f}, "
+                        f"device={provider_status.get('device_id', '?')}"
+                    )
+                if manifest.get("missing_prices"):
+                    print("Missing prices: " + ", ".join(manifest["missing_prices"]))
+            return 0
+        if action == "add" and any(
+            item == "--volume" or item.startswith("--volume=") for item in rest
+        ):
+            volume_name, display_name, json_output = _monitor_volume_arguments(rest)
+            connection = monitor.load_connection(config_root)
+            if connection is None or not connection.enabled:
+                raise CliError("registration requires an active Token Monitor connection")
+            record = monitor.register_recovered_volume(
+                config_root,
+                docker,
+                volume_name=volume_name,
+                display_name=display_name,
+            )
+            updated, _ = monitor.scan_registration(
+                config_root,
+                docker,
+                install_root,
+                record,
+                version=cage_version,
+                storage_policy=policy,
+                allow_build=True,
+                force=True,
+            )
+            if json_output:
+                print(json.dumps(updated.public_dict_for(config_root), ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            else:
+                print(
+                    f"Registered recovered volume {record.volume_name} as "
+                    f"{monitor.project_id_for(config_root, record.logical_id)}"
+                )
+                print(f"Synchronized provider streams at {updated.last_success_at}")
+            return 0
+
+        path, preset, target, _ = _monitor_target_and_preset(rest)
         if action == "add" and not path:
             raise CliError("monitor add requires a project path")
         if path:
@@ -875,7 +1067,9 @@ def _run_monitor(
                 allow_build=True,
                 force=True,
             )
-            print(f"Synchronized {updated.device_id} at {updated.last_success_at}")
+            aggregate = monitor.load_aggregate_status(config_root) or {}
+            device_count = len(aggregate.get("device_ids", [])) if isinstance(aggregate.get("device_ids"), list) else 1
+            print(f"Synchronized {device_count} provider device(s) at {updated.last_success_at}")
             return 0
 
         if action == "add":
@@ -897,8 +1091,10 @@ def _run_monitor(
             allow_build=True,
             force=True,
         )
+        aggregate = monitor.load_aggregate_status(config_root) or {}
+        device_count = len(aggregate.get("device_ids", [])) if isinstance(aggregate.get("device_ids"), list) else 1
         print(
-            f"Synchronized {monitor.host_device_id(config_root)} with "
+            f"Synchronized {device_count} provider device(s) with "
             f"{len(updated)} project(s) at {updated[0].last_success_at}"
         )
         return 0

@@ -5,6 +5,21 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.34.0 — 2026-08-28
+
+- split the host-owned Token Monitor upload into readable provider devices such
+  as `cage-openai-api-mac-…` and `cage-zllm-mac-…`, after cross-volume session
+  deduplication; missing or multi-provider sessions stay in `unattributed`;
+- add `cage monitor split --dry-run`, provider-aware status output, and
+  provider-qualified private pricing without sending the hub secret or custom
+  prices into the coding container;
+- discover all `codex-state-*` volumes and explicitly adopt recovered volumes
+  by exact name, without starting a coding container or inventing a repository
+  path;
+- make the migration from the old unsplit Cage device resumable and fail-safe:
+  provider uploads and per-device hub totals must reconcile with the old hub
+  device before exact legacy deletion;
+
 ## 0.33.0 — 2026-08-28
 
 - add `cage storage maintain` as a preview-only command with an explicit

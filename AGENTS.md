@@ -188,13 +188,18 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   the launch-plan contract. Only Codex Container/Desktop volumes can be
   registered. A short-lived pinned collector mounts the exact `sessions/` and
   `archived_sessions/` volume subpaths read-only with no network, while the
-  host performs authenticated hub requests. One Cage installation is one hub
-  device and each logical Codex volume is one project. Every upload scans all
-  active volumes, deduplicates identical or monotonic session copies, assigns
-  cross-volume copies to `Unattributed`, and fails closed on incompatible
-  copies. Replacement volumes require explicit `cage monitor add` adoption.
-  Legacy per-volume hub devices require verified, resumable `monitor migrate`;
-  private custom pricing never enters the tool container or hub credential path
+  host performs authenticated hub requests. One Cage installation publishes
+  one readable hub device per provider stream, and each logical Codex volume is
+  a project under the stream that owns its sessions. Every upload scans all
+  active volumes, deduplicates identical or monotonic session copies before
+  provider partitioning, assigns missing or multi-provider copies to
+  `Unattributed`, and fails closed on incompatible copies. Discovery is limited
+  to Cage-named `codex-state-*` volumes and recovered volumes require explicit
+  `cage monitor add --volume` adoption. Replacement volumes require explicit
+  `cage monitor add` adoption. Legacy unsplit and per-volume hub devices require
+  verified, resumable `monitor migrate`; private custom pricing never enters
+  the tool container or hub credential path. Split state and aggregate status
+  remain private under the monitor directory
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
