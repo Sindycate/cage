@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.32.3 — 2026-08-28
+
+- use Token Monitor's per-period session window markers when restoring
+  archived details, so repricing refreshes cannot move older sessions into the
+  current day's totals;
+
 ## 0.32.2 — 2026-08-28
 
 - prevent Docker from copying the collector image's root-owned empty

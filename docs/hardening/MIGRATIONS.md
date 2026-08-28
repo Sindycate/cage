@@ -6,6 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.32.3 — 2026-08-28
+
+### Preserve Token Monitor period boundaries after repricing
+
+No user action is required. Cage now uses each archived session's own
+Token Monitor `periodWindows` marker when restoring `today` and `month`
+details. This keeps historical sessions out of the current period when an
+upstream repricing refresh updates the archive entry's shared day or month.
+Older archives without per-period markers continue to use their shared fields.
+
 ## 0.32.2 — 2026-08-28
 
 ### Preserve Codex session-directory ownership during monitor scans

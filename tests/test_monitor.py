@@ -737,6 +737,61 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(status["missing_models"], ["gpt-unknown"])
             self.assertEqual(status["cost_usd"], 0.0001)
 
+    def test_archive_uses_period_window_after_repricing_refreshes_shared_day(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+
+            def archived_session(session_id, day, total):
+                return {
+                    "client": "codex",
+                    "sessionId": session_id,
+                    "periods": {
+                        "today": {"totalTokens": total},
+                        "month": {"totalTokens": total},
+                        "allTime": {"totalTokens": total},
+                    },
+                    "periodWindows": {
+                        "today": {"day": day},
+                        "month": {"month": "2026-08"},
+                        "allTime": {},
+                    },
+                    # Upstream changes this shared marker when another
+                    # period is refreshed, such as after repricing.
+                    "day": "2026-08-28",
+                    "month": "2026-08",
+                }
+
+            archive = {
+                "version": 1,
+                "sessions": {
+                    "codex:old": archived_session("old", "2026-08-27", 10),
+                    "codex:new": archived_session("new", "2026-08-28", 20),
+                },
+            }
+            (state / "session-usage-archive.json").write_text(
+                json.dumps(archive), encoding="utf-8"
+            )
+            payload = {
+                "periodWindows": {
+                    "today": {"key": "2026-08-28"},
+                    "month": {"key": "2026-08"},
+                },
+                "today": {"totalTokens": 20},
+                "month": {"totalTokens": 30},
+                "allTime": {"totalTokens": 30},
+                "sessionDetailsOmitted": {"today": 1},
+            }
+
+            monitor._archive_sessions_for_payload(state, payload)
+
+            self.assertEqual(set(payload["today"]["sessions"]), {"codex:new"})
+            self.assertEqual(
+                set(payload["month"]["sessions"]), {"codex:old", "codex:new"}
+            )
+            self.assertNotIn("sessionDetailsOmitted", payload)
+
     def test_legacy_migration_is_verified_exact_and_resumable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

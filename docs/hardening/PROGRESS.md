@@ -3,6 +3,20 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Token Monitor archive period-boundary repair prepared for v0.32.3
+
+When upstream repricing refreshes a session archive, its shared `day` marker
+can become today's date even though that session's `today` period still belongs
+to the previous day. Cage now restores `today` and `month` details from each
+session's `periodWindows` markers, with a compatibility fallback for older
+archives. Added a regression covering the same-day repricing case. No user
+state migration is required.
+
+Validation: focused monitor/bootstrap tests pass; complete Python suite passes
+(`576 passed, 13 skipped`); Python compilation, Bash/Node syntax, Compose
+rendering, and `git diff --check` pass. Publication remains pending until the
+canonical publisher reaches `public_verified`.
+
 ## 2026-08-28 — Token Monitor empty-subpath ownership repair prepared for v0.32.2
 
 Reproduced the persistent Codex transcript failure on a public `v0.32.1`

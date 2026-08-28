@@ -1358,14 +1358,32 @@ def _archive_sessions_for_payload(state_path: Path, payload: dict[str, Any]) -> 
         periods = entry.get("periods")
         if not isinstance(periods, dict):
             raise MonitorError("Token Monitor session archive periods are invalid")
+        entry_windows = entry.get("periodWindows")
         for period_name in ("today", "month", "allTime"):
             session = periods.get(period_name)
             if not isinstance(session, dict):
                 continue
-            if period_name == "today" and today_key and entry.get("day") != today_key:
-                continue
-            if period_name == "month" and month_key and entry.get("month") != month_key:
-                continue
+            # Repricing can refresh the shared entry day while retaining the
+            # original window marker. Use that per-period marker first, then
+            # fall back to the shared fields written by older archives.
+            period_window = (
+                entry_windows.get(period_name)
+                if isinstance(entry_windows, dict)
+                and isinstance(entry_windows.get(period_name), dict)
+                else {}
+            )
+            if period_name == "today" and today_key:
+                entry_day = period_window.get("day")
+                if not isinstance(entry_day, str) or not entry_day:
+                    entry_day = entry.get("day")
+                if entry_day != today_key:
+                    continue
+            if period_name == "month" and month_key:
+                entry_month = period_window.get("month")
+                if not isinstance(entry_month, str) or not entry_month:
+                    entry_month = entry.get("month")
+                if entry_month != month_key:
+                    continue
             cleaned = dict(session)
             cleaned.pop("projectId", None)
             cleaned.pop("projectLabel", None)
