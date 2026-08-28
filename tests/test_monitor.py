@@ -429,6 +429,7 @@ class MonitorStateTests(unittest.TestCase):
             collector_command = commands[-1]
             joined = " ".join(collector_command)
             self.assertIn("volume-subpath=sessions", joined)
+            self.assertIn("volume-nocopy", joined)
             self.assertNotIn("volume-subpath=archived_sessions", joined)
             self.assertIn("TOKEN_MONITOR_OPENCODE_AMBIENT=0", joined)
             self.assertIn("TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS=0", joined)
@@ -450,11 +451,12 @@ class MonitorStateTests(unittest.TestCase):
                 "stderr": 'invalid mount config for type "volume": volume-subpath is not supported',
             },
         )()
-        with patch("cage_core.monitor.subprocess.run", return_value=result):
+        with patch("cage_core.monitor.subprocess.run", return_value=result) as run:
             with self.assertRaisesRegex(monitor.MonitorError, "does not support volume-subpath"):
                 monitor._subpath_available(
                     "docker", "cage-token-monitor:dev", "codex-state-demo", "sessions"
                 )
+        self.assertIn("volume-nocopy", " ".join(run.call_args.args[0]))
 
     def test_missing_volume_subpath_is_only_the_empty_directory_case(self):
         result = type(
@@ -465,12 +467,13 @@ class MonitorStateTests(unittest.TestCase):
                 "stderr": "invalid mount config: volume-subpath archived_sessions does not exist",
             },
         )()
-        with patch("cage_core.monitor.subprocess.run", return_value=result):
+        with patch("cage_core.monitor.subprocess.run", return_value=result) as run:
             self.assertFalse(
                 monitor._subpath_available(
                     "docker", "cage-token-monitor:dev", "codex-state-demo", "archived_sessions"
                 )
             )
+        self.assertIn("volume-nocopy", " ".join(run.call_args.args[0]))
 
     def test_forget_requires_local_registration_and_leaves_tombstone_on_failure(self):
         with tempfile.TemporaryDirectory() as temporary:

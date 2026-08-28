@@ -1250,7 +1250,10 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
         "--security-opt",
         "no-new-privileges",
         "--mount",
-        f"type=volume,src={volume_name},dst=/probe,readonly,volume-subpath={subpath}",
+        # Docker otherwise copies an empty destination directory back into an
+        # empty volume subpath, even for a read-only mount.  That copy-up can
+        # reset Cage's Codex session directory ownership to root:root.
+        f"type=volume,src={volume_name},dst=/probe,readonly,volume-subpath={subpath},volume-nocopy",
         "--entrypoint",
         "/usr/bin/true",
         image,
@@ -1399,7 +1402,7 @@ def _run_collector(
     mounts = []
     for subpath, destination in (("sessions", "/scan/codex/sessions"), ("archived_sessions", "/scan/codex/archived_sessions")):
         if _subpath_available(docker, image, record.volume_name, subpath):
-            mounts.extend(("--mount", f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={subpath}"))
+            mounts.extend(("--mount", f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={subpath},volume-nocopy"))
     mounts.extend(("--mount", f"type=bind,src={state_path},dst=/state", "--mount", f"type=bind,src={output_path},dst=/out/summary.json"))
     command = [
         docker,

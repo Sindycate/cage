@@ -5,6 +5,11 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.32.2 — 2026-08-28
+
+- prevent Docker from copying the collector image's root-owned empty
+  directories into Codex volumes during read-only Token Monitor scans;
+
 ## 0.32.1 — 2026-08-28
 
 - accept the empty Token Monitor summary that a newly registered Codex volume

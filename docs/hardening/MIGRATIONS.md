@@ -6,6 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.32.2 — 2026-08-28
+
+### Preserve Codex session-directory ownership during monitor scans
+
+No user action is required. Token Monitor collector mounts now disable Docker's
+automatic volume copy-up for the exact read-only `sessions/` and
+`archived_sessions/` subpaths. This prevents an empty subpath from being
+repopulated with the collector image's root-owned directory and avoids the
+Codex transcript permission error on an existing Cage volume.
+
 ## 0.32.1 — 2026-08-28
 
 ### Empty new-project monitor scan

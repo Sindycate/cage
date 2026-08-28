@@ -3,6 +3,18 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Token Monitor empty-subpath ownership repair prepared for v0.32.2
+
+Reproduced the persistent Codex transcript failure on a public `v0.32.1`
+image: Docker's `volume-subpath` mount copied the collector image's empty,
+root-owned destination directory into an empty Codex session subpath even when
+the source mount was read-only. This changed `sessions/` and
+`archived_sessions/` from the entrypoint's `501:20 0700` ownership to
+`root:root 0755`, producing Codex's thread-store permission error. Added
+`volume-nocopy` to both the subpath capability probe and the collector mounts,
+with monitor command regressions. A real disposable Docker reproduction keeps
+the directories at `501:20 0700` after the collector scan with the fix.
+
 ## 2026-08-28 — empty Token Monitor project scan prepared for v0.32.1
 
 Accepted the pinned Token Monitor representation for a newly registered Codex
