@@ -468,6 +468,10 @@ class MonitorStateTests(unittest.TestCase):
             self.assertIn("TOKEN_MONITOR_OPENCODE_LOCAL_LIMITS=0", joined)
             self.assertIn("TOKEN_MONITOR_WSL_SCAN=0", joined)
             self.assertIn("TOKSCALE_CONFIG_DIR=/state/tokscale", joined)
+            self.assertIn(
+                f"/scan/codex:rw,noexec,nosuid,nodev,size=32m,uid={os.getuid()},gid={os.getgid()},mode=700",
+                joined,
+            )
             pricing = (
                 monitor._project_state_path(root, state)
                 / "tokscale"

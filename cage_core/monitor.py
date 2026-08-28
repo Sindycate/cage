@@ -1515,7 +1515,7 @@ def _run_collector(
         "--tmpfs",
         "/run:rw,noexec,nosuid,nodev,size=8m",
         "--tmpfs",
-        "/scan/codex:rw,noexec,nosuid,nodev,size=32m",
+        f"/scan/codex:rw,noexec,nosuid,nodev,size=32m,uid={uid},gid={gid},mode=700",
         *mounts,
         "-e",
         "CODEX_HOME=/scan/codex",

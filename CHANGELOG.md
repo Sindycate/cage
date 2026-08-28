@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.34.2 — 2026-08-28
+
+- make the collector's private scan tmpfs writable by its unprivileged UID/GID,
+  so older volumes with both session directories absent are scanned as empty
+  inputs without changing the read-only volume mounts;
+
 ## 0.34.1 — 2026-08-28
 
 - handle Docker daemon diagnostics that report a missing `sessions/` or

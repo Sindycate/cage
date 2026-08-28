@@ -6,6 +6,15 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.34.2 — 2026-08-28
+
+### Scan volumes with no session directories
+
+No user configuration migration is required. The collector's private
+`/scan/codex` tmpfs is now owned by the scan UID/GID, allowing it to create
+empty `sessions/` and `archived_sessions/` directories when an older volume
+has neither. Codex volume mounts remain read-only and subpath-scoped.
+
 ## 0.34.1 — 2026-08-28
 
 ### Scan older volumes with missing session directories

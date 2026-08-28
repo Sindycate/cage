@@ -3,14 +3,23 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-08-28 — Collector tmpfs ownership patch prepared for v0.34.2
+
+The v0.34.1 all-volume retry reached an older volume with neither session
+directory. The collector could not create its empty scan directories because
+`/scan/codex` was root-owned. Cage now assigns that private tmpfs to the
+unprivileged scan UID/GID; volume mounts remain read-only and exact-subpath
+scoped. A regression assertion covers the mount options. Publication is
+pending the canonical publisher.
+
 ## 2026-08-28 — Missing-volume-subpath patch prepared for v0.34.1
 
 The all-volume scan found an older recovered volume without
 `archived_sessions/`. Docker reported the missing path through its host
 `_data` path, which the v0.34.0 matcher did not recognize. The collector now
 treats that exact missing subpath as empty and keeps the volume boundary
-scoped. A regression test covers the daemon diagnostic. Publication is
-pending the canonical publisher.
+scoped. A regression test covers the daemon diagnostic. Public publication
+reached `public_verified` for v0.34.1.
 
 ## 2026-08-28 — Token Monitor provider split and volume discovery prepared for v0.34.0
 
