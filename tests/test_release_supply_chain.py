@@ -161,6 +161,15 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("provenance: mode=max", text)
         self.assertIn("subject-name: ghcr.io/sindycate/cage/base", text)
         self.assertIn("subject-name: ghcr.io/sindycate/cage/${{ matrix.image }}", text)
+        # Verify exact matrix structure for all four leaf images
+        for image, dockerfile in (
+            ("claude-code", "Dockerfile"),
+            ("codex", "Dockerfile.codex"),
+            ("opencode", "Dockerfile.opencode"),
+            ("token-monitor", "Dockerfile.monitor"),
+        ):
+            self.assertIn(f"image: {image}", text)
+            self.assertIn(f"dockerfile: {dockerfile}", text)
         # Manifest artifact is SHA-named, schema-typed, and uploaded.
         self.assertIn("name: release-candidate-${{ needs.candidate-base.outputs.sha }}", text)
         self.assertIn('"schema": "cage.release-candidate"', text)
@@ -880,7 +889,6 @@ gh() {
       echo "attestation verification failed" >&2
       return 1
     fi
-    echo "verified"
     return 0
   fi
   return 0
@@ -1176,38 +1184,40 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
 
 
 class ManifestAssemblerTests(unittest.TestCase):
-    """Execute the candidate manifest generator against mock downloaded digest files."""
+    """Execute the candidate manifest generator against stubbed GHCR/docker/gh."""
 
     @classmethod
     def setUpClass(cls):
-        cls.script = _extract_run_block(CI_WORKFLOW, "Write candidate manifest")
-        assert "leaf-digests" in cls.script
+        cls.script = _extract_run_block(CI_WORKFLOW, "Resolve candidate digests from GHCR")
+        assert ". .github/scripts/ghcr-status.sh" in cls.script
         assert "release-candidate-" in cls.script
 
-    def test_manifest_assembler_creates_valid_schema_v3_manifest(self):
+    def test_manifest_assembler_resolves_and_creates_valid_schema_v3_manifest(self):
         base = Path(tempfile.mkdtemp(prefix="manifest-assemble-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
-        leaf_dir = base / "leaf-digests"
-        leaf_dir.mkdir()
-        for leaf in ("claude-code", "codex", "opencode", "token-monitor"):
-            (leaf_dir / f"{leaf}.digest").write_text(
-                f"sha256:{'2' * 64}\n", encoding="utf-8"
-            )
         script_file = base / "assemble.sh"
-        script_file.write_text(self.script, encoding="utf-8")
+        script_file.write_text(
+            CURL_FUNC + DOCKER_FUNC_CANDIDATE + GH_FUNC + "\n" + self.script,
+            encoding="utf-8"
+        )
         env = dict(os.environ)
         sha = "a" * 40
         env["SHA"] = sha
         env["VERSION"] = "0.33.0"
         env["BASE_DIGEST"] = f"sha256:{'1' * 64}"
         env["RUN_ID"] = "12345"
+        env["GITHUB_REPOSITORY"] = "Sindycate/cage"
+        env["GITHUB_ACTOR"] = "stub-actor"
+        env["GH_TOKEN"] = "dummy-token"
+        env["STUB_MODE"] = "present"
         result = subprocess.run(
             ["bash", str(script_file)], env=env, capture_output=True, text=True,
-            cwd=str(base),
+            cwd=str(ROOT),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        manifest_file = base / f"release-candidate-{sha}.json"
+        manifest_file = ROOT / f"release-candidate-{sha}.json"
         self.assertTrue(manifest_file.is_file())
+        self.addCleanup(manifest_file.unlink, missing_ok=True)
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "cage.release-candidate")
         self.assertEqual(manifest["schema_version"], 3)
@@ -1218,6 +1228,10 @@ class ManifestAssemblerTests(unittest.TestCase):
             set(manifest["images"].keys()),
             {"base", "claude-code", "codex", "opencode", "token-monitor"},
         )
+        for image_name, info in manifest["images"].items():
+            self.assertEqual(info["name"], f"ghcr.io/sindycate/cage/{image_name}")
+            self.assertEqual(info["tag"], f"candidate-{sha}")
+            self.assertTrue(info["digest"].startswith("sha256:"))
 
 
 class VersionTagFailClosedTests(unittest.TestCase):

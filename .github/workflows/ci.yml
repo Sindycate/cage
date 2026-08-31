@@ -342,14 +342,6 @@ jobs:
             sha256:*) ;;
             *) echo "ERROR: invalid candidate digest: ${EFFECTIVE}"; exit 1 ;;
           esac
-          mkdir -p leaf-digests
-          echo "$EFFECTIVE" > "leaf-digests/${{ matrix.image }}.digest"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: candidate-digest-${{ matrix.image }}-${{ github.sha }}
-          path: leaf-digests/${{ matrix.image }}.digest
-          retention-days: 1
 
   candidate:
     needs: [candidate-base, candidate-leaf]
@@ -359,45 +351,87 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      packages: read
+      id-token: write
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: candidate-digest-*-${{ github.sha }}
-          path: leaf-digests
-          merge-multiple: true
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Write candidate manifest
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve candidate digests from GHCR and write candidate manifest
         env:
           BASE_DIGEST: ${{ needs.candidate-base.outputs.base_digest }}
           SHA: ${{ needs.candidate-base.outputs.sha }}
           VERSION: ${{ needs.candidate-base.outputs.version }}
           RUN_ID: ${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os, sys, re
+          . .github/scripts/ghcr-status.sh
 
-          sha = os.environ["SHA"]
-          version = os.environ["VERSION"]
-          run_id = int(os.environ["RUN_ID"])
-          base_digest = os.environ["BASE_DIGEST"].strip()
+          resolve_leaf() {
+            local name="$1"
+            local repo_path="sindycate/cage/${name}"
+            local ref="ghcr.io/sindycate/cage/${name}:candidate-${SHA}"
+            local status
+            status="$(ghcr_status "$repo_path" "candidate-${SHA}")"
+            if [ "$status" != "200" ]; then
+              echo "ERROR: candidate ${name} is not present in GHCR (status: ${status})" >&2
+              exit 1
+            fi
 
-          leaf_names = ("claude-code", "codex", "opencode", "token-monitor")
-          digests = {"base": base_digest}
-          for name in leaf_names:
-              path = os.path.join("leaf-digests", f"{name}.digest")
-              if not os.path.isfile(path):
-                  sys.exit(f"Missing digest file for {name}: {path}")
-              with open(path, encoding="utf-8") as f:
-                  digests[name] = f.read().strip()
+            local digest
+            digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
+            case "$digest" in
+              sha256:[0-9a-f]*) ;;
+              *) echo "ERROR: invalid digest for ${name}: ${digest}" >&2; exit 1 ;;
+            esac
 
-          for name, digest in digests.items():
-              if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-                  sys.exit(f"Invalid candidate digest for {name}: {digest}")
+            local arches
+            arches="$(docker buildx imagetools inspect "$ref" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
+            case "$arches" in
+              *amd64*arm64*) ;;
+              *) echo "ERROR: candidate ${name} missing amd64/arm64 (${arches})" >&2; exit 1 ;;
+            esac
+
+            gh attestation verify "oci://ghcr.io/sindycate/cage/${name}@${digest}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
+              --source-digest "${SHA}" \
+              --source-ref refs/heads/main
+
+            printf '%s' "$digest"
+          }
+
+          CLAUDE_DIGEST="$(resolve_leaf "claude-code")"
+          CODEX_DIGEST="$(resolve_leaf "codex")"
+          OPENCODE_DIGEST="$(resolve_leaf "opencode")"
+          MONITOR_DIGEST="$(resolve_leaf "token-monitor")"
+
+          python3 - "$SHA" "$VERSION" "$RUN_ID" "$BASE_DIGEST" \
+            "$CLAUDE_DIGEST" "$CODEX_DIGEST" "$OPENCODE_DIGEST" "$MONITOR_DIGEST" <<'PY'
+          import json, sys
+
+          sha, version, run_id_str, base_digest, claude, codex, opencode, monitor = sys.argv[1:9]
+          run_id = int(run_id_str)
+
+          digests = {
+              "base": base_digest.strip(),
+              "claude-code": claude.strip(),
+              "codex": codex.strip(),
+              "opencode": opencode.strip(),
+              "token-monitor": monitor.strip(),
+          }
 
           manifest = {
               "schema": "cage.release-candidate",
@@ -424,7 +458,7 @@ jobs:
           # Verify parsing
           with open(manifest_path, encoding="utf-8") as f:
               json.load(f)
-          print(f"Wrote verified manifest to {manifest_path}")
+          print(f"Successfully assembled verified manifest {manifest_path}")
           PY
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
