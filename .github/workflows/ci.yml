@@ -234,21 +234,17 @@ jobs:
       id-token: write
       attestations: write
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - image: claude-code
             dockerfile: Dockerfile
-            key: claude
           - image: codex
             dockerfile: Dockerfile.codex
-            key: codex
           - image: opencode
             dockerfile: Dockerfile.opencode
-            key: opencode
           - image: token-monitor
             dockerfile: Dockerfile.monitor
-            key: monitor
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

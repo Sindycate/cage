@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -224,6 +225,9 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn(". .github/scripts/ghcr-status.sh", text)
         self.assertIn('status="$(ghcr_status "$repo_path" "candidate-${SHA}")"', text)
         self.assertIn("ambiguous registry status", text)
+        # Matrix must NOT use fail-fast so independent sibling builds finish attestations
+        self.assertIn("fail-fast: false", text)
+        self.assertNotIn("fail-fast: true", text)
         # The unsafe bare-substring not-found matching is gone.
         self.assertNotIn('*"not found"*|*"manifest unknown"*|*"404"*)', text)
         self.assertNotIn("inspect_ok=true", text)
@@ -1093,6 +1097,127 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
     def test_existing_but_unverifiable_candidate_fails_closed(self):
         result, _ = self._run_resolve("present", attest="fail")
         self.assertEqual(result.returncode, 1)
+
+
+class CandidateLeafResolveFailClosedTests(unittest.TestCase):
+    """Execute the matrix leaf candidate resolve block against stubbed curl/docker/gh."""
+
+    @classmethod
+    def setUpClass(cls):
+        raw_script = _extract_run_block(CI_WORKFLOW, "Resolve existing candidate or fail closed")
+        assert ". .github/scripts/ghcr-status.sh" in raw_script
+        assert "ghcr_status" in raw_script
+        cls.script = raw_script.replace("${{ matrix.image }}", "claude-code")
+
+    def _run_resolve(self, mode, attest="ok", sha=None):
+        base = Path(tempfile.mkdtemp(prefix="resolve-leaf-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        github_output = base / "github_output.txt"
+        github_output.write_text("", encoding="utf-8")
+        script_file = base / "resolve_leaf.sh"
+        script_file.write_text(
+            CURL_FUNC + DOCKER_FUNC_CANDIDATE + GH_FUNC + "\n" + self.script,
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["SHA"] = sha or ("a" * 40)
+        env["GITHUB_REPOSITORY"] = "Sindycate/cage"
+        env["GITHUB_OUTPUT"] = str(github_output)
+        env["GITHUB_ACTOR"] = "stub-actor"
+        env["GH_TOKEN"] = "dummy-token"
+        env["STUB_MODE"] = mode
+        env["STUB_ATTEST"] = attest
+        result = subprocess.run(
+            ["bash", str(script_file)], env=env, capture_output=True, text=True,
+            cwd=str(ROOT),
+        )
+        outputs = {}
+        for line in github_output.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        return result, outputs
+
+    def test_authoritative_404_authorizes_creation(self):
+        result, outputs = self._run_resolve("absent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("exists"), "false", outputs)
+
+    def test_200_verified_candidate_is_reused(self):
+        result, outputs = self._run_resolve("present")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("exists"), "true", outputs)
+        self.assertTrue(outputs.get("digest", "").startswith("sha256:"))
+
+    def test_401_unauthorized_fails_closed(self):
+        result, outputs = self._run_resolve("unauthorized")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (401)", result.stderr)
+        self.assertNotEqual(outputs.get("exists"), "false")
+
+    def test_403_denied_fails_closed(self):
+        result, _ = self._run_resolve("denied")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (403)", result.stderr)
+
+    def test_registry_5xx_fails_closed(self):
+        result, _ = self._run_resolve("server")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (503)", result.stderr)
+
+    def test_timeout_fails_closed(self):
+        result, _ = self._run_resolve("timeout")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (000)", result.stderr)
+
+    def test_existing_but_unverifiable_candidate_fails_closed(self):
+        result, _ = self._run_resolve("present", attest="fail")
+        self.assertEqual(result.returncode, 1)
+
+
+class ManifestAssemblerTests(unittest.TestCase):
+    """Execute the candidate manifest generator against mock downloaded digest files."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(CI_WORKFLOW, "Write candidate manifest")
+        assert "leaf-digests" in cls.script
+        assert "release-candidate-" in cls.script
+
+    def test_manifest_assembler_creates_valid_schema_v3_manifest(self):
+        base = Path(tempfile.mkdtemp(prefix="manifest-assemble-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        leaf_dir = base / "leaf-digests"
+        leaf_dir.mkdir()
+        for leaf in ("claude-code", "codex", "opencode", "token-monitor"):
+            (leaf_dir / f"{leaf}.digest").write_text(
+                f"sha256:{'2' * 64}\n", encoding="utf-8"
+            )
+        script_file = base / "assemble.sh"
+        script_file.write_text(self.script, encoding="utf-8")
+        env = dict(os.environ)
+        sha = "a" * 40
+        env["SHA"] = sha
+        env["VERSION"] = "0.33.0"
+        env["BASE_DIGEST"] = f"sha256:{'1' * 64}"
+        env["RUN_ID"] = "12345"
+        result = subprocess.run(
+            ["bash", str(script_file)], env=env, capture_output=True, text=True,
+            cwd=str(base),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest_file = base / f"release-candidate-{sha}.json"
+        self.assertTrue(manifest_file.is_file())
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema"], "cage.release-candidate")
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["source_sha"], sha)
+        self.assertEqual(manifest["version"], "0.33.0")
+        self.assertEqual(manifest["ci_run_id"], 12345)
+        self.assertEqual(
+            set(manifest["images"].keys()),
+            {"base", "claude-code", "codex", "opencode", "token-monitor"},
+        )
 
 
 class VersionTagFailClosedTests(unittest.TestCase):
