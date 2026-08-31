@@ -148,34 +148,20 @@ class ReleaseSupplyChainTests(unittest.TestCase):
     def test_ci_candidate_tags_use_full_sha_and_exact_base_digest(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('echo "SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"', text)
-        for fragment in (
-            "ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}",
-            "ghcr.io/sindycate/cage/claude-code:candidate-${{ env.SHA }}",
-            "ghcr.io/sindycate/cage/codex:candidate-${{ env.SHA }}",
-            "ghcr.io/sindycate/cage/opencode:candidate-${{ env.SHA }}",
-            "ghcr.io/sindycate/cage/token-monitor:candidate-${{ env.SHA }}",
-        ):
-            self.assertIn(fragment, text)
-        # Leaves build from the exact (effective) base digest, never a mutable
-        # tag. The effective digest resolves to the verified existing candidate
-        # digest on reuse, or the freshly built digest otherwise.
+        self.assertIn("ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}", text)
+        self.assertIn("ghcr.io/sindycate/cage/${{ matrix.image }}:candidate-${{ env.SHA }}", text)
+        # Leaves build from the exact base digest output by candidate-base, never a mutable tag.
         leaf_base = (
-            "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}"
+            "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.base_digest }}"
         )
-        self.assertEqual(text.count(leaf_base), 4)
+        self.assertIn(leaf_base, text)
         # Candidate images retain SBOM + max provenance and per-image attestations.
         self.assertIn("sbom: true", text)
         self.assertIn("provenance: mode=max", text)
-        for subject in (
-            "subject-name: ghcr.io/sindycate/cage/base",
-            "subject-name: ghcr.io/sindycate/cage/claude-code",
-            "subject-name: ghcr.io/sindycate/cage/codex",
-            "subject-name: ghcr.io/sindycate/cage/opencode",
-            "subject-name: ghcr.io/sindycate/cage/token-monitor",
-        ):
-            self.assertIn(subject, text)
+        self.assertIn("subject-name: ghcr.io/sindycate/cage/base", text)
+        self.assertIn("subject-name: ghcr.io/sindycate/cage/${{ matrix.image }}", text)
         # Manifest artifact is SHA-named, schema-typed, and uploaded.
-        self.assertIn("name: release-candidate-${{ env.SHA }}", text)
+        self.assertIn("name: release-candidate-${{ needs.candidate-base.outputs.sha }}", text)
         self.assertIn('"schema": "cage.release-candidate"', text)
         self.assertIn('"schema_version": 3', text)
 
@@ -186,11 +172,17 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn(
             "Resolve existing candidates (verify and reuse) or fail closed", text
         )
-        self.assertIn("id: resolve", text)
+        self.assertIn(
+            "Resolve existing candidate or fail closed", text
+        )
         # Existing candidates are verified by attestation (OCI reference form),
         # signer workflow, source SHA and ref before reuse.
         self.assertIn(
-            'gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${digest}"',
+            'gh attestation verify "oci://ghcr.io/sindycate/cage/base@${digest}"',
+            text,
+        )
+        self.assertIn(
+            'gh attestation verify "oci://ghcr.io/sindycate/cage/${{ matrix.image }}@${digest}"',
             text,
         )
         self.assertIn(
@@ -200,16 +192,18 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("--source-ref refs/heads/main", text)
         # An existing candidate missing amd64/arm64 fails closed.
         self.assertIn(
-            'echo "ERROR: existing candidate ${image} missing amd64/arm64 (${arches})"; exit 1',
+            'echo "ERROR: existing candidate base missing amd64/arm64 (${arches})"; exit 1',
+            text,
+        )
+        self.assertIn(
+            'echo "ERROR: existing candidate ${{ matrix.image }} missing amd64/arm64 (${arches})"; exit 1',
             text,
         )
         # Build and attest steps are conditionally skipped for reused images, so a
         # CI rerun can never replace an immutable candidate with freshly resolved
         # mutable dependencies.
-        for image_key in ("base", "claude", "codex", "opencode", "monitor"):
-            self.assertIn(
-                f"if: steps.resolve.outputs.{image_key}_exists != 'true'", text
-            )
+        self.assertIn("if: steps.resolve.outputs.base_exists != 'true'", text)
+        self.assertIn("if: steps.resolve.outputs.exists != 'true'", text)
         # The ineffective no-op guard that printed then overwrote is removed.
         self.assertNotIn(
             'echo "Candidate $ref already exists; the release workflow will verify it."',
@@ -217,8 +211,12 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         )
         # Effective digests are validated before the manifest is written.
         self.assertIn("Resolve effective candidate digests", text)
+        self.assertIn("Resolve effective digest", text)
         self.assertIn(
-            '*) echo "ERROR: invalid candidate digest: ${value}"; exit 1 ;;', text
+            '*) echo "ERROR: invalid candidate digest: ${BASE}"; exit 1 ;;', text
+        )
+        self.assertIn(
+            '*) echo "ERROR: invalid candidate digest: ${EFFECTIVE}"; exit 1 ;;', text
         )
         # Existence is decided by an authoritative registry status code (via the
         # shared ghcr-status helper), never by free-form error text. Only a 404
@@ -774,7 +772,8 @@ class SharedBaseImageTests(unittest.TestCase):
 
     def test_candidate_builds_receive_release_version_for_oci_labels(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("CAGE_VERSION=${{ env.VERSION }}"), 5)
+        self.assertIn("CAGE_VERSION=${{ env.VERSION }}", workflow)
+        self.assertIn("CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.base_digest }}", workflow)
 
 
 
@@ -1044,15 +1043,13 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
     def test_authoritative_404_authorizes_creation(self):
         result, outputs = self._run_resolve("absent")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for key in ("base", "claude", "codex", "opencode", "monitor"):
-            self.assertEqual(outputs.get(f"{key}_exists"), "false", outputs)
+        self.assertEqual(outputs.get("base_exists"), "false", outputs)
 
     def test_200_verified_candidate_is_reused(self):
         result, outputs = self._run_resolve("present")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for key in ("base", "claude", "codex", "opencode", "monitor"):
-            self.assertEqual(outputs.get(f"{key}_exists"), "true", outputs)
-            self.assertTrue(outputs.get(f"{key}_digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("base_exists"), "true", outputs)
+        self.assertTrue(outputs.get("base_digest", "").startswith("sha256:"))
 
     def test_401_unauthorized_fails_closed(self):
         result, outputs = self._run_resolve("unauthorized")

@@ -104,27 +104,35 @@ jobs:
   # push to main. These are write-once, content-addressed, and never referenced
   # by Cage's pull logic; the tag-triggered release workflow promotes the exact
   # digests instead of rebuilding. No cross-version BuildKit cache is used.
-  candidate:
+  candidate-base:
     needs: [secret-scan, installer-macos-bash32, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
-      group: candidate-${{ github.sha }}
+      group: candidate-base-${{ github.sha }}
       cancel-in-progress: false
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
+    outputs:
+      base_digest: ${{ steps.digests.outputs.base }}
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Extract version and commit
+        id: meta
         run: |
-          echo "VERSION=$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)" >> "$GITHUB_ENV"
+          VERSION="$(grep '^CAGE_VERSION=' cage | cut -d'"' -f2)"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -137,13 +145,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Candidate tags are write-once. Before building anything, resolve each
-      # candidate: if the tag already exists, verify its platforms and CI
-      # attestation for this exact SHA and reuse its digest; if it exists but
-      # cannot be verified, fail closed (never overwrite). Missing candidates are
-      # built below; build/attest steps are skipped for reused images so a CI
-      # rerun can never replace an immutable candidate with freshly resolved
-      # mutable dependencies.
       - name: Resolve existing candidates (verify and reuse) or fail closed
         id: resolve
         env:
@@ -151,54 +152,36 @@ jobs:
         run: |
           set -euo pipefail
           . .github/scripts/ghcr-status.sh
-          for image in base claude-code codex opencode token-monitor; do
-            case "$image" in
-              base) key=base ;;
-              claude-code) key=claude ;;
-              codex) key=codex ;;
-              opencode) key=opencode ;;
-              token-monitor) key=monitor ;;
-            esac
-            repo_path="sindycate/cage/${image}"
-            ref="ghcr.io/sindycate/cage/${image}:candidate-${SHA}"
-            # Authoritative existence check: branch on the registry HTTP status
-            # code, never on free-form error text (which a commit SHA containing
-            # "404" or a credential-helper/network message containing "not found"
-            # could spoof).
-            status="$(ghcr_status "$repo_path" "candidate-${SHA}")"
-            case "$status" in
-              200)
-                # Candidate exists: verify platforms + CI attestation, then reuse.
-                digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
-                arches="$(docker buildx imagetools inspect "$ref" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
-                case "$arches" in
-                  *amd64*arm64*) ;;
-                  *) echo "ERROR: existing candidate ${image} missing amd64/arm64 (${arches})"; exit 1 ;;
-                esac
-                gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${digest}" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
-                  --source-digest "${SHA}" \
-                  --source-ref refs/heads/main
-                echo "Reusing verified existing candidate ${image}@${digest}"
-                echo "${key}_exists=true" >> "$GITHUB_OUTPUT"
-                echo "${key}_digest=${digest}" >> "$GITHUB_OUTPUT"
-                ;;
-              404)
-                # Authoritative absence: the only result that authorizes creation.
-                echo "No existing candidate for ${image}; it will be built."
-                echo "${key}_exists=false" >> "$GITHUB_OUTPUT"
-                echo "${key}_digest=" >> "$GITHUB_OUTPUT"
-                ;;
-              *)
-                # Ambiguous (auth 401/403, rate limit, timeout, network, registry
-                # 5xx, unreachable): fail closed so a CI rerun can never overwrite
-                # an immutable candidate tag whose existence was not confirmed.
-                echo "ERROR: ambiguous registry status (${status}) for ${ref}; refusing to build to protect write-once candidate tags." >&2
-                exit 1
-                ;;
-            esac
-          done
+          repo_path="sindycate/cage/base"
+          ref="ghcr.io/sindycate/cage/base:candidate-${SHA}"
+          status="$(ghcr_status "$repo_path" "candidate-${SHA}")"
+          case "$status" in
+            200)
+              digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
+              arches="$(docker buildx imagetools inspect "$ref" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
+              case "$arches" in
+                *amd64*arm64*) ;;
+                *) echo "ERROR: existing candidate base missing amd64/arm64 (${arches})"; exit 1 ;;
+              esac
+              gh attestation verify "oci://ghcr.io/sindycate/cage/base@${digest}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
+                --source-digest "${SHA}" \
+                --source-ref refs/heads/main
+              echo "Reusing verified existing candidate base@${digest}"
+              echo "base_exists=true" >> "$GITHUB_OUTPUT"
+              echo "base_digest=${digest}" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "No existing candidate for base; it will be built."
+              echo "base_exists=false" >> "$GITHUB_OUTPUT"
+              echo "base_digest=" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: ambiguous registry status (${status}) for ${ref}; refusing to build to protect write-once candidate tags." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Build and push candidate base image
         id: base
@@ -224,184 +207,233 @@ jobs:
           push-to-registry: true
           create-storage-record: false
 
-      - name: Resolve effective base digest
-        id: basedigest
-        env:
-          EXISTING_BASE: ${{ steps.resolve.outputs.base_digest }}
-          BUILT_BASE: ${{ steps.base.outputs.digest }}
-        run: |
-          set -euo pipefail
-          if [ -n "$EXISTING_BASE" ]; then
-            echo "digest=$EXISTING_BASE" >> "$GITHUB_OUTPUT"
-          else
-            [ -n "$BUILT_BASE" ] || { echo "ERROR: no base digest available"; exit 1; }
-            echo "digest=$BUILT_BASE" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build and push candidate claude-code image from exact base digest
-        id: claude
-        if: steps.resolve.outputs.claude_exists != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          build-args: |
-            CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
-            CAGE_VERSION=${{ env.VERSION }}
-          tags: ghcr.io/sindycate/cage/claude-code:candidate-${{ env.SHA }}
-
-      - name: Attest candidate claude-code image provenance
-        if: steps.resolve.outputs.claude_exists != 'true'
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-name: ghcr.io/sindycate/cage/claude-code
-          subject-digest: ${{ steps.claude.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Build and push candidate codex image from exact base digest
-        id: codex
-        if: steps.resolve.outputs.codex_exists != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile.codex
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          build-args: |
-            CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
-            CAGE_VERSION=${{ env.VERSION }}
-          tags: ghcr.io/sindycate/cage/codex:candidate-${{ env.SHA }}
-
-      - name: Attest candidate codex image provenance
-        if: steps.resolve.outputs.codex_exists != 'true'
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-name: ghcr.io/sindycate/cage/codex
-          subject-digest: ${{ steps.codex.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Build and push candidate opencode image from exact base digest
-        id: opencode
-        if: steps.resolve.outputs.opencode_exists != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile.opencode
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          build-args: |
-            CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
-            CAGE_VERSION=${{ env.VERSION }}
-          tags: ghcr.io/sindycate/cage/opencode:candidate-${{ env.SHA }}
-
-      - name: Attest candidate opencode image provenance
-        if: steps.resolve.outputs.opencode_exists != 'true'
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-name: ghcr.io/sindycate/cage/opencode
-          subject-digest: ${{ steps.opencode.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
-      - name: Build and push candidate Token Monitor image from exact base digest
-        id: monitor
-        if: steps.resolve.outputs.monitor_exists != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile.monitor
-          platforms: linux/amd64,linux/arm64
-          push: true
-          sbom: true
-          provenance: mode=max
-          build-args: |
-            CAGE_BASE=ghcr.io/sindycate/cage/base@${{ steps.basedigest.outputs.digest }}
-            CAGE_VERSION=${{ env.VERSION }}
-          tags: ghcr.io/sindycate/cage/token-monitor:candidate-${{ env.SHA }}
-
-      - name: Attest candidate Token Monitor image provenance
-        if: steps.resolve.outputs.monitor_exists != 'true'
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-name: ghcr.io/sindycate/cage/token-monitor
-          subject-digest: ${{ steps.monitor.outputs.digest }}
-          push-to-registry: true
-          create-storage-record: false
-
       - name: Resolve effective candidate digests
         id: digests
         env:
           BASE_EXISTING: ${{ steps.resolve.outputs.base_digest }}
           BASE_BUILT: ${{ steps.base.outputs.digest }}
-          CLAUDE_EXISTING: ${{ steps.resolve.outputs.claude_digest }}
-          CLAUDE_BUILT: ${{ steps.claude.outputs.digest }}
-          CODEX_EXISTING: ${{ steps.resolve.outputs.codex_digest }}
-          CODEX_BUILT: ${{ steps.codex.outputs.digest }}
-          OPENCODE_EXISTING: ${{ steps.resolve.outputs.opencode_digest }}
-          OPENCODE_BUILT: ${{ steps.opencode.outputs.digest }}
-          MONITOR_EXISTING: ${{ steps.resolve.outputs.monitor_digest }}
-          MONITOR_BUILT: ${{ steps.monitor.outputs.digest }}
         run: |
           set -euo pipefail
           pick() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
           BASE="$(pick "$BASE_EXISTING" "$BASE_BUILT")"
-          CLAUDE="$(pick "$CLAUDE_EXISTING" "$CLAUDE_BUILT")"
-          CODEX="$(pick "$CODEX_EXISTING" "$CODEX_BUILT")"
-          OPENCODE="$(pick "$OPENCODE_EXISTING" "$OPENCODE_BUILT")"
-          MONITOR="$(pick "$MONITOR_EXISTING" "$MONITOR_BUILT")"
-          for value in "$BASE" "$CLAUDE" "$CODEX" "$OPENCODE" "$MONITOR"; do
-            case "$value" in
-              sha256:*) ;;
-              *) echo "ERROR: invalid candidate digest: ${value}"; exit 1 ;;
-            esac
-          done
+          case "$BASE" in
+            sha256:*) ;;
+            *) echo "ERROR: invalid candidate digest: ${BASE}"; exit 1 ;;
+          esac
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          echo "claude=$CLAUDE" >> "$GITHUB_OUTPUT"
-          echo "codex=$CODEX" >> "$GITHUB_OUTPUT"
-          echo "opencode=$OPENCODE" >> "$GITHUB_OUTPUT"
-          echo "monitor=$MONITOR" >> "$GITHUB_OUTPUT"
 
-      - name: Write candidate manifest
-        env:
-          BASE_DIGEST: ${{ steps.digests.outputs.base }}
-          CLAUDE_DIGEST: ${{ steps.digests.outputs.claude }}
-          CODEX_DIGEST: ${{ steps.digests.outputs.codex }}
-          OPENCODE_DIGEST: ${{ steps.digests.outputs.opencode }}
-          MONITOR_DIGEST: ${{ steps.digests.outputs.monitor }}
-          RUN_ID: ${{ github.run_id }}
+  candidate-leaf:
+    needs: [candidate-base]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: candidate-leaf-${{ matrix.image }}-${{ github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: claude-code
+            dockerfile: Dockerfile
+            key: claude
+          - image: codex
+            dockerfile: Dockerfile.codex
+            key: codex
+          - image: opencode
+            dockerfile: Dockerfile.opencode
+            key: opencode
+          - image: token-monitor
+            dockerfile: Dockerfile.monitor
+            key: monitor
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set environment
         run: |
-          cat > "release-candidate-${SHA}.json" <<EOF
-          {
-            "schema": "cage.release-candidate",
-            "schema_version": 3,
-            "source_sha": "${SHA}",
-            "version": "${VERSION}",
-            "ci_run_id": ${RUN_ID},
-            "platforms": ["linux/amd64", "linux/arm64"],
-            "images": {
-              "base": {"name": "ghcr.io/sindycate/cage/base", "tag": "candidate-${SHA}", "digest": "${BASE_DIGEST}"},
-              "claude-code": {"name": "ghcr.io/sindycate/cage/claude-code", "tag": "candidate-${SHA}", "digest": "${CLAUDE_DIGEST}"},
-              "codex": {"name": "ghcr.io/sindycate/cage/codex", "tag": "candidate-${SHA}", "digest": "${CODEX_DIGEST}"},
-              "opencode": {"name": "ghcr.io/sindycate/cage/opencode", "tag": "candidate-${SHA}", "digest": "${OPENCODE_DIGEST}"},
-              "token-monitor": {"name": "ghcr.io/sindycate/cage/token-monitor", "tag": "candidate-${SHA}", "digest": "${MONITOR_DIGEST}"}
-            }
-          }
-          EOF
-          python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "release-candidate-${SHA}.json"
+          echo "VERSION=${{ needs.candidate-base.outputs.version }}" >> "$GITHUB_ENV"
+          echo "SHA=${{ needs.candidate-base.outputs.sha }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve existing candidate or fail closed
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          . .github/scripts/ghcr-status.sh
+          repo_path="sindycate/cage/${{ matrix.image }}"
+          ref="ghcr.io/sindycate/cage/${{ matrix.image }}:candidate-${SHA}"
+          status="$(ghcr_status "$repo_path" "candidate-${SHA}")"
+          case "$status" in
+            200)
+              digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
+              arches="$(docker buildx imagetools inspect "$ref" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
+              case "$arches" in
+                *amd64*arm64*) ;;
+                *) echo "ERROR: existing candidate ${{ matrix.image }} missing amd64/arm64 (${arches})"; exit 1 ;;
+              esac
+              gh attestation verify "oci://ghcr.io/sindycate/cage/${{ matrix.image }}@${digest}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
+                --source-digest "${SHA}" \
+                --source-ref refs/heads/main
+              echo "Reusing verified existing candidate ${{ matrix.image }}@${digest}"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "No existing candidate for ${{ matrix.image }}; it will be built."
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "digest=" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ERROR: ambiguous registry status (${status}) for ${ref}; refusing to build to protect write-once candidate tags." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build and push candidate image from exact base digest
+        id: build
+        if: steps.resolve.outputs.exists != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.base_digest }}
+            CAGE_VERSION=${{ env.VERSION }}
+          tags: ghcr.io/sindycate/cage/${{ matrix.image }}:candidate-${{ env.SHA }}
+
+      - name: Attest candidate image provenance
+        if: steps.resolve.outputs.exists != 'true'
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-name: ghcr.io/sindycate/cage/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Resolve effective digest
+        id: digests
+        env:
+          EXISTING: ${{ steps.resolve.outputs.digest }}
+          BUILT: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          pick() { if [ -n "$1" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
+          EFFECTIVE="$(pick "$EXISTING" "$BUILT")"
+          case "$EFFECTIVE" in
+            sha256:*) ;;
+            *) echo "ERROR: invalid candidate digest: ${EFFECTIVE}"; exit 1 ;;
+          esac
+          mkdir -p leaf-digests
+          echo "$EFFECTIVE" > "leaf-digests/${{ matrix.image }}.digest"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-candidate-${{ env.SHA }}
-          path: release-candidate-${{ env.SHA }}.json
+          name: candidate-digest-${{ matrix.image }}-${{ github.sha }}
+          path: leaf-digests/${{ matrix.image }}.digest
+          retention-days: 1
+
+  candidate:
+    needs: [candidate-base, candidate-leaf]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: candidate-${{ github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: candidate-digest-*-${{ github.sha }}
+          path: leaf-digests
+          merge-multiple: true
+
+      - name: Write candidate manifest
+        env:
+          BASE_DIGEST: ${{ needs.candidate-base.outputs.base_digest }}
+          SHA: ${{ needs.candidate-base.outputs.sha }}
+          VERSION: ${{ needs.candidate-base.outputs.version }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys, re
+
+          sha = os.environ["SHA"]
+          version = os.environ["VERSION"]
+          run_id = int(os.environ["RUN_ID"])
+          base_digest = os.environ["BASE_DIGEST"].strip()
+
+          leaf_names = ("claude-code", "codex", "opencode", "token-monitor")
+          digests = {"base": base_digest}
+          for name in leaf_names:
+              path = os.path.join("leaf-digests", f"{name}.digest")
+              if not os.path.isfile(path):
+                  sys.exit(f"Missing digest file for {name}: {path}")
+              with open(path, encoding="utf-8") as f:
+                  digests[name] = f.read().strip()
+
+          for name, digest in digests.items():
+              if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  sys.exit(f"Invalid candidate digest for {name}: {digest}")
+
+          manifest = {
+              "schema": "cage.release-candidate",
+              "schema_version": 3,
+              "source_sha": sha,
+              "version": version,
+              "ci_run_id": run_id,
+              "platforms": ["linux/amd64", "linux/arm64"],
+              "images": {
+                  name: {
+                      "name": f"ghcr.io/sindycate/cage/{name}",
+                      "tag": f"candidate-{sha}",
+                      "digest": digests[name]
+                  }
+                  for name in ("base", "claude-code", "codex", "opencode", "token-monitor")
+              }
+          }
+
+          manifest_path = f"release-candidate-{sha}.json"
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+
+          # Verify parsing
+          with open(manifest_path, encoding="utf-8") as f:
+              json.load(f)
+          print(f"Wrote verified manifest to {manifest_path}")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ needs.candidate-base.outputs.sha }}
+          path: release-candidate-${{ needs.candidate-base.outputs.sha }}.json
           if-no-files-found: error
           retention-days: 30
