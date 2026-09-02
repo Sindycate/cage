@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -824,6 +825,39 @@ class PreflightTests(PublishReleaseTestCase):
             patch.object(pr.sys, "version", "3.12.0 (test)"),
         ):
             self.assertEqual(orch._check_python(), "3.12.0")
+
+    def test_local_gates_run_in_parallel_with_stable_report_order(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        entered = threading.Barrier(5)
+
+        def gate(name):
+            def run():
+                entered.wait(timeout=3)
+                return name
+
+            return run
+
+        checks = tuple(
+            (name, gate(name))
+            for name in (
+                "unit-tests",
+                "python-compile",
+                "shell-syntax",
+                "compose-config",
+                "reproducible-archive",
+            )
+        )
+        orch._record_checks_parallel(checks)
+
+        self.assertEqual(
+            [check.name for check in orch.preflight_checks],
+            [name for name, _ in checks],
+        )
+        self.assertEqual(
+            [check.detail for check in orch.preflight_checks],
+            [name for name, _ in checks],
+        )
 
     def test_baseline_preflight_passes_and_detects_local_ready(self):
         scenario = Scenario()  # ahead=1, clean, no tags, no release

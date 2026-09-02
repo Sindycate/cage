@@ -6,6 +6,26 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.3 — 2026-09-03
+
+### Faster maintainer release validation
+
+Who is affected: Cage maintainers. This release changes release-pipeline
+scheduling only; end-user runtime behavior, configuration, persistent state,
+container images, and migration commands are unchanged.
+
+The maintainer publisher overlaps independent local read-only gates and CI
+splits independent validation into separate jobs. After the shared candidate
+base is built, the four leaf images build in parallel. Candidate tags remain
+full-SHA, write-once references: an existing candidate must pass platform and
+exact-source attestation checks before reuse, and the final manifest performs
+its own GHCR verification before upload. The release workflow still promotes
+those exact digests rather than rebuilding them.
+
+Rollback: no data or configuration rollback is required. If a maintainer needs
+to revert the scheduling change, use the previous Cage release pipeline; the
+product images and user state have no dependency on this release tooling.
+
 ## 0.36.2 — 2026-09-02
 
 ### Restore an explicitly approved Token Monitor provider stream

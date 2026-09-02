@@ -16,6 +16,7 @@ Standard library only; requires Python 3.12+.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import fcntl
 import hashlib
@@ -888,15 +889,41 @@ class Orchestrator:
 
     # -- preflight ----------------------------------------------------------
 
-    def _record_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
+    def _evaluate_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
         start = self.clock.now()
         try:
             detail = fn() or ""
             result = CheckResult(name, "passed", self.clock.now() - start, str(detail))
         except ReleaseError as exc:
             result = CheckResult(name, "failed", self.clock.now() - start, str(exc))
+        return result
+
+    def _record_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
+        result = self._evaluate_check(name, fn)
         self.preflight_checks.append(result)
         return result
+
+    def _record_checks_parallel(
+        self, checks: Sequence[tuple[str, Callable[[], object]]]
+    ) -> None:
+        """Run independent checks concurrently, retaining deterministic output order.
+
+        The checks are read-only gates: they invoke subprocesses, inspect the
+        worktree, or build temporary verification artifacts. Results are joined
+        in declaration order and appended only by the calling thread, so the
+        release journal and failure report remain stable while local wall time
+        tracks the slowest gate instead of the sum of all gates.
+        """
+        if not checks:
+            return
+        with ThreadPoolExecutor(
+            max_workers=len(checks), thread_name_prefix="release-check"
+        ) as executor:
+            futures = [
+                executor.submit(self._evaluate_check, name, fn)
+                for name, fn in checks
+            ]
+            self.preflight_checks.extend(future.result() for future in futures)
 
     def _abort_if_failed(self) -> None:
         failed = [c for c in self.preflight_checks if c.status == "failed"]
@@ -921,11 +948,15 @@ class Orchestrator:
         self._record_check("docker-usable", self._check_docker)
         self._record_check("github-release", self._check_existing_release)
         if self.options.run_local_gates:
-            self._record_check("unit-tests", self._gate_unit_tests)
-            self._record_check("python-compile", self._gate_compileall)
-            self._record_check("shell-syntax", self._gate_shell_syntax)
-            self._record_check("compose-config", self._gate_compose)
-            self._record_check("reproducible-archive", self._gate_archive)
+            self._record_checks_parallel(
+                (
+                    ("unit-tests", self._gate_unit_tests),
+                    ("python-compile", self._gate_compileall),
+                    ("shell-syntax", self._gate_shell_syntax),
+                    ("compose-config", self._gate_compose),
+                    ("reproducible-archive", self._gate_archive),
+                )
+            )
         self._abort_if_failed()
 
     def _check_python(self) -> str:
