@@ -664,7 +664,13 @@ class CageConfigTests(unittest.TestCase):
                 patch.object(cage_config.subprocess, "call", return_value=0) as call,
             ):
                 result = cage_config.command_mcp_login(
-                    SimpleNamespace(config=config, preset=None, name="dash0", repo="/tmp/project-a")
+                    SimpleNamespace(
+                        config=config,
+                        preset=None,
+                        auth=None,
+                        name="dash0",
+                        repo="/tmp/project-a",
+                    )
                 )
 
         self.assertEqual(result, 0)
@@ -676,6 +682,159 @@ class CageConfigTests(unittest.TestCase):
         self.assertIn('mcp_servers.dash0.oauth.client_id="client-public-id"', args[0])
         self.assertEqual(args[0][-5:], ["mcp", "login", "--scopes", "read:metrics", "dash0"])
         self.assertEqual(kwargs["env"]["CODEX_HOME"], str(codex_dir))
+
+    def test_mcp_login_with_auth_uses_shared_codex_directory_without_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            codex_dir = tmp_path / ".codex-shared"
+            other_codex_dir = tmp_path / ".codex-other"
+            config = tmp_path / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "[auth.codex-shared]",
+                        'tool = "codex"',
+                        f'host_codex_dir = "{codex_dir}"',
+                        "[auth.codex-other]",
+                        'tool = "codex"',
+                        f'host_codex_dir = "{other_codex_dir}"',
+                        "[mcp_packs.workspace]",
+                        "servers = [",
+                        '  { name = "workspace", type = "http", url = "https://workspace.example.test/mcp", auth = "oauth", oauth_resource = "https://workspace.example.test", oauth_client_id = "client-public-id", oauth_scopes = ["email", "profile"] },',
+                        "]",
+                        "[presets.codex-primary]",
+                        'tool = "codex"',
+                        'auth = "codex-shared"',
+                        'mcp_packs = ["workspace"]',
+                        "[presets.codex-api]",
+                        'tool = "codex"',
+                        'auth = "codex-shared"',
+                        'mcp_packs = ["workspace"]',
+                        "[mcp_packs.workspace-other]",
+                        "servers = [",
+                        '  { name = "workspace", type = "http", url = "https://other.example.test/mcp", auth = "oauth" },',
+                        "]",
+                        "[presets.codex-other]",
+                        'tool = "codex"',
+                        'auth = "codex-other"',
+                        'mcp_packs = ["workspace-other"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(cage_config.subprocess, "call", return_value=0) as call:
+                result = cage_config.command_mcp_login(
+                    SimpleNamespace(
+                        config=config,
+                        preset=None,
+                        auth="codex-shared",
+                        name="workspace",
+                        repo=None,
+                    )
+                )
+
+        self.assertEqual(result, 0)
+        args, kwargs = call.call_args
+        self.assertIn(
+            'mcp_servers.workspace.url="https://workspace.example.test/mcp"',
+            args[0],
+        )
+        self.assertNotIn("https://other.example.test/mcp", args[0])
+        self.assertEqual(
+            args[0][-5:],
+            ["mcp", "login", "--scopes", "email,profile", "workspace"],
+        )
+        self.assertEqual(kwargs["env"]["CODEX_HOME"], str(codex_dir))
+
+    def test_mcp_login_with_auth_rejects_ambiguous_server_definitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "[auth.codex-shared]",
+                        'tool = "codex"',
+                        "[mcp_packs.google-one]",
+                        "servers = [",
+                        '  { name = "workspace", type = "http", url = "https://workspace-one.example.test/mcp", auth = "oauth" },',
+                        "]",
+                        "[mcp_packs.google-two]",
+                        "servers = [",
+                        '  { name = "workspace", type = "http", url = "https://workspace-two.example.test/mcp", auth = "oauth" },',
+                        "]",
+                        "[presets.codex-one]",
+                        'tool = "codex"',
+                        'auth = "codex-shared"',
+                        'mcp_packs = ["google-one"]',
+                        "[presets.codex-two]",
+                        'tool = "codex"',
+                        'auth = "codex-shared"',
+                        'mcp_packs = ["google-two"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(cage_config.ConfigError, "ambiguous.*--preset"):
+                cage_config.command_mcp_login(
+                    SimpleNamespace(
+                        config=config,
+                        preset=None,
+                        auth="codex-shared",
+                        name="workspace",
+                        repo=None,
+                    )
+                )
+
+    def test_mcp_login_with_auth_requires_explicit_codex_auth_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        "[auth.claude-work]",
+                        'tool = "claude"',
+                        "[auth.untyped]",
+                        'host_codex_dir = "~/.codex-untyped"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            for auth_name, message in (
+                ("missing", "auth not found"),
+                ("claude-work", 'must set tool = "codex"'),
+                ("untyped", 'must set tool = "codex"'),
+            ):
+                with self.subTest(auth=auth_name), self.assertRaisesRegex(
+                    cage_config.ConfigError, message
+                ):
+                    cage_config.command_mcp_login(
+                        SimpleNamespace(
+                            config=config,
+                            preset=None,
+                            auth=auth_name,
+                            name="workspace",
+                            repo=None,
+                        )
+                    )
+
+    def test_mcp_login_without_auth_still_requires_repository_path(self):
+        with self.assertRaisesRegex(cage_config.ConfigError, "requires a repository path"):
+            cage_config.command_mcp_login(
+                SimpleNamespace(
+                    config=Path("/missing/config.toml"),
+                    preset=None,
+                    auth=None,
+                    name="workspace",
+                    repo=None,
+                )
+            )
 
     def test_mcp_login_requires_selected_oauth_server(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,7 +856,13 @@ class CageConfigTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(cage_config.ConfigError, "not selected"):
                 cage_config.command_mcp_login(
-                    SimpleNamespace(config=config, preset=None, name="dash0", repo="/tmp/project-a")
+                    SimpleNamespace(
+                        config=config,
+                        preset=None,
+                        auth=None,
+                        name="dash0",
+                        repo="/tmp/project-a",
+                    )
                 )
 
     def test_replace_projects_section(self):

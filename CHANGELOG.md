@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.35.2 — 2026-09-02
+
+- add `cage mcp login|logout --auth AUTH NAME` for Codex OAuth MCPs, so one
+  explicitly named auth directory and its refresh-token lease can be renewed
+  without resolving an arbitrary project preset; Cage accepts the direct form
+  only when every Codex preset selecting that server under the auth agrees on
+  its URL, resource, client, and scopes, otherwise it fails closed and retains
+  the existing explicit-preset command;
+
 ## 0.35.1 — 2026-09-02
 
 - serialize Cage Codex sessions that select an OAuth MCP per resolved host

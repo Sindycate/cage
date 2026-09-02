@@ -483,11 +483,12 @@ cage --interactive ~/projects/myapp
 ```
 
 For Codex OAuth MCP servers such as Dash0, authenticate on the host once per
-Codex auth directory:
+Codex auth directory. `--auth` names that auth block directly, and the final
+argument is the MCP server's `name` from its central pack:
 
 ```bash
-cage mcp login dash0 ~/projects/myapp
-cage mcp logout dash0 ~/projects/myapp
+cage mcp login --auth codex-work dash0
+cage mcp logout --auth codex-work dash0
 ```
 
 The browser callback runs on the host, so no container port publishing is
@@ -495,6 +496,21 @@ needed. The central TOML remains the source of the MCP server definition. cage
 forces Codex's MCP OAuth credential store to file mode for these logins and
 for container launches; this is separate from `auth.json`, so auth blocks with
 `copy_auth = false` still skip the main Codex login cache.
+
+The auth block selects the `host_codex_dir` and its exclusive refresh-token
+lease; it is the boundary shared by every Codex project that uses that auth.
+Cage finds the matching server definitions among those Codex presets and
+proceeds only when their URL, OAuth resource, client, and scopes agree. If one
+auth is paired with different definitions of the same server, use the existing
+explicit form to choose the intended preset instead:
+
+```bash
+cage mcp login --preset NAME SERVER /path/to/repo
+cage mcp logout --preset NAME SERVER /path/to/repo
+```
+
+The preset form remains required for OpenCode OAuth flows. Do not add a
+repository path to the Codex `--auth` form.
 
 For Codex, cage synchronizes `.credentials.json` between the resolved host
 Codex directory and the per-repo Docker volume before launch and after exit.
@@ -508,15 +524,17 @@ use a distinct `host_codex_dir` with its own OAuth login. `cage mcp login` and
 
 If an OAuth provider has already rejected a refresh token, stop every Codex
 session that uses the affected `CODEX_HOME`, then log out and log in once with
-the same selected preset:
+the affected auth block:
 
 ```bash
-cage mcp logout --preset NAME SERVER /path/to/repo
-cage mcp login --preset NAME SERVER /path/to/repo
+cage mcp logout --auth AUTH SERVER
+cage mcp login --auth AUTH SERVER
 ```
 
 Do not copy `.credentials.json` between different auth directories as a
-workaround; each directory needs its own OAuth login.
+workaround; each directory needs its own OAuth login. If Cage reports an
+ambiguous definition, use the explicit preset form above after confirming the
+server's URL and scopes with `cage config explain --preset NAME /path/to/repo`.
 
 Codex runtime state remains owned by that per-repository volume. Cage imports
 supported static global configuration (`config.toml`, profile config files,

@@ -6,6 +6,58 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.35.2 — 2026-09-02
+
+### Authenticate a Codex OAuth MCP by auth directory
+
+Who is affected: Codex users who share one `auth` block and `host_codex_dir`
+across more than one preset or project, including users who previously had to
+choose an arbitrary repository just to renew one OAuth refresh token.
+
+Previous behavior: `cage mcp login NAME PATH` and `cage mcp logout NAME PATH`
+resolved a launch preset from `PATH` (or `--preset`). The resulting auth
+directory was correct only when that preset happened to be the one the user
+intended, even though the refresh-token store and its session lease belong to
+the auth directory rather than the repository.
+
+New behavior: Codex has an auth-scoped form that requires no repository path:
+
+```bash
+cage mcp logout --auth codex-shared workspace
+cage mcp login --auth codex-shared workspace
+```
+
+`--auth` must name an explicit `tool = "codex"` auth block. It selects that
+block's `host_codex_dir` and its exclusive OAuth lease; the final argument is
+the MCP server `name` from central configuration. The one login then applies
+to every Codex preset that uses the same auth directory and the same server
+definition. Cage compares the URL, OAuth resource, client, and scopes across
+those presets before it starts the provider flow. It never guesses when they
+differ.
+
+Migration and recovery:
+
+1. Stop every Codex process using the affected auth directory.
+2. Run the auth-scoped logout/login pair above, replacing both example names
+   with the intended auth block and MCP server name. Do not append a repository
+   path to this form.
+3. If Cage reports an ambiguous server definition, select the intended endpoint
+   explicitly with the existing command:
+
+   ```bash
+   cage mcp logout --preset NAME SERVER /path/to/repo
+   cage mcp login --preset NAME SERVER /path/to/repo
+   ```
+
+4. Continue using the preset-and-path form for OpenCode. It remains the
+   selected-container OAuth flow and is not changed by this Codex command.
+5. Do not copy `.credentials.json` between auth roots. Each distinct
+   `host_codex_dir` needs its own OAuth login and has its own lease.
+
+Rollback: install 0.35.1 or earlier and use the preset-and-path form. The
+auth-scoped command does not change configuration, repository files, or the
+credential format.
+
 ## 0.35.1 — 2026-09-02
 
 ### Serialize Codex MCP OAuth refresh-token use

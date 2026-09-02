@@ -3,6 +3,26 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-02 — Auth-scoped Codex MCP OAuth command prepared for v0.35.2
+
+Added `cage mcp login --auth AUTH NAME` and the matching logout form for a
+Codex OAuth MCP. The command now uses the named Codex auth block's
+`host_codex_dir` as the credential and exclusive refresh-token lease boundary,
+without selecting an arbitrary repository or launch preset. The final name is
+still the central MCP server definition.
+
+To preserve a fail-closed endpoint choice, Cage inspects the Codex presets
+that use the named auth block and permits the direct form only when every
+matching selected server has the same URL, OAuth resource, client, and scopes.
+Conflicting definitions require the existing `--preset NAME SERVER PATH` form.
+The preset route remains compatible, including the OpenCode container OAuth
+flow. No credentials, personal configuration, or runtime state were changed.
+
+Validation: focused config/launcher/OAuth/TUI/bootstrap coverage passes (134
+tests); the complete Python suite passes (600 tests, 14 skipped); real-Docker
+smoke passes (9 tests, 1 skipped); Python compilation, Bash/Node syntax,
+Compose rendering, complete-history Gitleaks, and `git diff --check` pass.
+
 ## 2026-09-02 — Codex OAuth refresh-token session lease prepared for v0.35.1
 
 The existing before/after `.credentials.json` reconciliation could preserve a

@@ -32,8 +32,10 @@ Commands:
   config edit               Edit config.toml in $EDITOR
   config explain PATH       Explain the resolved launch configuration
   config doctor PATH        Validate the resolved launch configuration
-  mcp login NAME PATH       Authenticate with a selected OAuth MCP server
-  mcp logout NAME PATH      Remove selected OAuth MCP authentication
+  mcp login --auth AUTH NAME  Authenticate a Codex OAuth MCP for one auth directory
+  mcp logout --auth AUTH NAME Remove Codex OAuth MCP authentication for one auth directory
+  mcp login NAME PATH         Authenticate with a selected OAuth MCP server
+  mcp logout NAME PATH        Remove selected OAuth MCP authentication
   desktop setup             Register Cage's managed SSH Include
   desktop start ...         Start or reuse a persistent Desktop target
   desktop restart ...       Restart a Desktop target
@@ -87,6 +89,7 @@ Examples:
   cage                         Open the TUI for the current directory
   cage setup
   cage config edit
+  cage mcp login --auth codex-work dash0
   cage mcp login dash0 ~/projects/myapp
   cage ~/projects/myapp
   cage --preset codex-company ~/projects/myapp

@@ -456,9 +456,14 @@ class CageLauncherTests(unittest.TestCase):
             env["HOME"] = str(home)
             env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
 
-            def mcp_auth(action):
+            def mcp_auth(action, *, auth_scoped=False):
+                command = [str(CAGE), "mcp", action]
+                if auth_scoped:
+                    command.extend(["--auth", "codex-dash0", "dash0"])
+                else:
+                    command.extend(["dash0", str(repo)])
                 return subprocess.run(
-                    [str(CAGE), "mcp", action, "dash0", str(repo)],
+                    command,
                     cwd=ROOT,
                     env=env,
                     text=True,
@@ -467,26 +472,32 @@ class CageLauncherTests(unittest.TestCase):
                 )
 
             with OAuthSessionLease.acquire(codex_home, create=True):
-                for action in ("login", "logout"):
-                    blocked = mcp_auth(action)
-                    self.assertNotEqual(blocked.returncode, 0)
-                    self.assertIn(
-                        f"cannot start Codex MCP OAuth {action}",
-                        blocked.stderr,
-                    )
-                    self.assertIn(
-                        "another Cage Codex session is already using OAuth credentials",
-                        blocked.stderr,
-                    )
-                    self.assertNotIn("fake codex", blocked.stdout)
+                for auth_scoped in (False, True):
+                    for action in ("login", "logout"):
+                        blocked = mcp_auth(action, auth_scoped=auth_scoped)
+                        self.assertNotEqual(blocked.returncode, 0)
+                        self.assertIn(
+                            f"cannot start Codex MCP OAuth {action}",
+                            blocked.stderr,
+                        )
+                        self.assertIn(
+                            "another Cage Codex session is already using OAuth credentials",
+                            blocked.stderr,
+                        )
+                        self.assertNotIn("fake codex", blocked.stdout)
 
-            result = mcp_auth("login")
+            result = mcp_auth("login", auth_scoped=True)
+            logout_result = mcp_auth("logout", auth_scoped=True)
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Codex auth: codex-dash0", result.stdout)
         self.assertIn(f"Codex dir: {codex_home}", result.stdout)
         self.assertIn(f"fake codex CODEX_HOME={codex_home}", result.stdout)
         self.assertIn('mcp_oauth_credentials_store="file"', result.stdout)
         self.assertIn("mcp login dash0", result.stdout)
+        self.assertEqual(logout_result.returncode, 0, logout_result.stderr)
+        self.assertIn("Codex auth: codex-dash0", logout_result.stdout)
+        self.assertIn("mcp logout dash0", logout_result.stdout)
 
 
 if __name__ == "__main__":

@@ -129,10 +129,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 #
 # OAuth HTTP MCP servers — e.g. Dash0 when API tokens are not available — are
 # also generated from central config. Codex authenticates on the host once per
-# Codex auth directory with `cage mcp login NAME PATH`; Claude authenticates
-# inside the cage session with `/mcp`. cage forces Codex's MCP OAuth credential
-# store to file mode for host login and container launch; this is separate from
-# auth.json, so copy_auth=false still skips only the main Codex login cache.
+# Codex auth directory with `cage mcp login --auth AUTH NAME` when the selected
+# server definition is unambiguous; the existing preset-and-path form remains
+# available for an explicit endpoint choice. Claude authenticates inside the
+# cage session with `/mcp`. cage forces Codex's MCP OAuth credential store to
+# file mode for host login and container launch; this is separate from auth.json,
+# so copy_auth=false still skips only the main Codex login cache.
 #   [mcp_packs.dash0]
 #   servers = [
 #     { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com", oauth_scopes = ["*"], oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
@@ -612,13 +614,16 @@ servers = [
   { name = "dash0", type = "http", url = "https://api.eu-central-1.aws.dash0.com/mcp", auth = "oauth", oauth_resource = "https://api.eu-central-1.aws.dash0.com", oauth_scopes = ["*"], oauth_client_id_env_var = "DASH0_OAUTH_CLIENT_ID" },
 ]
 ```
-For Codex, run `cage mcp login dash0 ~/path/to/repo` (or add `--preset NAME`) on
-the host. The login command resolves the same preset as launch, runs Codex's
-OAuth flow with the resolved host Codex directory as `CODEX_HOME`, and leaves
-normal cage launches to generate the MCP config from central TOML. cage sets
-Codex's documented `mcp_oauth_credentials_store` to `file` for both operations;
-this is separate from `auth.json`, so Codex auth blocks with `copy_auth = false`
-still skip only the main Codex login cache.
+For Codex, run `cage mcp login --auth AUTH dash0` on the host. `AUTH` selects
+the host Codex directory and refresh-token lease; `dash0` is the MCP server
+name. The command finds matching server definitions across Codex presets using
+that auth and fails closed when their URL, OAuth resource, client, or scopes
+differ. Use `cage mcp login --preset NAME dash0 ~/path/to/repo` to select an
+ambiguous endpoint explicitly. Normal cage launches still generate the MCP
+config from central TOML. cage sets Codex's documented
+`mcp_oauth_credentials_store` to `file` for both operations; this is separate
+from `auth.json`, so Codex auth blocks with `copy_auth = false` still skip only
+the main Codex login cache.
 The host launcher synchronizes Codex MCP OAuth `.credentials.json` between the
 host Codex directory and the per-repo Docker volume before launch and after
 exit, so providers with rotating refresh tokens do not leave stale copies. A
@@ -657,7 +662,7 @@ uses the URL and optional client ID; shared Codex fields such as
 - Central `mcp_packs` are the **authoritative allowlist** for every Cage session. Only MCP servers selected by the resolved preset may start; an absent or empty `mcp_packs` selection means zero active MCPs. Duplicate MCP server names across selected packs are invalid. For container and desktop targets, stdio MCP servers run on the host through the authenticated MCP bridge and HTTP MCP servers become tool-native container config. For host targets, both become process-local Codex config overrides; stdio commands execute directly as pinned host processes. A selected name already defined in a base/profile/project Codex layer fails closed
 - At launch, Cage inventories the inherited MCP servers in the **launching runtime** and disables every server the preset did not select with highest-precedence overrides, supplemented by direct profile/project layer parsing because `codex mcp list` does not enumerate every layer. Loaded servers receive `mcp_servers.<name>.enabled=false`. A direct-only definition that is not loaded yet (especially an untrusted project) receives a same-kind inert transport plus `enabled=false`; this avoids Codex's `invalid transport` failure and remains authoritative if trust is granted in the same process. `target = "host"` inventories the host Codex binary; container launches inventory inside the image (entrypoint, after configuration import); Desktop re-inventories inside the persistent container on every app-server connection so live project changes are still suppressed. Across all three Codex paths, caller arguments may not replace the inventoried profile (`-p`/`--profile`) or repository (`-C`/`--cd`), use `--enable`/`--disable`, select another app-server with `--remote`, ignore the inventoried user layer with `--ignore-user-config`, or set an unallowlisted `-c`/`--config` root; normal prompts and dedicated model/sandbox options remain available, and `--` ends the policy scan for positional/subcommand payload. Desktop selected-MCP authorization metadata is root-owned and non-replaceable by the remote Codex user. Unselected definitions may remain visible as disabled in `codex mcp list`; they never start. For Claude, the volume `mcpServers` is reconciled to the selected set only (host `~/.claude.json` MCP definitions are no longer merged) and a private read-only `.mcp.json` overlay — built from the bridges that actually started, empty under `--net off` — always suppresses repository MCP definitions. `config explain`, `config doctor`, and the TUI review state the policy and list selected servers; for host targets they also list suppressed servers, while container/Desktop disclose the authoritative suppressed set at launch. Cage fails closed when a trustworthy inventory cannot be obtained; there is no legacy inheritance escape hatch
 - Central `skill_packs` are composed per Codex or OpenCode preset. Each pack names a source agents registry (usually `~/.agents`) and a list of skill folder names under `source/skills/`. Duplicate skill names across selected packs are invalid, and selected skills must have `SKILL.md`. For container and Desktop targets, Cage mounts and copies only selected skills; when none are selected it falls back to copying `host_agents_dir`. OpenCode additionally freezes project-local skills and verifies its final disk-skill inventory. For host targets, selected packs require the default `~/.agents` source and are applied as a process-local Codex `skills.config` filter without host file mutation
-- OAuth HTTP MCP servers are supported for Codex, Claude, and OpenCode presets. `cage mcp login NAME PATH` and `cage mcp logout NAME PATH` dispatch by resolved tool: Codex remains a host-mediated wrapper so browser callbacks happen on the host, while OpenCode runs the selected-only operation inside the container and publishes only its image-contract callback ports on `127.0.0.1`. Claude OAuth login happens inside the cage session through `/mcp`. Cage forces `mcp_oauth_credentials_store = "file"` for Codex, synchronizes `.credentials.json`, and serializes selected OAuth sessions, login, and logout per host Codex directory so an older in-memory refresh token cannot race a rotated one. OpenCode synchronizes only selected entries in `mcp-auth.json`. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host tool configs unless intentionally debugging.
+- OAuth HTTP MCP servers are supported for Codex, Claude, and OpenCode presets. For Codex, `cage mcp login --auth AUTH NAME` and `cage mcp logout --auth AUTH NAME` address one explicit auth directory without a repository path; Cage requires every Codex preset that selects that server under the auth to agree on its URL, OAuth resource, client, and scopes. The existing `NAME PATH` plus optional `--preset` form dispatches by resolved tool and remains the explicit ambiguity choice plus the OpenCode route. Codex remains a host-mediated wrapper so browser callbacks happen on the host, while OpenCode runs the selected-only operation inside the container and publishes only its image-contract callback ports on `127.0.0.1`. Claude OAuth login happens inside the cage session through `/mcp`. Cage forces `mcp_oauth_credentials_store = "file"` for Codex, synchronizes `.credentials.json`, and serializes selected OAuth sessions, login, and logout per host Codex directory so an older in-memory refresh token cannot race a rotated one. OpenCode synchronizes only selected entries in `mcp-auth.json`. Central TOML remains the source of server definitions; do not permanently duplicate OAuth MCP entries in host tool configs unless intentionally debugging.
 - `config.toml` is mandatory for launches. Do not reintroduce `cage.conf`,
   legacy Cage profile files, folder mappings, or repo `.cage.conf`; native
   Codex profile files selected by `codex_profile` are a separate supported
