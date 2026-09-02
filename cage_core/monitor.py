@@ -3,7 +3,7 @@
 The monitor is deliberately outside the launch-plan contract.  Cage keeps the
 hub credential and all aggregation traffic on the host, while a short-lived
 collector container receives only the two Codex session subdirectories from a
-registered volume.
+registered volume or Cage-managed host source.
 """
 
 from __future__ import annotations
@@ -69,6 +69,11 @@ MAX_GENERATIONS = 4
 COLLECTOR_MEMORY = "1g"
 COLLECTOR_CPUS = "1.0"
 COLLECTOR_PIDS = "128"
+MAX_HOST_STATIC_BYTES = 4 * 1024 * 1024
+MAX_HOST_STATIC_FILES = 256
+MAX_HOST_STATIC_DEPTH = 16
+MAX_HOST_CREDENTIAL_BYTES = 4 * 1024 * 1024
+MAX_HOST_STATIC_MANIFEST_BYTES = 128 * 1024
 
 # Token Monitor's local hub receives the upstream agent's sync payload.  Keep
 # this top-level wire contract explicit so a future upstream collector cannot
@@ -120,13 +125,29 @@ SCHEDULER_STATE_FILE = "scheduler.json"
 UPLOAD_STATE_FILE = "upload-state.json"
 GENERATION_DIR = "generations"
 VOLUME_SNAPSHOT_FILE = "volume-snapshot.json"
+HOST_SOURCE_DIR = "host-sources"
+HOST_SOURCE_HOME = "codex-home"
+HOST_STATIC_SNAPSHOT_FILE = "static-snapshot.json"
 VOLUME_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 DEVICE_ID_PATTERN = re.compile(r"^cage-[a-z0-9_-]{1,120}$")
 LOGICAL_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 PROVIDER_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 GENERATION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CODEX_VOLUME_PREFIX = "codex-state-"
+HOST_SOURCE_PREFIX = "cage-host-source-"
 UNATTRIBUTED_PROVIDER = "unattributed"
+# Provider names originate in a local Codex session.  Do not turn an arbitrary
+# local endpoint/account label into a readable hub device or payload field.
+# These are the only deliberately public stream labels; every other value is
+# counted in the generic unattributed stream.
+PUBLIC_PROVIDER_IDS = frozenset(
+    {"openai-api", "openai-compatible", "zllm", UNATTRIBUTED_PROVIDER}
+)
+HOST_STATIC_PROFILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.config\.toml$")
+HOST_STATIC_FIXED_FILES = frozenset(
+    {"config.toml", "AGENTS.md", "AGENTS.override.md", "hooks.json"}
+)
+HOST_SOURCE_CREDENTIAL_FILES = frozenset({"auth.json", ".credentials.json"})
 
 
 class MonitorError(RuntimeError):
@@ -253,7 +274,7 @@ class VolumeRegistration:
             raise MonitorError("monitor registry repository is invalid")
         validate_display_name(value["display_name"])
         fingerprint = validate_fingerprint(value["fingerprint"])
-        if value["target"] not in {"container", "desktop"}:
+        if value["target"] not in {"container", "desktop", "host"}:
             raise MonitorError("monitor target is invalid")
         if value["status"] not in {"active", "retired", "disabled", "needs-adoption"}:
             raise MonitorError("monitor registration status is invalid")
@@ -295,6 +316,27 @@ class VolumeRegistration:
         value = self.public_dict()
         value["project_id"] = project_id_for(config_root, self.logical_id)
         return value
+
+
+@dataclass(frozen=True)
+class HostSourceSession:
+    """One prepared, Cage-managed native-host Codex source.
+
+    ``source_home`` is retained only in private process state.  It is never
+    placed in a collector environment, status payload, registry public view,
+    or hub upload.  The baseline hashes and source identity let the host target
+    decline stale auth or OAuth write-back instead of overwriting an
+    independently refreshed or replaced source.
+    """
+
+    record: VolumeRegistration
+    source_home: Path
+    codex_home: Path
+    source_identity: tuple[int, int]
+    auth_baseline: str
+    sync_auth: bool
+    credential_baseline: str
+    sync_oauth_credentials: bool
 
 
 def monitor_root(config_root: Path) -> Path:
@@ -890,14 +932,14 @@ def _provider_slug(value: object) -> str | None:
 def provider_device_id(config_root: Path, provider: str) -> str:
     """Return a readable device identity for one provider stream."""
 
-    provider_id = _provider_slug(provider)
+    provider_id = _public_provider_id(provider)
     if provider_id is None:
         raise MonitorError("invalid monitor provider identity")
     return f"cage-{provider_id}-{_platform_slug()}-{host_install_id(config_root)[:8]}"
 
 
 def provider_display_name(provider: str) -> str:
-    provider_id = _provider_slug(provider) or UNATTRIBUTED_PROVIDER
+    provider_id = _public_provider_id(provider) or UNATTRIBUTED_PROVIDER
     if provider_id == "openai-api":
         return "OpenAI API"
     if provider_id == UNATTRIBUTED_PROVIDER:
@@ -923,6 +965,811 @@ def project_id_for(config_root: Path, logical_id: str) -> str:
         hashlib.sha256,
     ).hexdigest()[:20]
     return f"cage-project-{digest}"
+
+
+def _public_provider_id(value: object) -> str | None:
+    """Return a provider name that is safe to make visible outside Cage.
+
+    A session may contain an arbitrary provider/account label.  Normalizing it
+    into a syntactically safe slug is not enough: that slug would still become
+    a readable hub device name.  Keep the public vocabulary deliberately
+    closed and place every other label in the unattributed stream.
+    """
+
+    provider = _provider_slug(value)
+    return provider if provider in PUBLIC_PROVIDER_IDS else None
+
+
+def _checked_host_source_directory(value: Path | str) -> tuple[Path, os.stat_result]:
+    """Resolve one user-owned host Codex directory without following its leaf.
+
+    A monitored host source is deliberately stricter than the ordinary native
+    target.  Cage copies only selected configuration into a private state
+    directory, so accepting a symlink, group-writable root, or raced leaf here
+    would make that private boundary ambiguous.
+    """
+
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        raw = Path(os.path.abspath(raw))
+    try:
+        raw_info = os.lstat(raw)
+        if stat.S_ISLNK(raw_info.st_mode):
+            raise MonitorError("host Codex source must not be a symlink")
+        resolved = raw.resolve(strict=True)
+        before = os.lstat(resolved)
+    except FileNotFoundError as exc:
+        raise MonitorError("host Codex source directory does not exist") from exc
+    except OSError as exc:
+        raise MonitorError("cannot inspect host Codex source directory") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise MonitorError("host Codex source must be a real directory")
+    if before.st_uid != os.getuid():
+        raise MonitorError("host Codex source must be owned by the current user")
+    if stat.S_IMODE(before.st_mode) & 0o022:
+        raise MonitorError("host Codex source must not be group or world writable")
+    try:
+        descriptor = os.open(
+            resolved,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise MonitorError("cannot safely open host Codex source directory") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(resolved)
+    finally:
+        os.close(descriptor)
+    if (
+        (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise MonitorError("host Codex source changed while it was opened")
+    return resolved, opened
+
+
+def _host_source_identity_from_checked(
+    config_root: Path,
+    source: Path,
+    info: os.stat_result,
+) -> tuple[str, dict[str, str]]:
+    """Build the opaque source identity from one already-checked directory."""
+
+    material = (
+        str(source).encode("utf-8")
+        + b"\0"
+        + str(info.st_dev).encode("ascii")
+        + b":"
+        + str(info.st_ino).encode("ascii")
+    )
+    logical_id = hmac.new(
+        bytes.fromhex(host_install_id(config_root)),
+        b"host-source\0" + material,
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    name = f"{HOST_SOURCE_PREFIX}{logical_id}"
+    fingerprint = validate_fingerprint(
+        {
+            # The legacy field names are retained for registry compatibility.
+            # Their values are opaque and never identify a local pathname.
+            "name": name,
+            "driver": "host",
+            "scope": "local",
+            "created_at": logical_id,
+            "label_identity": logical_id,
+        }
+    )
+    return logical_id, fingerprint
+
+
+def _host_source_identity(
+    config_root: Path,
+    source_home: Path | str,
+) -> tuple[Path, str, dict[str, str]]:
+    """Return a private, inode-bound identity for one host auth source."""
+
+    source, info = _checked_host_source_directory(source_home)
+    logical_id, fingerprint = _host_source_identity_from_checked(
+        config_root, source, info
+    )
+    return source, logical_id, fingerprint
+
+
+def host_source_logical_id(config_root: Path, source_home: Path | str) -> str:
+    """Return the opaque logical ID for an adopted native-host auth source."""
+
+    _source, logical_id, _fingerprint = _host_source_identity(config_root, source_home)
+    return logical_id
+
+
+def _host_source_repository(logical_id: str) -> str:
+    """Return the registry marker for a host source without retaining its path."""
+
+    validate_logical_id(logical_id)
+    return f"/__cage_managed_host_source__/{logical_id}"
+
+
+def _host_source_paths(
+    config_root: Path,
+    record: VolumeRegistration,
+) -> tuple[Path, Path, Path]:
+    if record.target != "host":
+        raise MonitorError("monitor registration is not a host source")
+    validate_logical_id(record.logical_id)
+    root = monitor_root(config_root) / HOST_SOURCE_DIR / project_id_for(
+        config_root, record.logical_id
+    )
+    home = root / HOST_SOURCE_HOME
+    return root, home, root / HOST_STATIC_SNAPSHOT_FILE
+
+
+def host_source_home(config_root: Path, record: VolumeRegistration) -> Path:
+    """Return the private managed CODEX_HOME for one adopted host source."""
+
+    _root, home, _manifest = _host_source_paths(config_root, record)
+    return home
+
+
+def _ensure_managed_host_home(config_root: Path, record: VolumeRegistration) -> Path:
+    root, home, _manifest = _host_source_paths(config_root, record)
+    _ensure_private_directory(root)
+    _ensure_private_directory(home)
+    for name in ("sessions", "archived_sessions"):
+        _ensure_private_directory(home / name)
+    return home
+
+
+def _read_host_regular(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int,
+    missing_ok: bool = True,
+) -> bytes | None:
+    """Read a source file through one no-follow descriptor and recheck it."""
+
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise MonitorError(f"{label} is missing")
+    except OSError as exc:
+        raise MonitorError(f"cannot inspect {label}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise MonitorError(f"{label} must be a regular non-symlink file")
+    if before.st_uid != os.getuid() or before.st_nlink != 1:
+        raise MonitorError(f"{label} must be a private user-owned file")
+    if before.st_size > maximum_bytes:
+        raise MonitorError(f"{label} exceeds its size limit")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise MonitorError(f"cannot safely open {label}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != os.getuid()
+        ):
+            raise MonitorError(f"{label} changed while it was opened")
+        chunks: list[bytes] = []
+        remaining = maximum_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining == 0:
+            raise MonitorError(f"{label} exceeds its size limit")
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_size != after.st_size
+            or opened.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise MonitorError(f"{label} changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _read_host_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    label: str,
+    maximum_bytes: int,
+) -> bytes | None:
+    """Read one allowed source credential through its verified directory FD.
+
+    This is deliberately separate from ``_read_host_regular``: post-session
+    compare-and-swap needs to read the source name relative to the same opened
+    directory that will receive ``os.replace``.  That prevents a renamed
+    source root from redirecting the write-back to a replacement directory.
+    """
+
+    if name not in HOST_SOURCE_CREDENTIAL_FILES:
+        raise MonitorError("unsafe host Codex credential name")
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MonitorError(f"cannot inspect {label}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise MonitorError(f"{label} must be a regular non-symlink file")
+    if before.st_uid != os.getuid() or before.st_nlink != 1:
+        raise MonitorError(f"{label} must be a private user-owned file")
+    if before.st_size > maximum_bytes:
+        raise MonitorError(f"{label} exceeds its size limit")
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise MonitorError(f"cannot safely open {label}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or opened.st_uid != os.getuid()
+        ):
+            raise MonitorError(f"{label} changed while it was opened")
+        chunks: list[bytes] = []
+        remaining = maximum_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining == 0:
+            raise MonitorError(f"{label} exceeds its size limit")
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+            or opened.st_size != after.st_size
+            or opened.st_mtime_ns != after.st_mtime_ns
+            or opened.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise MonitorError(f"{label} changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _write_private_bytes(path: Path, value: bytes) -> None:
+    """Atomically write a single private regular file below Cage state."""
+
+    _ensure_private_directory(path.parent)
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise MonitorError("cannot inspect managed host state") from exc
+    if existing is not None and (
+        stat.S_ISLNK(existing.st_mode)
+        or not stat.S_ISREG(existing.st_mode)
+        or existing.st_nlink != 1
+        or existing.st_uid != os.getuid()
+    ):
+        raise MonitorError("unsafe managed host state file")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _reject_unsafe_path(path, max_bytes=max(len(value), 1) + 1)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise MonitorError("cannot write managed host state") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _remove_private_regular(path: Path, *, maximum_bytes: int) -> None:
+    try:
+        _reject_unsafe_path(path, max_bytes=maximum_bytes)
+    except FileNotFoundError:
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise MonitorError("cannot remove managed host state") from exc
+
+
+def _static_file_name(name: str) -> bool:
+    return name in HOST_STATIC_FIXED_FILES or bool(
+        HOST_STATIC_PROFILE_PATTERN.fullmatch(name)
+    )
+
+
+def _read_host_rules(source: Path) -> dict[str, bytes]:
+    """Copy a bounded, symlink-free rules tree without exposing its names."""
+
+    root = source / "rules"
+    try:
+        root_info = os.lstat(root)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise MonitorError("cannot inspect host Codex rules") from exc
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise MonitorError("host Codex rules must be a real directory")
+    if root_info.st_uid != os.getuid():
+        raise MonitorError("host Codex rules must be owned by the current user")
+
+    files: dict[str, bytes] = {}
+    total = 0
+
+    def visit(directory: Path, relative: Path, depth: int) -> None:
+        nonlocal total
+        if depth > MAX_HOST_STATIC_DEPTH:
+            raise MonitorError("host Codex rules are nested too deeply")
+        try:
+            info = os.lstat(directory)
+        except OSError as exc:
+            raise MonitorError("host Codex rules changed while being read") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise MonitorError("host Codex rules contain an unsafe directory")
+        if info.st_uid != os.getuid():
+            raise MonitorError("host Codex rules contain a foreign-owned directory")
+        try:
+            names = sorted(entry.name for entry in os.scandir(directory))
+        except OSError as exc:
+            raise MonitorError("cannot read host Codex rules") from exc
+        for name in names:
+            if not name or name in {".", ".."} or any(c in name for c in "\0\r\n"):
+                raise MonitorError("host Codex rules contain an unsafe name")
+            child = directory / name
+            child_relative = relative / name
+            try:
+                child_info = os.lstat(child)
+            except OSError as exc:
+                raise MonitorError("host Codex rules changed while being read") from exc
+            if stat.S_ISDIR(child_info.st_mode):
+                if stat.S_ISLNK(child_info.st_mode):
+                    raise MonitorError("host Codex rules contain a symlink")
+                visit(child, child_relative, depth + 1)
+                continue
+            if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISREG(child_info.st_mode):
+                raise MonitorError("host Codex rules contain an unsafe file")
+            if len(files) >= MAX_HOST_STATIC_FILES:
+                raise MonitorError("host Codex rules contain too many files")
+            remaining = MAX_HOST_STATIC_BYTES - total
+            if remaining <= 0:
+                raise MonitorError("host Codex static configuration is too large")
+            data = _read_host_regular(
+                child,
+                label="host Codex rule",
+                maximum_bytes=remaining,
+                missing_ok=False,
+            )
+            assert data is not None
+            total += len(data)
+            files[str(child_relative)] = data
+
+    visit(root, Path(), 0)
+    return files
+
+
+def _read_host_static_source(source: Path) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    files: dict[str, bytes] = {}
+    total = 0
+    try:
+        names = sorted(entry.name for entry in os.scandir(source))
+    except OSError as exc:
+        raise MonitorError("cannot read host Codex source directory") from exc
+    for name in names:
+        if not _static_file_name(name):
+            continue
+        if len(files) >= MAX_HOST_STATIC_FILES:
+            raise MonitorError("host Codex static configuration contains too many files")
+        data = _read_host_regular(
+            source / name,
+            label="host Codex static configuration",
+            maximum_bytes=MAX_HOST_STATIC_BYTES - total,
+        )
+        if data is None:
+            continue
+        total += len(data)
+        if total > MAX_HOST_STATIC_BYTES:
+            raise MonitorError("host Codex static configuration is too large")
+        files[name] = data
+    rules = _read_host_rules(source)
+    if total + sum(len(item) for item in rules.values()) > MAX_HOST_STATIC_BYTES:
+        raise MonitorError("host Codex static configuration is too large")
+    return files, rules
+
+
+def _static_digest(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(files[name]).digest())
+    return digest.hexdigest()
+
+
+def _load_host_static_snapshot(path: Path, logical_id: str) -> tuple[dict[str, str], str] | None:
+    value = _read_json(path, max_bytes=MAX_HOST_STATIC_MANIFEST_BYTES)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "version", "logical_id", "files", "rules_digest"
+    }:
+        raise MonitorError("host Codex static snapshot has an invalid shape")
+    if value["version"] != 1 or value["logical_id"] != logical_id:
+        raise MonitorError("host Codex static snapshot identity is invalid")
+    raw_files = value["files"]
+    if not isinstance(raw_files, dict) or any(
+        not isinstance(name, str)
+        or not _static_file_name(name)
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        for name, digest in raw_files.items()
+    ):
+        raise MonitorError("host Codex static snapshot files are invalid")
+    rules_digest = value["rules_digest"]
+    if not isinstance(rules_digest, str) or (
+        rules_digest and not re.fullmatch(r"[0-9a-f]{64}", rules_digest)
+    ):
+        raise MonitorError("host Codex static snapshot rules are invalid")
+    return dict(raw_files), rules_digest
+
+
+def _replace_managed_rules(home: Path, files: dict[str, bytes]) -> None:
+    destination = home / "rules"
+    try:
+        existing = os.lstat(destination)
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise MonitorError("cannot inspect managed Codex rules") from exc
+    if existing is not None:
+        if (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISDIR(existing.st_mode)
+            or existing.st_uid != os.getuid()
+        ):
+            raise MonitorError("unsafe managed Codex rules directory")
+        _remove_owned_directory(destination, description="managed Codex rules")
+    if not files:
+        return
+    stage = Path(tempfile.mkdtemp(prefix=".rules.", dir=home))
+    try:
+        _ensure_private_directory(stage)
+        staged_rules = stage / "rules"
+        _ensure_private_directory(staged_rules)
+        for relative, data in files.items():
+            parts = Path(relative).parts
+            if not parts or any(part in {"", ".", ".."} for part in parts):
+                raise MonitorError("host Codex rules contain an unsafe destination")
+            target = staged_rules.joinpath(*parts)
+            _ensure_private_directory(target.parent)
+            _write_private_bytes(target, data)
+        os.replace(staged_rules, destination)
+        stage.rmdir()
+    except OSError as exc:
+        raise MonitorError("cannot install managed Codex rules") from exc
+    finally:
+        try:
+            if stage.exists():
+                _remove_owned_directory(stage, description="managed Codex rules staging")
+        except MonitorError:
+            pass
+
+
+def _synchronize_host_static_source(
+    config_root: Path,
+    record: VolumeRegistration,
+    source: Path,
+    home: Path,
+) -> None:
+    files, rules = _read_host_static_source(source)
+    _root, _home, manifest_path = _host_source_paths(config_root, record)
+    previous = _load_host_static_snapshot(manifest_path, record.logical_id)
+    old_files, _old_rules = previous if previous is not None else ({}, "")
+    current_files = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+    for name in sorted(set(old_files).difference(current_files)):
+        _remove_private_regular(home / name, maximum_bytes=MAX_HOST_STATIC_BYTES)
+    # The managed home is a session boundary, not a second user configuration
+    # authority.  Copy the approved source configuration on every launch so
+    # the pre-launch MCP inventory and the configuration Codex receives cannot
+    # diverge after a prior process changed its private home.
+    for name, data in files.items():
+        _write_private_bytes(home / name, data)
+    rules_digest = _static_digest(rules) if rules else ""
+    _replace_managed_rules(home, rules)
+    _write_json(
+        manifest_path,
+        {
+            "version": 1,
+            "logical_id": record.logical_id,
+            "files": current_files,
+            "rules_digest": rules_digest,
+        },
+    )
+
+
+def _synchronize_host_file(
+    source: Path,
+    home: Path,
+    name: str,
+    *,
+    enabled: bool,
+) -> tuple[str, bool]:
+    destination = home / name
+    if not enabled:
+        _remove_private_regular(destination, maximum_bytes=MAX_HOST_CREDENTIAL_BYTES)
+        return "", False
+    data = _read_host_regular(
+        source / name,
+        label="host Codex credential",
+        maximum_bytes=MAX_HOST_CREDENTIAL_BYTES,
+    )
+    if data is None:
+        _remove_private_regular(destination, maximum_bytes=MAX_HOST_CREDENTIAL_BYTES)
+        return "", True
+    _write_private_bytes(destination, data)
+    return hashlib.sha256(data).hexdigest(), True
+
+
+def _write_source_private_bytes(
+    source: Path,
+    name: str,
+    value: bytes,
+    *,
+    expected_hash: str,
+    expected_source_identity: tuple[int, int],
+) -> None:
+    """Write one changed credential back only after a source-wins recheck.
+
+    The caller has already compared the source to its session baseline.  Read
+    it again through the destination directory descriptor immediately before
+    replacement: a direct host Codex process or a second tool can otherwise
+    change the source in the narrow interval between that first comparison and
+    ``os.replace``.  A directory identity check also prevents a source-root
+    replacement from receiving a stale managed credential.
+    """
+
+    if name not in HOST_SOURCE_CREDENTIAL_FILES:
+        raise MonitorError("unsafe host Codex credential name")
+    if (
+        not isinstance(value, bytes)
+        or not isinstance(expected_hash, str)
+        or (expected_hash and not re.fullmatch(r"[0-9a-f]{64}", expected_hash))
+        or not isinstance(expected_source_identity, tuple)
+        or len(expected_source_identity) != 2
+        or any(type(item) is not int or item < 0 for item in expected_source_identity)
+    ):
+        raise MonitorError("host Codex credential write-back state is invalid")
+    verified, before = _checked_host_source_directory(source)
+    if (before.st_dev, before.st_ino) != expected_source_identity:
+        raise MonitorError("host Codex source changed; source was preserved")
+    try:
+        directory_fd = os.open(
+            verified,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise MonitorError("cannot safely open host Codex credential directory") from exc
+    temporary = f".{name.lstrip('.')}.cage-{secrets.token_hex(16)}"
+    descriptor = -1
+    try:
+        opened = os.fstat(directory_fd)
+        if (opened.st_dev, opened.st_ino) != expected_source_identity:
+            raise MonitorError("host Codex source changed before credential write-back")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Keep this recheck immediately adjacent to the replacement.  If the
+        # path now names another directory, the descriptor still identifies
+        # the original one and we leave the new source untouched.
+        current_source = os.lstat(verified)
+        if (
+            stat.S_ISLNK(current_source.st_mode)
+            or not stat.S_ISDIR(current_source.st_mode)
+            or (current_source.st_dev, current_source.st_ino)
+            != expected_source_identity
+        ):
+            raise MonitorError("host Codex source changed; source was preserved")
+        current = _read_host_regular_at(
+            directory_fd,
+            name,
+            label="host Codex credential",
+            maximum_bytes=MAX_HOST_CREDENTIAL_BYTES,
+        )
+        current_hash = hashlib.sha256(current).hexdigest() if current is not None else ""
+        if not hmac.compare_digest(current_hash, expected_hash):
+            raise MonitorError(
+                "host Codex credentials changed outside this Cage session; source was preserved"
+            )
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise MonitorError("cannot write back host Codex credentials") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(directory_fd)
+
+
+def prepare_host_source(
+    config_root: Path,
+    record: VolumeRegistration,
+    source_home: Path | str,
+    *,
+    copy_auth: bool,
+    copy_oauth_credentials: bool,
+) -> HostSourceSession:
+    """Refresh allowed input and return the isolated home for one Cage launch."""
+
+    if type(copy_auth) is not bool or type(copy_oauth_credentials) is not bool:
+        raise MonitorError("host Codex source copy policy is invalid")
+    source, source_info = _checked_host_source_directory(source_home)
+    logical_id, fingerprint = _host_source_identity_from_checked(
+        config_root, source, source_info
+    )
+    if (
+        record.target != "host"
+        or record.logical_id != logical_id
+        or record.repository != _host_source_repository(logical_id)
+        or record.fingerprint != fingerprint
+    ):
+        raise MonitorError("host Codex source changed; explicit monitor adoption is required")
+    home = _ensure_managed_host_home(config_root, record)
+    _synchronize_host_static_source(config_root, record, source, home)
+    auth_baseline, sync_auth = _synchronize_host_file(
+        source,
+        home,
+        "auth.json",
+        enabled=copy_auth,
+    )
+    baseline, enabled = _synchronize_host_file(
+        source,
+        home,
+        ".credentials.json",
+        enabled=copy_oauth_credentials,
+    )
+    checked_source, checked_info = _checked_host_source_directory(source)
+    source_identity = (source_info.st_dev, source_info.st_ino)
+    if (
+        checked_source != source
+        or (checked_info.st_dev, checked_info.st_ino) != source_identity
+    ):
+        raise MonitorError("host Codex source changed during session preparation")
+    return HostSourceSession(
+        record=record,
+        source_home=source,
+        codex_home=home,
+        source_identity=source_identity,
+        auth_baseline=auth_baseline,
+        sync_auth=sync_auth,
+        credential_baseline=baseline,
+        sync_oauth_credentials=enabled,
+    )
+
+
+def _finish_host_credential(
+    session: HostSourceSession,
+    *,
+    name: str,
+    baseline: str,
+    enabled: bool,
+    label: str,
+) -> None:
+    """Preserve one changed credential unless the independent source won."""
+
+    if not enabled:
+        return
+    source = _read_host_regular(
+        session.source_home / name,
+        label=f"host Codex {label}",
+        maximum_bytes=MAX_HOST_CREDENTIAL_BYTES,
+    )
+    managed = _read_host_regular(
+        session.codex_home / name,
+        label=f"managed Codex {label}",
+        maximum_bytes=MAX_HOST_CREDENTIAL_BYTES,
+    )
+    source_hash = hashlib.sha256(source).hexdigest() if source is not None else ""
+    managed_hash = hashlib.sha256(managed).hexdigest() if managed is not None else ""
+    if not hmac.compare_digest(source_hash, baseline):
+        raise MonitorError(
+            f"host Codex {label} changed outside this Cage session; source was preserved"
+        )
+    if hmac.compare_digest(managed_hash, baseline):
+        return
+    if managed is None:
+        raise MonitorError(f"managed Codex {label} disappeared; source was preserved")
+    _write_source_private_bytes(
+        session.source_home,
+        name,
+        managed,
+        expected_hash=baseline,
+        expected_source_identity=session.source_identity,
+    )
+
+
+def finish_host_source(session: HostSourceSession) -> None:
+    """Conditionally preserve changed host auth and selected OAuth credentials.
+
+    A source changed outside this Cage session wins.  We never use a managed
+    copy to overwrite it, and a disappeared managed credential never deletes
+    the source credential automatically.  Handle the two independent stores
+    separately so a conflict in one cannot discard a valid rotation in the
+    other.
+    """
+
+    if not isinstance(session, HostSourceSession):
+        return
+    failures: list[str] = []
+    for name, baseline, enabled, label in (
+        ("auth.json", session.auth_baseline, session.sync_auth, "auth state"),
+        (
+            ".credentials.json",
+            session.credential_baseline,
+            session.sync_oauth_credentials,
+            "OAuth credentials",
+        ),
+    ):
+        try:
+            _finish_host_credential(
+                session,
+                name=name,
+                baseline=baseline,
+                enabled=enabled,
+                label=label,
+            )
+        except MonitorError as exc:
+            failures.append(str(exc))
+    if failures:
+        raise MonitorError("; ".join(failures))
 
 
 def _registry_path(root: Path) -> Path:
@@ -1256,6 +2103,180 @@ def register_volume(
         return record
 
 
+def register_host_source(
+    config_root: Path,
+    source_home: Path | str,
+    *,
+    copy_auth: bool,
+    allow_replacement: bool = False,
+) -> VolumeRegistration:
+    """Adopt one auth-root-bound private host session store.
+
+    The existing source ``CODEX_HOME`` is never scanned.  Instead this creates
+    a separate private home below Cage monitor state, seeds only allowlisted
+    static configuration, and later points Cage host launches at that home.
+    Direct ``codex`` commands continue using the original source untouched.
+    """
+
+    if type(copy_auth) is not bool:
+        raise MonitorError("host Codex source copy policy is invalid")
+    source, logical_id, fingerprint = _host_source_identity(config_root, source_home)
+    volume_name = fingerprint["name"]
+    repository_marker = _host_source_repository(logical_id)
+    with HostSourceLease.acquire(config_root, logical_id):
+        with _registry_write_lock(config_root):
+            registrations = load_registry(config_root)
+            existing = next(
+                (item for item in registrations if item.logical_id == logical_id),
+                None,
+            )
+            if existing is not None:
+                if (
+                    existing.target != "host"
+                    or existing.repository != repository_marker
+                    or existing.volume_name != volume_name
+                    or existing.fingerprint != fingerprint
+                ):
+                    if not allow_replacement:
+                        raise MonitorError(
+                            "host Codex source changed; explicit monitor adoption is required"
+                        )
+                    record = replace(
+                        existing,
+                        volume_name=volume_name,
+                        target="host",
+                        repository=repository_marker,
+                        display_name="Cage: Managed Host Sessions",
+                        fingerprint=fingerprint,
+                        status="active",
+                        last_error="",
+                    )
+                elif existing.status in {"disabled", "retired", "needs-adoption"}:
+                    if not allow_replacement:
+                        raise MonitorError(
+                            "host Codex source is inactive; run cage monitor add --auth explicitly"
+                        )
+                    record = replace(existing, status="active", last_error="")
+                else:
+                    record = existing
+            else:
+                record = VolumeRegistration(
+                    logical_id=logical_id,
+                    device_id=device_id_for(config_root, logical_id),
+                    volume_name=volume_name,
+                    target="host",
+                    repository=repository_marker,
+                    display_name="Cage: Managed Host Sessions",
+                    fingerprint=fingerprint,
+                    registered_at=_now(),
+                )
+
+        # Do not persist an active registration until its managed home has a
+        # complete, private static snapshot.  A failed copy leaves direct host
+        # execution untouched and cannot turn an existing shared home into a
+        # collector source.
+        home = _ensure_managed_host_home(config_root, record)
+        _synchronize_host_static_source(config_root, record, source, home)
+        _synchronize_host_file(source, home, "auth.json", enabled=copy_auth)
+        _synchronize_host_file(source, home, ".credentials.json", enabled=False)
+
+        with _registry_write_lock(config_root):
+            registrations = load_registry(config_root)
+            current = next(
+                (item for item in registrations if item.logical_id == logical_id),
+                None,
+            )
+            if current is not None and current != existing:
+                raise MonitorError("host Codex source registration changed during adoption")
+            if current is None:
+                save_registry(config_root, [*registrations, record])
+            elif current != record:
+                save_registry(
+                    config_root,
+                    [record if item.logical_id == logical_id else item for item in registrations],
+                )
+        return record
+
+
+def registered_host_source(
+    config_root: Path,
+    source_home: Path | str,
+) -> VolumeRegistration | None:
+    """Find an exact active host source without creating monitor state.
+
+    This lookup intentionally treats an absent, replaced, or unsafe source as
+    unadopted.  Ordinary host mode then retains its historical direct behavior
+    instead of ever falling back to scanning the shared source directory.
+    """
+
+    root = monitor_root(config_root)
+    try:
+        root_info = os.lstat(root)
+        registry_info = os.lstat(root / REGISTRY_FILE)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MonitorError("cannot inspect Token Monitor host source state") from exc
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_ISLNK(registry_info.st_mode)
+        or not stat.S_ISREG(registry_info.st_mode)
+    ):
+        raise MonitorError("unsafe Token Monitor host source state")
+    try:
+        _source, logical_id, fingerprint = _host_source_identity(config_root, source_home)
+    except MonitorError:
+        return None
+    for record in load_registry(config_root):
+        if (
+            record.logical_id == logical_id
+            and record.target == "host"
+            and record.repository == _host_source_repository(logical_id)
+            and record.fingerprint == fingerprint
+            and record.status == "active"
+        ):
+            return record
+    return None
+
+
+def disable_host_source(
+    config_root: Path,
+    source_home: Path | str,
+) -> VolumeRegistration:
+    """Stop routing one adopted auth source through its managed session home.
+
+    This is intentionally a local, non-destructive opt-out.  It leaves the
+    private managed sessions available for a later explicit re-adoption and
+    does not delete a shared provider device on the hub.  A subsequent normal
+    host launch therefore returns to the original ``CODEX_HOME`` immediately.
+    """
+
+    _source, logical_id, fingerprint = _host_source_identity(config_root, source_home)
+    repository_marker = _host_source_repository(logical_id)
+    with HostSourceLease.acquire(config_root, logical_id):
+        with _registry_write_lock(config_root):
+            registrations = load_registry(config_root)
+            record = next(
+                (item for item in registrations if item.logical_id == logical_id),
+                None,
+            )
+            if (
+                record is None
+                or record.target != "host"
+                or record.repository != repository_marker
+                or record.fingerprint != fingerprint
+            ):
+                raise MonitorError("host Codex source is not an adopted monitor source")
+            updated = replace(record, status="disabled", last_error="")
+            save_registry(
+                config_root,
+                [updated if item.logical_id == logical_id else item for item in registrations],
+            )
+            return updated
+
+
 def update_registration(config_root: Path, record: VolumeRegistration) -> None:
     validate_logical_id(record.logical_id)
     validate_device_id(record.device_id)
@@ -1267,6 +2288,22 @@ def update_registration(config_root: Path, record: VolumeRegistration) -> None:
         if not any(item.logical_id == record.logical_id for item in registrations):
             raise MonitorError("monitor registration disappeared")
         save_registry(config_root, [record if item.logical_id == record.logical_id else item for item in registrations])
+
+
+def _scan_error_for_records(
+    records: list[VolumeRegistration], error: str,
+) -> str:
+    """Return a status-safe scan failure without managed host paths.
+
+    Docker and filesystem diagnostics can echo a bind source.  That source is
+    intentionally private, and scan errors are retained in several status
+    files as well as printed by the optional background worker.  A full
+    aggregate with any managed host source therefore uses one generic error.
+    """
+
+    if any(record.target == "host" for record in records):
+        return "Token Monitor scan failed for managed host sessions"
+    return " ".join(error.split())[:512]
 
 
 def _record_scan_error(config_root: Path, record: VolumeRegistration, error: str) -> None:
@@ -1284,7 +2321,7 @@ def _record_scan_error(config_root: Path, record: VolumeRegistration, error: str
             updated = replace(
                 current,
                 last_scan_at=_now(),
-                last_error=" ".join(error.split())[:512],
+                last_error=_scan_error_for_records([current], error),
             )
             save_registry(
                 config_root,
@@ -1341,6 +2378,76 @@ def _wait_for_volume_lock(
         if remaining <= 0:
             raise MonitorError("monitor volume scan is already running")
         time.sleep(min(0.05, remaining))
+
+
+@dataclass
+class HostSourceLease:
+    """Serialize live Cage host sessions that share one managed CODEX_HOME.
+
+    The session store is auth-scoped rather than repository-scoped.  Holding a
+    small private lease for the complete process prevents a second host launch
+    from replacing its static/auth snapshot while Codex is using it.  Separate
+    source directories retain independent concurrency.
+    """
+
+    descriptor: int | None
+
+    @classmethod
+    def acquire(cls, config_root: Path, logical_id: str) -> "HostSourceLease":
+        validate_logical_id(logical_id)
+        directory = monitor_root(config_root) / LOCK_DIR
+        _ensure_private_directory(directory)
+        path = directory / f"host-source-{logical_id}.lock"
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise MonitorError("cannot open host Codex session lease") from exc
+        try:
+            opened = os.fstat(descriptor)
+            current = os.lstat(path)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_uid != os.getuid()
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise MonitorError("host Codex session lease is unsafe")
+            os.fchmod(descriptor, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise MonitorError(
+                    "another Cage host session is already using this monitored auth source"
+                ) from exc
+            lease = cls(descriptor)
+            descriptor = -1
+            return lease
+        except OSError as exc:
+            raise MonitorError("cannot acquire host Codex session lease") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def close(self) -> int:
+        if self.descriptor is None:
+            return 0
+        descriptor = self.descriptor
+        self.descriptor = None
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            raise MonitorError("cannot release host Codex session lease") from exc
+        return 0
+
+    def __enter__(self) -> "HostSourceLease":
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
 
 
 def _project_state_path(config_root: Path, record: VolumeRegistration) -> Path:
@@ -1752,6 +2859,44 @@ def _subpath_available(docker: str, image: str, volume_name: str, subpath: str) 
     raise MonitorError(f"Codex volume subpath probe failed: {message or 'unknown error'}")
 
 
+def _host_session_mounts(
+    config_root: Path,
+    record: VolumeRegistration,
+) -> list[str]:
+    """Return exact read-only bind mounts for a managed host source.
+
+    The collector never receives the managed ``CODEX_HOME`` root: only its
+    two session directories are bind-mounted.  Credentials, static config,
+    history, logs, and every other runtime entry remain unavailable inside the
+    network-disabled collector.
+    """
+
+    home = _ensure_managed_host_home(config_root, record)
+    mounts: list[str] = []
+    for subpath, destination in (
+        ("sessions", "/scan/codex/sessions"),
+        ("archived_sessions", "/scan/codex/archived_sessions"),
+    ):
+        source = home / subpath
+        try:
+            info = os.lstat(source)
+        except OSError as exc:
+            raise MonitorError("cannot inspect managed host session directory") from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+        ):
+            raise MonitorError("unsafe managed host session directory")
+        mounts.extend(
+            (
+                "--mount",
+                f"type=bind,src={source},dst={destination},readonly",
+            )
+        )
+    return mounts
+
+
 def _validate_summary(payload: object, expected_device_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise MonitorError("collector output must be a JSON object")
@@ -1797,6 +2942,78 @@ def _validate_summary(payload: object, expected_device_id: str) -> dict[str, Any
     ):
         raise MonitorError("collector output contains a source path")
     return payload
+
+
+def _outbound_session_id(config_root: Path, client: str, session_id: str) -> str:
+    """Return a stable, hub-safe pseudonym for one local session identity.
+
+    Session IDs are useful to the hub only as stable keys for a later
+    replacement upload.  They do not need to remain raw UUIDs (or expose
+    whatever future Codex versions choose as an ID).  The full per-install
+    identity is private mode-0600 state; only a short public prefix appears in
+    Cage device IDs, so this HMAC cannot be reversed by a hub or a repository.
+    """
+
+    if client != "codex" or not isinstance(session_id, str) or not session_id:
+        raise MonitorError("collector session identity is invalid")
+    digest = hmac.new(
+        bytes.fromhex(host_install_id(config_root)),
+        b"session\0" + client.encode("utf-8") + b"\0" + session_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    # 128 bits keeps collision risk negligible while retaining a compact,
+    # ordinary identifier accepted by the upstream session map.
+    return "cage-session-" + digest[:32]
+
+
+def _outbound_payload(config_root: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy a local aggregate and remove raw session IDs before upload.
+
+    Local snapshots and prepared generations intentionally retain raw IDs so
+    deduplication can compare real session copies across Cage sources.  This
+    final boundary is the only route to ``/api/ingest`` and substitutes stable
+    HMAC pseudonyms in both the session object and its map key.
+    """
+
+    try:
+        copied = json.loads(
+            json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise MonitorError("Token Monitor upload payload is invalid") from exc
+    if not isinstance(copied, dict):
+        raise MonitorError("Token Monitor upload payload is invalid")
+    device_id = copied.get("deviceId")
+    if not isinstance(device_id, str):
+        raise MonitorError("Token Monitor upload payload is invalid")
+    _validate_summary(copied, device_id)
+    for period_name in ("today", "month", "allTime"):
+        period = copied.get(period_name)
+        if not isinstance(period, dict):
+            continue
+        sessions = period.get("sessions")
+        if sessions is None:
+            continue
+        if not isinstance(sessions, dict):
+            raise MonitorError("Token Monitor upload session map is invalid")
+        pseudonymous: dict[str, dict[str, Any]] = {}
+        for key, session in sessions.items():
+            if not isinstance(key, str) or not isinstance(session, dict):
+                raise MonitorError("Token Monitor upload session map is invalid")
+            client = session.get("client")
+            session_id = session.get("sessionId")
+            if not isinstance(client, str) or not isinstance(session_id, str):
+                raise MonitorError("collector session identity is invalid")
+            if key != f"{client}:{session_id}":
+                raise MonitorError("collector session key is invalid")
+            pseudonym = _outbound_session_id(config_root, client, session_id)
+            pseudonymous_key = f"{client}:{pseudonym}"
+            if pseudonymous_key in pseudonymous:
+                raise MonitorError("collector session pseudonym collision")
+            session["sessionId"] = pseudonym
+            pseudonymous[pseudonymous_key] = session
+        period["sessions"] = pseudonymous
+    return _validate_summary(copied, device_id)
 
 
 def _archive_sessions_for_payload(state_path: Path, payload: dict[str, Any]) -> None:
@@ -1882,9 +3099,12 @@ def _run_collector(
     output_path.touch(mode=0o600)
     os.chmod(output_path, 0o600)
     mounts = []
-    for subpath, destination in (("sessions", "/scan/codex/sessions"), ("archived_sessions", "/scan/codex/archived_sessions")):
-        if _subpath_available(docker, image, record.volume_name, subpath):
-            mounts.extend(("--mount", f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={subpath},volume-nocopy"))
+    if record.target == "host":
+        mounts.extend(_host_session_mounts(config_root, record))
+    else:
+        for subpath, destination in (("sessions", "/scan/codex/sessions"), ("archived_sessions", "/scan/codex/archived_sessions")):
+            if _subpath_available(docker, image, record.volume_name, subpath):
+                mounts.extend(("--mount", f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={subpath},volume-nocopy"))
     mounts.extend(("--mount", f"type=bind,src={state_path},dst=/state", "--mount", f"type=bind,src={output_path},dst=/out/summary.json"))
     command = [
         docker,
@@ -1954,6 +3174,14 @@ def _run_collector(
         except OSError as exc:
             raise MonitorError(f"Token Monitor collector could not start: {exc}") from exc
         if result.returncode != 0:
+            if record.target == "host":
+                # Docker can echo a bind source in its diagnostic.  The
+                # managed source lives below a user-specific configuration
+                # directory, and this error later appears in monitor status.
+                # Keep the status surface path-free.
+                raise MonitorError(
+                    "Token Monitor collector failed for managed host sessions"
+                )
             detail = result.stderr.strip().replace("\n", " ")[:300]
             raise MonitorError(f"Token Monitor collector failed: {detail or 'unknown error'}")
         if output_path.stat().st_size > MAX_OUTPUT_BYTES:
@@ -2013,8 +3241,16 @@ def verify_connection(connection: MonitorConnection) -> None:
         raise MonitorError("Token Monitor hub authentication check failed")
 
 
-def upload_summary(connection: MonitorConnection, payload: dict[str, Any]) -> None:
-    body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+def upload_summary(
+    connection: MonitorConnection,
+    payload: dict[str, Any],
+    *,
+    config_root: Path,
+) -> None:
+    """Send one aggregate only after pseudonymizing session identities."""
+
+    outbound = _outbound_payload(config_root, payload)
+    body = json.dumps(outbound, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
     if len(body) > MAX_OUTPUT_BYTES:
         raise MonitorError("Token Monitor ingest payload is too large")
     _hub_request(connection, "POST", "/api/ingest", body)
@@ -2060,7 +3296,7 @@ def _validate_upload_state(value: object) -> dict[str, Any]:
     if not isinstance(provider_ids, dict) or len(provider_ids) > 1024:
         raise MonitorError("monitor upload provider identities are invalid")
     for raw_provider, device_id in provider_ids.items():
-        provider = _provider_slug(raw_provider)
+        provider = _public_provider_id(raw_provider)
         if provider != raw_provider:
             raise MonitorError("monitor upload provider identity is invalid")
         validate_device_id(device_id)
@@ -2112,7 +3348,7 @@ def _validate_exact_provider_ids(
     if not isinstance(provider_ids, dict):
         raise MonitorError("monitor provider device map is invalid")
     for raw_provider, device_id in provider_ids.items():
-        provider = _provider_slug(raw_provider)
+        provider = _public_provider_id(raw_provider)
         if provider != raw_provider:
             raise MonitorError("monitor provider identity is invalid")
         expected = provider_device_id(config_root, provider)
@@ -2131,7 +3367,7 @@ def _write_generation_payloads(
     _ensure_private_directory(directory)
     provider_ids: dict[str, str] = {}
     for provider, (payload, _status) in sorted(payloads.items()):
-        normalized = _provider_slug(provider)
+        normalized = _public_provider_id(provider)
         if normalized != provider:
             raise MonitorError("monitor provider identity is invalid")
         device_id = provider_device_id(config_root, provider)
@@ -2174,7 +3410,7 @@ def _load_generation_payloads(
         raise MonitorError("monitor upload generation has too many providers")
     provider_ids: dict[str, str] = {}
     for raw_provider, entry in provider_entries.items():
-        provider = _provider_slug(raw_provider)
+        provider = _public_provider_id(raw_provider)
         if provider != raw_provider or not isinstance(entry, dict) or set(entry) != {"device_id"}:
             raise MonitorError("monitor upload generation provider is invalid")
         device_id = entry["device_id"]
@@ -2244,7 +3480,7 @@ def _repair_pending_upload(
             # untouched; the complete next generation below will repair it.
             payload = previous.get(provider)
             if payload is not None:
-                upload_summary(connection, payload)
+                upload_summary(connection, payload, config_root=config_root)
     except Exception as exc:
         pending["state"] = "repair_pending"
         pending["last_error"] = " ".join(str(exc).split())[:512]
@@ -2270,7 +3506,7 @@ def _rollback_attempted_uploads(
             # next complete generation explicitly rewrites it.
             reversible = False
             continue
-        upload_summary(connection, payload)
+        upload_summary(connection, payload, config_root=config_root)
     return reversible
 
 
@@ -2352,7 +3588,11 @@ def _publish_provider_payloads(
                     state="pending",
                 ),
             )
-            upload_summary(connection, payloads[provider][0])
+            upload_summary(
+                connection,
+                payloads[provider][0],
+                config_root=config_root,
+            )
     except Exception as exc:
         failure = exc
         save_upload_state(
@@ -2452,16 +3692,18 @@ def session_provider(session: dict[str, Any]) -> str:
     """Return the only trustworthy provider for a session.
 
     Token Monitor records provider totals in a session-level map.  One key is
-    safe to attribute.  Missing, unsafe, or multi-provider maps stay in the
-    explicit unattributed stream so Cage never guesses or duplicates tokens.
+    safe to attribute only when it is one of Cage's deliberately public stream
+    labels.  Missing, private/unknown, unsafe, or multi-provider maps stay in
+    the explicit unattributed stream so Cage never guesses, duplicates tokens,
+    or publishes a local provider label.
     """
 
     providers = _session_map(session, "providers")
-    normalized = {_provider_slug(key) for key in providers}
+    normalized = {_public_provider_id(key) for key in providers}
     if len(normalized) == 1 and None not in normalized:
         provider = next(iter(normalized))
-        if provider:
-            return provider
+        assert provider is not None
+        return provider
     return UNATTRIBUTED_PROVIDER
 
 
@@ -2489,9 +3731,8 @@ def _select_session(candidates: list[tuple[VolumeRegistration, dict[str, Any]]])
         if candidate_dominates and not winner_dominates:
             winner = candidate
         elif not candidate_dominates and not winner_dominates:
-            session_id = str(candidate.get("sessionId") or "unknown")[:128]
             raise MonitorError(
-                f"conflicting copies of Codex session {session_id}; hub snapshot was preserved"
+                "conflicting copies of one Codex session; hub snapshot was preserved"
             )
     return dict(winner)
 
@@ -2646,6 +3887,10 @@ def _period_from_sessions(
         unclassified = max(0, total - min(total, cache_read + cache_write + output))
         models = _session_map(session, "models")
         model_costs = _session_map(session, "modelCosts")
+        # Keep the raw provider map only in private collector snapshots, where
+        # it is needed to compare session copies.  The aggregate can expose
+        # only the stream to which this already-selected session was assigned.
+        session["providers"] = {provider: total}
         period["totalTokens"] += total
         period["costUsd"] += cost
         period["cacheReadTokens"] += cache_read
@@ -3243,6 +4488,14 @@ def _checked_volume_fingerprint(
     docker: str,
     record: VolumeRegistration,
 ) -> dict[str, str]:
+    if record.target == "host":
+        # A host registration's fingerprint identifies the source auth root
+        # for automatic launch matching.  Collection reads the immutable
+        # Cage-managed session home instead, so an intentional source-root
+        # replacement cannot make a later full reconciliation inspect the new
+        # shared home or discard already-isolated Cage session history.
+        _ensure_managed_host_home(config_root, record)
+        return record.fingerprint
     current = volume_fingerprint(docker, record.volume_name)
     if current != record.fingerprint:
         _mark_volume_fingerprint_conflict(config_root, record)
@@ -3416,7 +4669,7 @@ def _add_previous_provider_payloads(
     )
     current_providers = set(split_payloads)
     for raw_provider, previous_provider_status in previous_providers.items():
-        provider = _provider_slug(raw_provider)
+        provider = _public_provider_id(raw_provider)
         if provider is None or provider in current_providers:
             continue
         if not isinstance(previous_provider_status, dict):
@@ -3570,19 +4823,25 @@ def preview_provider_split(
         with try_aggregate_lock(config_root) as acquired:
             if not acquired:
                 raise MonitorError("monitor aggregate scan already running")
-            summaries = _collect_registered_summaries(
-                config_root,
-                docker,
-                install_root,
-                active,
-                version=version,
-                storage_policy=storage_policy,
-                allow_build=allow_build,
-                uid=uid,
-                gid=gid,
-            )
-            _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
-            return manifest
+            try:
+                summaries = _collect_registered_summaries(
+                    config_root,
+                    docker,
+                    install_root,
+                    active,
+                    version=version,
+                    storage_policy=storage_policy,
+                    allow_build=allow_build,
+                    uid=uid,
+                    gid=gid,
+                )
+                _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
+                return manifest
+            except Exception as exc:
+                safe_error = _scan_error_for_records(active, str(exc))
+                if safe_error != str(exc):
+                    raise MonitorError(safe_error) from exc
+                raise
 
 
 def scan_all_registrations(
@@ -3671,13 +4930,16 @@ def scan_all_registrations(
                 )
                 return updated_all, status
             except Exception as exc:
+                safe_error = _scan_error_for_records(active, str(exc))
                 try:
-                    _fail_full_reconciliation(config_root, scheduler, str(exc))
+                    _fail_full_reconciliation(config_root, scheduler, safe_error)
                 except MonitorError:
                     pass
                 for record in active:
-                    _record_scan_error(config_root, record, str(exc))
+                    _record_scan_error(config_root, record, safe_error)
                 if isinstance(exc, MonitorError):
+                    if safe_error != str(exc):
+                        raise MonitorError(safe_error) from exc
                     raise
                 raise MonitorError("Token Monitor full reconciliation failed") from exc
 
@@ -3728,8 +4990,11 @@ def scan_registration(
             force=force,
         )
     except Exception as exc:
-        _record_scan_error(config_root, current, str(exc))
+        safe_error = _scan_error_for_records([current], str(exc))
+        _record_scan_error(config_root, current, safe_error)
         if isinstance(exc, MonitorError):
+            if safe_error != str(exc):
+                raise MonitorError(safe_error) from exc
             raise
         raise MonitorError("Token Monitor current-volume refresh failed") from exc
 
@@ -3843,14 +5108,17 @@ def scan_registration(
                     )
                 return result, status
             except Exception as exc:
+                safe_error = _scan_error_for_records(active, str(exc))
                 if full_due:
                     try:
-                        _fail_full_reconciliation(config_root, scheduler, str(exc))
+                        _fail_full_reconciliation(config_root, scheduler, safe_error)
                     except MonitorError:
                         pass
                 for item in active:
-                    _record_scan_error(config_root, item, str(exc))
+                    _record_scan_error(config_root, item, safe_error)
                 if isinstance(exc, MonitorError):
+                    if safe_error != str(exc):
+                        raise MonitorError(safe_error) from exc
                     raise
                 raise MonitorError("Token Monitor aggregate update failed") from exc
 
@@ -4021,6 +5289,8 @@ __all__ = [
     "COLLECTOR_SOURCE_URL",
     "COLLECTOR_SOURCE_VERSION",
     "FULL_RECONCILIATION_INTERVAL_SECONDS",
+    "HostSourceLease",
+    "HostSourceSession",
     "MonitorConnection",
     "MonitorError",
     "VolumeRegistration",
@@ -4033,6 +5303,7 @@ __all__ = [
     "device_id_for",
     "disable_all_registrations",
     "disable_connection",
+    "disable_host_source",
     "ensure_codex_volume",
     "ensure_codex_volume_labels",
     "ensure_collector_image",
@@ -4047,6 +5318,8 @@ __all__ = [
     "logical_target_id",
     "monitor_root",
     "host_device_id",
+    "host_source_home",
+    "host_source_logical_id",
     "provider_device_id",
     "provider_device_ids",
     "provider_display_name",
@@ -4054,6 +5327,8 @@ __all__ = [
     "preview_provider_split",
     "normalize_hub_url",
     "register_volume",
+    "register_host_source",
+    "registered_host_source",
     "register_recovered_volume",
     "discover_codex_volumes",
     "recovered_repository",
@@ -4072,6 +5347,8 @@ __all__ = [
     "set_model_pricing",
     "session_provider",
     "try_coordinator_lease",
+    "prepare_host_source",
+    "finish_host_source",
     "migrate_legacy_devices",
     "project_id_for",
     "update_registration",

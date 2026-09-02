@@ -1683,7 +1683,8 @@ class CursesView:
             f"Cage provider devices: {len(device_ids)}",
             *[f"  {item}" for item in device_ids if isinstance(item, str)],
             f"Registered Cage projects: {len(projects)}",
-            "Only Codex Container/Desktop state is collected; host Codex, Claude, and OpenCode are excluded.",
+            "Container/Desktop Codex state is collected automatically; host Codex requires explicit CLI auth adoption.",
+            "Direct host Codex, Claude, and OpenCode state is never collected.",
             "Cage deduplicates shared sessions before it replaces provider summaries.",
         ]
         aggregate = status.get("aggregate")

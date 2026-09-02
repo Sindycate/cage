@@ -134,12 +134,14 @@ when a terminal provides an interactive stdin but restricts direct access to
 
 ### Optional Token Monitor aggregation
 
-Cage can optionally aggregate accumulated Codex token totals from its
-persistent Docker volumes into a Token Monitor hub. This is a host-owned
-integration: host-native Codex, Claude, and OpenCode state are not scanned.
-The short-lived collector uses the pinned `token-monitor` image, has no
-network, mounts only `sessions/` and `archived_sessions/` from the selected
-Codex volume read-only, and leaves authenticated hub requests to the host.
+Cage can optionally aggregate accumulated Codex token totals into a Token
+Monitor hub. This is a host-owned integration: Container/Desktop state comes
+from persistent Docker volumes, while normal host-native Codex, Claude, and
+OpenCode state is not scanned. Host-native Codex can be enrolled separately
+and explicitly, as described below. The short-lived collector uses the pinned
+`token-monitor` image, has no network, mounts only `sessions/` and
+`archived_sessions/` from a selected Codex volume or private managed host store
+read-only, and leaves authenticated hub requests to the host.
 The host-side uploader is outside Docker's network namespace, so an enabled
 monitor can still upload while a Codex launch uses `--net off`; run
 `cage monitor disconnect` to pause those uploads. Plain HTTP hub URLs are
@@ -155,8 +157,44 @@ printf '%s\n' "$TOKEN_MONITOR_HUB_SECRET" | \
   cage monitor connect https://token-monitor.example --secret-stdin
 ```
 
+Container and Desktop Codex targets enroll automatically after connecting.
+Host mode is intentionally different: explicitly adopt the Codex auth source
+whose Cage-launched sessions you want to count:
+
+```bash
+cage monitor add --auth codex-personal
+```
+
+This is scoped to that auth block's resolved, canonical `host_codex_dir`, not
+to a repository or preset. Two auth aliases that resolve to the same directory
+share one managed store; separate directories are independent. The source must
+be a real, current-user-owned directory rather than a symlink and must not be
+group- or world-writable. Adoption creates
+a private Cage-managed `CODEX_HOME`, copies only supported static Codex
+configuration and the selected auth material, and never imports or scans the
+original source's `sessions/` or `archived_sessions/`. The registry uses opaque
+identities rather than retaining the source path. Matching Cage host launches
+use the managed store, so their history is intentionally separate from sessions
+started with direct `codex` or with Cage before adoption. Those direct sessions
+remain untracked.
+
+When `copy_auth` is enabled, a changed managed `auth.json` is written back only
+if the original source has not changed; selected MCP OAuth credentials use the
+same source-wins check. A managed credential deletion never deletes the source
+copy automatically.
+
+Only one Cage host session can use an adopted auth source at a time, preventing
+two processes from writing the same managed store; use separate auth directories
+for concurrent host sessions. Docker is needed only to collect the managed
+sessions after adoption. If it is unavailable, Cage warns and still starts
+Codex. `cage monitor disconnect` pauses hub uploads but preserves the managed
+store and its routing. To restore direct `CODEX_HOME` routing without deleting
+that local history, run `cage monitor disable --auth codex-personal`. Re-run
+`monitor add` to re-enable it.
+
 After connecting, Codex Container and Desktop launches register their logical
-target automatically. The host refreshes only that launch's exact volume
+target automatically. An adopted host source is likewise refreshed only for
+matching Cage host launches. The host refreshes only that launch's exact source
 immediately, at the configured interval (five minutes by default), and once at
 exit. A cross-process coordinator serializes aggregate publication; trusted,
 sanitized per-volume snapshots supply inactive or unchanged peers. One
@@ -173,15 +211,16 @@ the logical ID, project ID, volume fingerprint, cached history, and totals do
 not change. Replacements or ambiguous registrations remain fail-closed and
 require explicit `monitor add` adoption.
 
-Each provider used by a Cage installation has one readable hub device, for
-example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each registered Codex
-volume remains a project under the provider device that owns its sessions. A
-repository can therefore appear under more than one provider device. Cage
-deduplicates sessions before partitioning them, then replaces each provider
-device summary. It never uploads both the old unsplit aggregate and its
-provider partitions. If a provider no longer has any retained session, Cage
-uploads a zero summary for that exact, previously-known provider device so the
-hub cannot keep a stale total.
+Each recognized public provider used by a Cage installation has one readable
+hub device, for example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each
+registered Codex source remains a project under the provider device that owns
+its sessions. A repository can therefore appear under more than one provider
+device. Cage deduplicates sessions before partitioning them, then replaces each
+provider device summary. It never uploads both the old unsplit aggregate and
+its provider partitions. Unknown or private provider labels are counted as
+`Unattributed` rather than becoming a hub device name. If a provider no longer
+has any retained session, Cage uploads a zero summary for that exact,
+previously-known provider device so the hub cannot keep a stale total.
 
 Token Monitor v0.49.0 exposes one-device ingest rather than a transaction. Cage
 therefore prepares a private local generation and keeps the last-good provider
@@ -195,9 +234,12 @@ authority until a complete generation succeeds.
 The aggregate is session-aware. Identical copies count once. If one copy is a
 strictly newer cumulative copy, Cage keeps it. Incompatible copies stop the
 upload and preserve the hub's last good snapshot. A session found in more than
-one volume is reported as `Cage: Unattributed`; Cage does not guess its project.
-Parallel sessions for one repository share one volume, so they still count
-once. A recreated volume is marked `needs-adoption` until explicitly accepted:
+one source is reported as `Cage: Unattributed`; Cage does not guess its project.
+Raw local session IDs remain only in private local snapshots used for that
+deduplication. Before any hub upload, Cage replaces each with a stable,
+per-install HMAC pseudonym. Parallel sessions for one repository share one
+volume, so they still count once. A recreated volume is marked
+`needs-adoption` until explicitly accepted:
 
 ```bash
 cage monitor status
@@ -206,6 +248,8 @@ cage monitor split --dry-run     # preview the provider split, no hub change
 cage monitor split --dry-run --json
 cage monitor add ~/projects/myapp --preset codex-company --container
 cage monitor add --volume codex-state-old  # adopt an exact recovered volume
+cage monitor add --auth codex-personal     # opt in Cage-only host sessions
+cage monitor disable --auth codex-personal # return host launches to source state
 cage monitor sync                 # forced full reconciliation and repair
 cage monitor sync ~/projects/myapp # resolve, then forced full reconciliation
 cage monitor pricing status
@@ -218,18 +262,20 @@ cage monitor forget DEVICE_ID --yes
 ```
 
 `monitor add` is the explicit replacement-volume adoption path and can also
-register a dormant target. `monitor discover` is read-only and lists all
-existing `codex-state-*` volumes, including older or unmapped volumes. Adopt an
-unmapped volume with its exact name using `monitor add --volume`; Cage labels it
-as recovered without inventing a host path. Cost is uploaded only when the
-session has sufficient per-model component evidence or an authoritative cost
-record. For a multi-model session, exact model-level costs can be used when
-the schema supplies them; otherwise token counts remain visible but that
-session stays unpriced. Cage never allocates input/output/cache tokens or one
-model's rate across another model. `monitor status` shows the total and each
-provider stream, price coverage, upload-repair state, and
-provider-qualified model IDs that still need a price. Custom rates are USD per
-million tokens, stored privately, and never sent to the hub.
+register a dormant target. `monitor add --auth` is the separate explicit
+host-source opt-in; `monitor disable --auth` reverses only its local routing and
+does not delete its managed history. `monitor discover` is read-only and lists
+all existing `codex-state-*` volumes, including older or unmapped volumes.
+Adopt an unmapped volume with its exact name using `monitor add --volume`; Cage
+labels it as recovered without inventing a host path. Cost is uploaded only when
+the session has sufficient per-model component evidence or an authoritative cost
+record. For a multi-model session, exact model-level costs can be used when the
+schema supplies them; otherwise token counts remain visible but that session
+stays unpriced. Cage never allocates input/output/cache tokens or one model's
+rate across another model. `monitor status` shows the total and each provider
+stream, price coverage, upload-repair state, and provider-qualified model IDs
+that still need a price. Custom rates are USD per million tokens, stored
+privately, and never sent to the hub.
 
 Versions before 0.34.0 used one `cage-local-…` device for the aggregate. After
 upgrade, normal sync pauses if that unsplit device is still on the hub. Run
@@ -757,6 +803,9 @@ Host execution is **Codex-only** and provides:
 - **No Docker isolation** — Codex runs with full host-user file access.
 - **No Cage network restriction** — `--net gate`/`off` are rejected. Yolo's
   implicit gate default is also rejected; use `--net open` explicitly.
+- The resolved `CODEX_HOME` directly, unless that auth source was explicitly
+  adopted with `cage monitor add --auth AUTH`; adoption redirects only matching
+  Cage host sessions into a separate private managed store.
 - Process-scoped Git identity (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`), SSH key
   (`GIT_SSH_COMMAND`), and GitHub token (`GH_TOKEN`) — no host config mutation.
 - Native Codex profile selection with `codex_profile`.

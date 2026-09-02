@@ -748,6 +748,65 @@ class MonitorStateTests(unittest.TestCase):
                      (records[1], self._summary(device_id, {"codex:shared": right}))],
                 )
 
+    def test_upload_pseudonymizes_session_ids_at_the_hub_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            device_id = monitor.host_device_id(root)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                device_id,
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            raw_session_id = "source-session-123"
+            payload, _status = monitor.aggregate_summaries(
+                root,
+                [
+                    (
+                        record,
+                        self._summary(
+                            device_id,
+                            {
+                                f"codex:{raw_session_id}": self._session(
+                                    raw_session_id,
+                                    total=100,
+                                    input_tokens=80,
+                                    output_tokens=20,
+                                )
+                            },
+                        ),
+                    )
+                ],
+            )
+            calls = []
+
+            def hub_request(_connection, method, path, body=None):
+                calls.append((method, path, body))
+                return {}
+
+            connection = monitor.MonitorConnection("https://hub.example", "secret")
+            with patch.object(monitor, "_hub_request", side_effect=hub_request):
+                monitor.upload_summary(connection, payload, config_root=root)
+                monitor.upload_summary(connection, payload, config_root=root)
+
+            self.assertEqual(
+                payload["today"]["sessions"][f"codex:{raw_session_id}"]["sessionId"],
+                raw_session_id,
+            )
+            first = json.loads(calls[0][2])
+            second = json.loads(calls[1][2])
+            rendered = json.dumps(first, sort_keys=True)
+            self.assertNotIn(raw_session_id, rendered)
+            pseudonym = monitor._outbound_session_id(root, "codex", raw_session_id)
+            self.assertEqual(
+                first["today"]["sessions"][f"codex:{pseudonym}"]["sessionId"],
+                pseudonym,
+            )
+            self.assertEqual(first["today"]["sessions"], second["today"]["sessions"])
+
     def test_provider_aggregation_deduplicates_before_partitioning(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -851,6 +910,98 @@ class MonitorStateTests(unittest.TestCase):
                 streams["unattributed"][1]["missing_prices"],
                 ["unattributed:gpt-test"],
             )
+
+    def test_private_provider_labels_are_counted_without_becoming_hub_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            private_provider = "internal-account-alias"
+            session = self._session(
+                "private-provider",
+                total=100,
+                input_tokens=80,
+                output_tokens=20,
+                provider=private_provider,
+            )
+            streams, manifest = monitor.aggregate_provider_summaries(
+                root,
+                [
+                    (
+                        record,
+                        self._summary(
+                            record.device_id,
+                            {"codex:private-provider": session},
+                        ),
+                    )
+                ],
+            )
+
+            self.assertEqual(set(streams), {"unattributed"})
+            payload = streams["unattributed"][0]
+            self.assertNotIn(private_provider, json.dumps(payload, sort_keys=True))
+            self.assertEqual(
+                payload["today"]["sessions"]["codex:private-provider"]["providers"],
+                {"unattributed": 100},
+            )
+            self.assertEqual(manifest["providers"]["unattributed"]["total_tokens"], 100)
+            with self.assertRaisesRegex(monitor.MonitorError, "provider identity"):
+                monitor.provider_device_id(root, private_provider)
+
+    def test_previous_private_provider_stream_is_not_republished(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            public_session = self._session(
+                "public-provider",
+                total=100,
+                input_tokens=80,
+                output_tokens=20,
+            )
+            payloads, status = monitor.aggregate_provider_summaries(
+                root,
+                [
+                    (
+                        record,
+                        self._summary(
+                            record.device_id,
+                            {"codex:public-provider": public_session},
+                        ),
+                    )
+                ],
+            )
+            private_provider = "internal-account-alias"
+            monitor._add_previous_provider_payloads(
+                root,
+                [(record, self._summary(record.device_id, {}))],
+                payloads,
+                status,
+                {
+                    "providers": {
+                        private_provider: {
+                            "device_id": "cage-internal-account-alias-mac-deadbeef"
+                        }
+                    }
+                },
+            )
+
+            self.assertEqual(set(payloads), {"openai-api"})
+            self.assertNotIn(private_provider, json.dumps(status, sort_keys=True))
 
     def test_provider_qualified_pricing_does_not_cross_provider_boundaries(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2173,6 +2324,524 @@ class MonitorStateTests(unittest.TestCase):
                     root, monitor.MonitorConnection("https://hub.example", "secret")
                 )
             self.assertFalse((outside / "connection.json").exists())
+
+    def test_host_source_adoption_is_auth_root_scoped_and_never_imports_sessions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            (source / "sessions").mkdir(parents=True)
+            (source / "archived_sessions").mkdir()
+            (source / "sessions" / "direct.jsonl").write_text("outside-cage", encoding="utf-8")
+            (source / "config.toml").write_text('model = "example"\n', encoding="utf-8")
+            (source / "work.config.toml").write_text('model = "profile"\n', encoding="utf-8")
+            (source / "auth.json").write_text('{"credential":"example"}\n', encoding="utf-8")
+
+            record = monitor.register_host_source(
+                root, source, copy_auth=True, allow_replacement=True
+            )
+            same_source = monitor.register_host_source(
+                root, source / ".", copy_auth=True, allow_replacement=True
+            )
+            home = monitor.host_source_home(root, record)
+
+            self.assertEqual(record.target, "host")
+            self.assertEqual(record.logical_id, same_source.logical_id)
+            self.assertEqual(len(monitor.load_registry(root)), 1)
+            self.assertNotEqual(home, source)
+            self.assertEqual((home / "config.toml").read_text(), 'model = "example"\n')
+            self.assertEqual((home / "work.config.toml").read_text(), 'model = "profile"\n')
+            self.assertEqual((home / "auth.json").read_text(), '{"credential":"example"}\n')
+            self.assertFalse((home / "sessions" / "direct.jsonl").exists())
+            self.assertNotIn(str(source), json.dumps(record.public_dict_for(root)))
+            self.assertNotIn(str(source), (root / "monitor" / "registry.json").read_text())
+            payload, _status = monitor.aggregate_summaries(
+                root,
+                [(record, self._summary(record.device_id, {}))],
+            )
+            self.assertNotIn(str(source), json.dumps(monitor._outbound_payload(root, payload)))
+            self.assertEqual(monitor.registered_host_source(root, source), record)
+
+    def test_host_source_respects_copy_auth_and_rejects_static_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / "auth.json").write_text('{"credential":"example"}\n', encoding="utf-8")
+            record = monitor.register_host_source(
+                root, source, copy_auth=True, allow_replacement=True
+            )
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=False,
+                copy_oauth_credentials=False,
+            )
+            self.assertFalse((session.codex_home / "auth.json").exists())
+
+            unsafe = root / "unsafe-source"
+            unsafe.mkdir()
+            outside = root / "outside.toml"
+            outside.write_text("", encoding="utf-8")
+            (unsafe / "config.toml").symlink_to(outside)
+            with self.assertRaisesRegex(monitor.MonitorError, "non-symlink"):
+                monitor.register_host_source(
+                    root, unsafe, copy_auth=False, allow_replacement=True
+                )
+
+    def test_host_source_uses_only_managed_session_bind_mounts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                output_mount = next(
+                    item for item in command if "dst=/out/summary.json" in item
+                )
+                output = Path(output_mount.split("src=", 1)[1].split(",", 1)[0])
+                output.write_text(
+                    json.dumps(
+                        {
+                            "deviceId": record.device_id,
+                            "trackedClients": ["codex"],
+                            "limits": {"updatedAt": "", "refreshMs": 0, "providers": []},
+                            "today": {"totalTokens": 0},
+                            "month": {"totalTokens": 0},
+                            "allTime": {"totalTokens": 0},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+            with patch("cage_core.monitor.subprocess.run", side_effect=fake_run):
+                payload = monitor._run_collector(
+                    "docker", "collector", record, root, uid=os.getuid(), gid=os.getgid()
+                )
+
+            self.assertEqual(payload["allTime"]["totalTokens"], 0)
+            command = " ".join(commands[-1])
+            home = monitor.host_source_home(root, record)
+            self.assertIn(f"src={home / 'sessions'},dst=/scan/codex/sessions,readonly", command)
+            self.assertIn(
+                f"src={home / 'archived_sessions'},dst=/scan/codex/archived_sessions,readonly",
+                command,
+            )
+            self.assertNotIn(f"src={source},", command)
+            self.assertNotIn("volume-subpath", command)
+
+    def test_host_source_collector_error_does_not_reveal_a_managed_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            managed_home = monitor.host_source_home(root, record)
+            result = type(
+                "Result",
+                (), {
+                    "returncode": 1,
+                    "stderr": f"invalid bind source path: {managed_home / 'sessions'}",
+                },
+            )()
+
+            with patch("cage_core.monitor.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(
+                    monitor.MonitorError, "managed host sessions"
+                ) as raised:
+                    monitor._run_collector(
+                        "docker",
+                        "collector",
+                        record,
+                        root,
+                        uid=os.getuid(),
+                        gid=os.getgid(),
+                    )
+
+            self.assertNotIn(str(managed_home), str(raised.exception))
+            monitor._record_scan_error(
+                root, record, f"collector bind failure: {managed_home / 'sessions'}"
+            )
+            stored = next(
+                item
+                for item in monitor.load_registry(root)
+                if item.logical_id == record.logical_id
+            )
+            self.assertEqual(
+                stored.last_error,
+                "Token Monitor scan failed for managed host sessions",
+            )
+            self.assertNotIn(str(managed_home), stored.last_error)
+
+    def test_host_scan_error_is_redacted_for_every_aggregate_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            host = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            volume = monitor.VolumeRegistration(
+                "a" * 32,
+                host.device_id,
+                "codex-state-volume",
+                "container",
+                "/work/volume",
+                "Cage: volume (Container)",
+                dict(FINGERPRINT, name="codex-state-volume"),
+            )
+            monitor.save_registry(root, [host, volume])
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            managed_home = monitor.host_source_home(root, host)
+            with patch.object(
+                monitor, "provider_split_pending", return_value=False
+            ), patch.object(
+                monitor,
+                "_collect_registered_summaries",
+                side_effect=monitor.MonitorError(
+                    f"collector bind failed: {managed_home / 'sessions'}"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    monitor.MonitorError, "managed host sessions"
+                ) as raised:
+                    monitor.scan_all_registrations(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        version="0.36.0",
+                        storage_policy=object(),
+                        allow_build=False,
+                        force=True,
+                    )
+
+            self.assertNotIn(str(managed_home), str(raised.exception))
+            records = monitor.load_registry(root)
+            self.assertEqual(
+                {record.last_error for record in records},
+                {"Token Monitor scan failed for managed host sessions"},
+            )
+            self.assertNotIn(
+                str(managed_home),
+                json.dumps([record.public_dict_for(root) for record in records]),
+            )
+
+    def test_host_source_deduplicates_with_volume_sessions_and_source_replacement_is_unadopted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            host = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            volume = monitor.VolumeRegistration(
+                "a" * 32,
+                host.device_id,
+                "codex-state-volume",
+                "container",
+                "/work/volume",
+                "Cage: volume (Container)",
+                dict(FINGERPRINT, name="codex-state-volume"),
+            )
+            shared = self._session(
+                "shared", total=100, input_tokens=80, output_tokens=20
+            )
+            payload, status = monitor.aggregate_summaries(
+                root,
+                [
+                    (host, self._summary(host.device_id, {"codex:shared": shared})),
+                    (volume, self._summary(volume.device_id, {"codex:shared": dict(shared)})),
+                ],
+            )
+            self.assertEqual(payload["allTime"]["totalTokens"], 100)
+            self.assertEqual(status["duplicate_sessions"], 1)
+            self.assertEqual(
+                payload["today"]["sessions"]["codex:shared"]["projectLabel"],
+                "Cage: Unattributed",
+            )
+
+            source.rename(root / "old-source")
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            self.assertIsNone(monitor.registered_host_source(root, source))
+
+    def test_host_source_oauth_writeback_is_compare_and_swap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / ".credentials.json").write_text('{"credential":"one"}\n', encoding="utf-8")
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=False,
+                copy_oauth_credentials=True,
+            )
+            monitor._write_private_bytes(
+                session.codex_home / ".credentials.json",
+                b'{"credential":"two"}\n',
+            )
+            monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / ".credentials.json").read_text(), '{"credential":"two"}\n'
+            )
+
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=False,
+                copy_oauth_credentials=True,
+            )
+            (source / ".credentials.json").write_text('{"credential":"outside"}\n', encoding="utf-8")
+            monitor._write_private_bytes(
+                session.codex_home / ".credentials.json",
+                b'{"credential":"managed"}\n',
+            )
+            with self.assertRaisesRegex(monitor.MonitorError, "source was preserved"):
+                monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / ".credentials.json").read_text(), '{"credential":"outside"}\n'
+            )
+
+    def test_host_source_auth_writeback_is_source_wins_and_never_deletes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / "auth.json").write_text('{"credential":"one"}\n', encoding="utf-8")
+            record = monitor.register_host_source(
+                root, source, copy_auth=True, allow_replacement=True
+            )
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=True,
+                copy_oauth_credentials=False,
+            )
+            monitor._write_private_bytes(
+                session.codex_home / "auth.json", b'{"credential":"two"}\n'
+            )
+            monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / "auth.json").read_text(), '{"credential":"two"}\n'
+            )
+
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=True,
+                copy_oauth_credentials=False,
+            )
+            (source / "auth.json").write_text(
+                '{"credential":"outside"}\n', encoding="utf-8"
+            )
+            monitor._write_private_bytes(
+                session.codex_home / "auth.json", b'{"credential":"managed"}\n'
+            )
+            with self.assertRaisesRegex(monitor.MonitorError, "source was preserved"):
+                monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / "auth.json").read_text(), '{"credential":"outside"}\n'
+            )
+
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=True,
+                copy_oauth_credentials=False,
+            )
+            (session.codex_home / "auth.json").unlink()
+            with self.assertRaisesRegex(monitor.MonitorError, "disappeared"):
+                monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / "auth.json").read_text(), '{"credential":"outside"}\n'
+            )
+
+    def test_host_source_writeback_rechecks_source_at_replace_time(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / ".credentials.json").write_text(
+                '{"credential":"one"}\n', encoding="utf-8"
+            )
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=False,
+                copy_oauth_credentials=True,
+            )
+            monitor._write_private_bytes(
+                session.codex_home / ".credentials.json",
+                b'{"credential":"managed"}\n',
+            )
+            original_read = monitor._read_host_regular
+
+            def race(path, **kwargs):
+                result = original_read(path, **kwargs)
+                if path == session.codex_home / ".credentials.json":
+                    monitor._write_private_bytes(
+                        source / ".credentials.json", b'{"credential":"outside"}\n'
+                    )
+                return result
+
+            with patch("cage_core.monitor._read_host_regular", side_effect=race):
+                with self.assertRaisesRegex(monitor.MonitorError, "source was preserved"):
+                    monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / ".credentials.json").read_text(), '{"credential":"outside"}\n'
+            )
+
+    def test_host_source_writeback_rejects_replaced_source_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / ".credentials.json").write_text(
+                '{"credential":"one"}\n', encoding="utf-8"
+            )
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            session = monitor.prepare_host_source(
+                root,
+                record,
+                source,
+                copy_auth=False,
+                copy_oauth_credentials=True,
+            )
+            monitor._write_private_bytes(
+                session.codex_home / ".credentials.json",
+                b'{"credential":"managed"}\n',
+            )
+            source.rename(root / "old-source")
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (source / ".credentials.json").write_text(
+                '{"credential":"replacement"}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(monitor.MonitorError, "source was preserved"):
+                monitor.finish_host_source(session)
+            self.assertEqual(
+                (source / ".credentials.json").read_text(),
+                '{"credential":"replacement"}\n',
+            )
+
+    def test_monitor_add_auth_adopts_an_opaque_host_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (root / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        '[auth.shared]',
+                        'tool = "codex"',
+                        f"host_codex_dir = {json.dumps(str(source))}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            output = io.StringIO()
+
+            def scan(_root, _docker, _install, record, **_kwargs):
+                return record, {}
+
+            with patch.object(cli.storage, "docker_command", return_value="docker"), patch.object(
+                cli.monitor, "scan_registration", side_effect=scan
+            ), contextlib.redirect_stdout(output):
+                result = cli._run_monitor(
+                    ["add", "--auth", "shared", "--json"],
+                    config_root=root,
+                    install_root=Path("/work/cage"),
+                    cage_version="0.36.0",
+                )
+
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertNotIn(str(source), rendered)
+            public = json.loads(rendered)
+            self.assertEqual(public["target"], "host")
+            self.assertTrue(public["project_id"].startswith("cage-project-"))
+
+    def test_monitor_disable_auth_restores_direct_host_routing_without_docker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("", encoding="utf-8")
+            (root / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "version = 1",
+                        '[auth.shared]',
+                        'tool = "codex"',
+                        f"host_codex_dir = {json.dumps(str(source))}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            record = monitor.register_host_source(
+                root, source, copy_auth=False, allow_replacement=True
+            )
+            output = io.StringIO()
+            with patch.object(
+                cli.storage,
+                "docker_command",
+                side_effect=AssertionError("disable must not require Docker"),
+            ), contextlib.redirect_stdout(output):
+                result = cli._run_monitor(
+                    ["disable", "--auth", "shared", "--json"],
+                    config_root=root,
+                    install_root=Path("/work/cage"),
+                    cage_version="0.36.0",
+                )
+
+            self.assertEqual(result, 0)
+            rendered = json.loads(output.getvalue())
+            self.assertEqual(rendered["logical_id"], record.logical_id)
+            self.assertEqual(rendered["status"], "disabled")
+            self.assertIsNone(monitor.registered_host_source(root, source))
+            self.assertTrue(monitor.host_source_home(root, record).is_dir())
 
 
 if __name__ == "__main__":

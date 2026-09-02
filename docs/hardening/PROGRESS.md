@@ -3,6 +3,43 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-02 — Opt-in host-native Codex Token Monitor prepared for v0.36.0
+
+Added explicit `cage monitor add --auth AUTH` enrollment for Codex
+`target = "host"`. The boundary is the resolved canonical Codex auth directory,
+not a repository or preset: aliases of one root share one Cage-managed session
+store, while separate roots remain independent. Matching Cage host launches use
+that private store and serialize one live session per adopted source. Direct
+Codex usage and Cage host sessions from before adoption keep their original
+`CODEX_HOME` and are never scanned. `cage monitor disable --auth AUTH` restores
+that direct routing without deleting managed history.
+
+Adoption accepts only a current-user-owned, non-symlink, non-group/world-
+writable source directory. It copies only the supported static Codex
+configuration and selected auth inputs into the private managed home, never
+imports source sessions, and retains only opaque source identities in the
+registry. The network-disabled collector bind-mounts only the managed
+`sessions/` and `archived_sessions/` directories read-only. Docker loss is a
+monitor warning after adoption, not a host-Codex launch failure. Selected MCP
+OAuth credentials and copied `auth.json` use source-wins compare-and-swap
+writeback; managed credential deletion never deletes a source credential.
+
+At every hub-upload route, raw session IDs now become stable per-install HMAC
+pseudonyms. Provider visibility is a closed set (`openai-api`,
+`openai-compatible`, and `zllm`); private, unknown, missing, or multi-provider
+records count in `Unattributed` rather than appearing as a device or payload
+label. Existing Container/Desktop deduplication remains shared with adopted
+host stores.
+
+Validation: focused monitor, host-target, and core coverage passes (`167
+passed`); the complete Python suite passes (`616 passed, 15 skipped`), and the
+disposable Docker smoke suite passes (`10 passed, 1 skipped`), including the
+managed-host collector regression. Python compilation, Bash/Node syntax, Compose
+rendering, the complete-history Gitleaks scan, and `git diff --check` pass. No
+personal configuration, credentials, sessions, existing Docker volumes, monitor
+hub, or other user state was read or changed; Docker validation used only
+disposable test resources.
+
 ## 2026-09-02 — Auth-scoped Codex MCP OAuth command prepared for v0.35.2
 
 Added `cage mcp login --auth AUTH NAME` and the matching logout form for a

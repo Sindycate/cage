@@ -82,6 +82,7 @@ jobs:
           docker build --label io.cage.lifecycle=ephemeral --build-arg CAGE_BASE=cage-base:ci --build-arg CAGE_VERSION=ci -t cage-token-monitor:smoke -f Dockerfile.monitor .
           docker run --rm --entrypoint opencode opencode:smoke --version
           CAGE_RUN_OPENCODE_DOCKER_CONTRACT=1 python3 -m pytest -q tests/test_opencode_proxy_contract.py
+          CAGE_RUN_DOCKER_SMOKE=1 CAGE_MONITOR_SMOKE_IMAGE=cage-token-monitor:smoke python3 -m pytest -q tests/test_docker_smoke.py -k managed_host_monitor
 
       - name: Run Desktop SSH integration smoke test
         env:

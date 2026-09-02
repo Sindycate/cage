@@ -5,6 +5,23 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.0 — 2026-09-02
+
+- add opt-in `cage monitor add --auth AUTH` support for Cage-launched Codex
+  `target = "host"` sessions: each resolved auth directory gets a separate
+  private managed `CODEX_HOME`, while direct-host history and sessions from
+  before adoption remain unscanned; `monitor disable --auth AUTH` restores
+  direct routing without deleting managed history, and one shared auth source
+  permits one live Cage host session at a time;
+- retain only opaque host-source identities in monitor registration state,
+  mount only the managed `sessions/` and `archived_sessions/` directories into
+  the network-disabled collector, and preserve copied `auth.json` plus selected
+  Codex OAuth credential rotation with source-wins compare-and-swap writeback;
+- pseudonymize raw session IDs with a stable per-install HMAC before every hub
+  upload, and restrict readable provider streams to `openai-api`,
+  `openai-compatible`, and `zllm`; unknown or private labels are counted as
+  `unattributed` rather than becoming a hub-visible device;
+
 ## 0.35.2 — 2026-09-02
 
 - add `cage mcp login|logout --auth AUTH NAME` for Codex OAuth MCPs, so one

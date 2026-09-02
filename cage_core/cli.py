@@ -58,11 +58,13 @@ Commands:
   monitor connect URL         Connect the optional host-owned Token Monitor hub
   monitor disconnect          Remove the local hub credential and pause uploads
   monitor status [--json]     Show Cage devices, projects, cost, and migration state
-  monitor sync [PATH]         Scan and split all registered Codex volumes
+  monitor sync [PATH]         Scan and split registered Codex sources
   monitor split --dry-run     Preview provider totals without hub changes
   monitor discover [--json]   List all existing Cage Codex state volumes
   monitor add PATH            Explicitly adopt/register a Codex volume
   monitor add --volume NAME   Adopt an exact dormant or recovered volume
+  monitor add --auth AUTH     Adopt a Cage-only native-host Codex source
+  monitor disable --auth AUTH Return one adopted host auth source to direct use
   monitor migrate --yes       Replace legacy hub devices safely
   monitor pricing ...         Manage private custom model prices
   monitor forget DEVICE_ID    Delete a Cage-owned hub device
@@ -554,6 +556,39 @@ def _monitor_volume_arguments(arguments: list[str]) -> tuple[str, str, bool]:
     return volume_name, display_name, json_output
 
 
+def _monitor_auth_arguments(
+    arguments: list[str], *, command: str = "monitor add"
+) -> tuple[str, bool]:
+    """Parse the explicit auth selector for managed host-session adoption."""
+
+    auth_name = ""
+    json_output = False
+    index = 0
+    while index < len(arguments):
+        item = arguments[index]
+        if item == "--auth":
+            if index + 1 >= len(arguments) or not arguments[index + 1]:
+                raise CliError("Missing value after --auth")
+            if auth_name:
+                raise CliError(f"{command} accepts only one --auth")
+            auth_name = arguments[index + 1]
+            index += 1
+        elif item.startswith("--auth="):
+            if auth_name or not item.partition("=")[2]:
+                raise CliError(f"{command} accepts only one --auth")
+            auth_name = item.partition("=")[2]
+        elif item == "--json":
+            json_output = True
+        else:
+            raise CliError(f"Unknown {command} option: {item}")
+        index += 1
+    if not auth_name:
+        raise CliError(f"{command} --auth requires an auth name")
+    if not config.NAME_RE.fullmatch(auth_name):
+        raise CliError(f"Invalid auth name: {auth_name!r}")
+    return auth_name, json_output
+
+
 def _resolve_monitor_registration(
     path: str,
     preset: str,
@@ -815,7 +850,7 @@ def _run_monitor(
 ) -> int:
     if not arguments:
         print(
-            "Usage: cage monitor connect|disconnect|status|sync|discover|add|migrate|pricing|forget ...",
+            "Usage: cage monitor connect|disconnect|status|sync|discover|add|disable|migrate|pricing|forget ...",
             file=sys.stderr,
         )
         return 1
@@ -865,6 +900,35 @@ def _run_monitor(
             if rest not in ([], ["--json"]):
                 raise CliError("monitor status accepts only --json")
             return _monitor_status(config_root, as_json=rest == ["--json"])
+        if action == "disable":
+            auth_name, json_output = _monitor_auth_arguments(
+                rest, command="monitor disable"
+            )
+            config_path = config_root / "config.toml"
+            data = config.load_config(config_path)
+            source_home, _copy_auth = config.codex_auth_source_for_monitor(
+                data, auth_name
+            )
+            record = monitor.disable_host_source(config_root, source_home)
+            if json_output:
+                print(
+                    json.dumps(
+                        record.public_dict_for(config_root),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                print(
+                    "Disabled Cage-only host-session tracking; future Cage host "
+                    "launches use the original CODEX_HOME."
+                )
+                print(
+                    "Managed host sessions were preserved locally; run "
+                    "cage monitor add --auth AUTH to re-enable them."
+                )
+            return 0
         if action == "discover":
             if rest not in ([], ["--json"]):
                 raise CliError("monitor discover accepts only --json")
@@ -1021,6 +1085,49 @@ def _run_monitor(
                     )
                 if manifest.get("missing_prices"):
                     print("Missing prices: " + ", ".join(manifest["missing_prices"]))
+            return 0
+        if action == "add" and any(
+            item == "--auth" or item.startswith("--auth=") for item in rest
+        ):
+            auth_name, json_output = _monitor_auth_arguments(rest)
+            connection = monitor.load_connection(config_root)
+            if connection is None or not connection.enabled:
+                raise CliError("registration requires an active Token Monitor connection")
+            data = config.load_config(config_path)
+            source_home, copy_auth = config.codex_auth_source_for_monitor(
+                data, auth_name
+            )
+            record = monitor.register_host_source(
+                config_root,
+                source_home,
+                copy_auth=copy_auth,
+                allow_replacement=True,
+            )
+            updated, _ = monitor.scan_registration(
+                config_root,
+                docker,
+                install_root,
+                record,
+                version=cage_version,
+                storage_policy=policy,
+                allow_build=True,
+                force=True,
+            )
+            if json_output:
+                print(
+                    json.dumps(
+                        updated.public_dict_for(config_root),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            else:
+                print(
+                    "Registered a Cage-managed host session source as "
+                    f"{monitor.project_id_for(config_root, record.logical_id)}"
+                )
+                print(f"Synchronized provider streams at {updated.last_success_at}")
             return 0
         if action == "add" and any(
             item == "--volume" or item.startswith("--volume=") for item in rest
@@ -1481,7 +1588,11 @@ def main(
         return 0
     try:
         if prepared.plan.target == "host":
-            return run_host_target(prepared)
+            return run_host_target(
+                prepared,
+                config_root=config_root,
+                install_root=root,
+            )
         if (
             prepared.plan.target == "desktop"
             and os.environ.get("CAGE_DESKTOP_INTERNAL") != "1"

@@ -1961,7 +1961,10 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
     if resolved.tool == "claude":
         print(f"  - credentials: automated Claude {resolved.claude_auth or 'configured'} auth")
     elif resolved.target == "host":
-        print("  - credentials: resolved host CODEX_HOME used directly (copy_auth is container-only)")
+        print(
+            "  - credentials: resolved host CODEX_HOME used directly unless its auth "
+            "source was explicitly adopted by Token Monitor"
+        )
     elif resolved.tool == "opencode":
         if resolved.opencode_copy_auth == "0":
             print("  - credentials: host OpenCode provider auth copy disabled")
@@ -2245,12 +2248,31 @@ def _codex_auth_directory_for_mcp_auth(
         raise ConfigError(f"auth not found: {auth_name}")
     if auth.get("tool") != "codex":
         raise ConfigError(
-            f"auth {auth_name!r} must set tool = \"codex\" for --auth MCP OAuth operations"
+            f"auth {auth_name!r} must set tool = \"codex\" for auth-scoped operations"
         )
     raw_directory = auth.get("host_codex_dir")
     if raw_directory is not None and not isinstance(raw_directory, str):
         raise ConfigError(f"auth.{auth_name}.host_codex_dir must be a string")
     return auth, expand_path_string(raw_directory or "~/.codex")
+
+
+def codex_auth_source_for_monitor(
+    data: dict[str, Any], auth_name: str
+) -> tuple[str, bool]:
+    """Resolve the explicit Codex auth root for host-session monitoring.
+
+    Monitoring is keyed to the real source directory rather than the auth
+    alias, so two auth blocks that deliberately share ``host_codex_dir`` are
+    adopted once.  The normal ``copy_auth`` policy remains authoritative for
+    the private managed home.
+    """
+
+    auth, codex_home = _codex_auth_directory_for_mcp_auth(data, auth_name)
+    copy_auth = bool_to_flag(
+        auth.get("copy_auth", auth.get("codex_copy_auth")),
+        f"auth.{auth_name}.copy_auth",
+    )
+    return codex_home, copy_auth != "0"
 
 
 def _auth_scoped_codex_mcp_resolution(

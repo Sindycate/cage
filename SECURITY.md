@@ -160,6 +160,21 @@ repository. Host execution:
 Host execution is supported only for Codex. Claude and OpenCode host execution
 are rejected.
 
+An enabled Token Monitor does not automatically inspect host-native Codex
+state. A user may explicitly opt in one Codex auth root with
+`cage monitor add --auth AUTH`. Cage then creates a private, user-owned managed
+`CODEX_HOME` under its monitor directory, copies only supported static Codex
+configuration and selected auth inputs, and routes matching Cage host launches
+through it. It never imports or scans the original source's `sessions/` or
+`archived_sessions/`; direct `codex` launches and Cage host launches before
+adoption remain outside monitoring. The managed home is shared by aliases for
+the same canonical auth directory, so one monitored host session at a time is
+allowed for that source. Separate auth directories remain independent. Run
+`cage monitor disable --auth AUTH` to restore direct routing without deleting
+the managed history. Copied `auth.json` and selected MCP OAuth credentials use
+source-wins write-back after a managed session; managed deletions never delete
+the original source credential automatically.
+
 ## OpenCode container execution
 
 OpenCode is container-only in this release. Cage snapshots host and repository
@@ -240,11 +255,20 @@ official SSH-host workflow.
 
 Token Monitor is an optional host-owned accounting aid, not part of the tool
 container's network boundary. The collector container has no network and sees
-only read-only `sessions/` and `archived_sessions/` volume subpaths; the host
-holds the hub credential and performs uploads. Consequently, an enabled
-monitor can upload while the tool itself runs with `--net off`; disconnect the
-monitor to disable that host-side traffic. Plain HTTP hubs are limited to
-literal private or loopback IP addresses and should otherwise use HTTPS.
+only read-only `sessions/` and `archived_sessions/` subdirectories from a Cage
+volume or an explicitly adopted managed host store; the host holds the hub
+credential and performs uploads. Consequently, an enabled monitor can upload
+while the tool itself runs with `--net off`; disconnect the monitor to disable
+that host-side traffic. Plain HTTP hubs are limited to literal private or
+loopback IP addresses and should otherwise use HTTPS.
+
+The collector never receives a host source's root, credentials, static config,
+history, cache, or logs. Cage stores its managed host source, registry, raw
+deduplication snapshots, and upload generations privately. Before an aggregate
+reaches the hub, raw local session IDs are replaced with stable per-install HMAC
+pseudonyms. Only the fixed public provider labels `openai-api`,
+`openai-compatible`, and `zllm` can become readable provider streams; unknown
+or private labels are counted as `Unattributed`.
 
 This preserves Cage's existing container threat model; it does not turn the
 host ChatGPT application itself into a containerized process. The repository,

@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-from cage_core import storage
+from cage_core import monitor, storage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,49 @@ def write_executable(path, content):
     "set CAGE_RUN_DOCKER_SMOKE=1 to run local Docker integration smoke tests",
 )
 class DockerSmokeTests(unittest.TestCase):
+    def test_managed_host_monitor_collector_scans_only_private_session_store(self):
+        image = os.environ.get("CAGE_MONITOR_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_MONITOR_SMOKE_IMAGE to a built collector image")
+        if subprocess.run(
+            ["docker", "image", "inspect", image],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode != 0:
+            self.skipTest("configured monitor collector image is unavailable")
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            temp_path = Path(temp_dir)
+            source = temp_path / "source-codex-home"
+            source_sessions = source / "sessions"
+            source_sessions.mkdir(parents=True)
+            (source / "config.toml").write_text("", encoding="utf-8")
+            direct_session = source_sessions / "direct-host-session.jsonl"
+            direct_session.write_text("not-a-managed-session\n", encoding="utf-8")
+            record = monitor.register_host_source(
+                temp_path / "cage-state",
+                source,
+                copy_auth=False,
+                allow_replacement=True,
+            )
+            managed_home = monitor.host_source_home(temp_path / "cage-state", record)
+
+            summary = monitor._run_collector(
+                "docker",
+                image,
+                record,
+                temp_path / "cage-state",
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+
+            self.assertEqual(summary["trackedClients"], ["codex"])
+            self.assertEqual(summary["allTime"]["totalTokens"], 0)
+            self.assertTrue(direct_session.exists())
+            self.assertFalse(
+                (managed_home / "sessions" / direct_session.name).exists()
+            )
+
     def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)

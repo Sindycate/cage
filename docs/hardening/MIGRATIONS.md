@@ -6,6 +6,79 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.0 — 2026-09-02
+
+### Explicit Token Monitor enrollment for host-native Codex
+
+Who is affected: Codex users with `target = "host"` who want Token Monitor to
+count only sessions launched through Cage, without importing or exposing their
+ordinary host Codex history.
+
+Previous behavior: Token Monitor registered only Cage Container/Desktop volumes.
+Host-native Codex was excluded because its normal `CODEX_HOME` can contain
+sessions started outside Cage, and scanning that shared directory could not
+separate them safely.
+
+New behavior: after connecting a Token Monitor hub, explicitly adopt one Codex
+auth source:
+
+```bash
+cage monitor add --auth codex-personal
+```
+
+`AUTH` must name a `tool = "codex"` auth block. Cage resolves its canonical
+`host_codex_dir`, creates a separate private managed `CODEX_HOME` below its
+monitor state, and routes only matching Cage host launches through that store.
+It copies only supported static Codex configuration and selected auth inputs;
+it never imports or scans the source directory's `sessions/` or
+`archived_sessions/`. Direct `codex` launches and Cage host sessions from before
+adoption remain untracked. The registry uses an opaque identity, not the source
+path, and the collector sees only the managed session directories read-only
+with no network.
+
+The scope is the resolved auth directory, not a repository or preset. Two auth
+aliases using one canonical directory share a managed store; separate directories
+are independent. One Cage host session at a time is allowed for a shared store.
+The source must be a current-user-owned, non-symlink directory that is not
+group- or world-writable. Docker is used for the collector, but an adopted host
+launch still starts with a warning if Docker is temporarily unavailable.
+
+When `copy_auth = true`, a changed managed `auth.json` is written back only if
+the original source remains unchanged. Selected MCP OAuth credentials follow the
+same source-wins compare-and-swap rule. A managed credential deletion never
+deletes the source credential automatically.
+
+Every monitor upload now replaces raw local session IDs with stable per-install
+HMAC pseudonyms. Only `openai-api`, `openai-compatible`, and `zllm` can be
+readable provider streams; unknown or private provider labels are counted as
+`Unattributed`. These privacy rules apply to Container, Desktop, and adopted
+host sources.
+
+Migration and recovery:
+
+1. Update Cage, connect the hub if needed, and identify the intended Codex auth
+   block. Do not use a repository path with the auth-scoped command.
+2. Run `cage monitor add --auth AUTH`, then start a matching `target = "host"`
+   Cage session. Run `cage monitor status` to confirm the generic managed-host
+   project is present; no source path or direct-host session should appear.
+3. For two independent host accounts, use distinct `host_codex_dir` values and
+   adopt each named auth block. Do not copy managed sessions or credentials
+   between their stores.
+4. To stop future Cage host sessions from using the managed store without
+   deleting its accumulated local history, run:
+
+   ```bash
+   cage monitor disable --auth codex-personal
+   ```
+
+   Re-run `cage monitor add --auth AUTH` to opt in again.
+
+Rollback: run `cage monitor disable --auth AUTH` first, then install 0.35.2 or
+earlier. The source `CODEX_HOME`, direct-host history, Docker volumes, and
+repositories are untouched. The private managed host history remains available
+to a later 0.36.0 re-adoption; remove it only through a future explicit
+data-management action, never by deleting a shared source directory.
+
 ## 0.35.2 — 2026-09-02
 
 ### Authenticate a Codex OAuth MCP by auth directory

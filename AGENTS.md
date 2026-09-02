@@ -187,28 +187,32 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   stores its hub credential, host identity, logical-target registry, locks,
   per-project collector state, custom prices, and aggregate status under private
   `~/.config/cage/monitor/` files; it is outside
-  the launch-plan contract. Only Codex Container/Desktop volumes can be
-  registered. A short-lived pinned collector mounts the exact `sessions/` and
-  `archived_sessions/` volume subpaths read-only with no network, while the
-  host performs authenticated hub requests. One Cage installation publishes
-  one readable hub device per observed provider stream, and each logical Codex
-  volume is a project under the stream that owns its sessions. Normal launches
-  refresh only their exact volume and reuse fingerprint-bound sanitized
+  the launch-plan contract. Codex Container/Desktop volumes and explicitly
+  adopted host auth sources can be registered. Host adoption creates a separate
+  Cage-managed `CODEX_HOME`, never scans or imports the original host session
+  directories, and routes only matching Cage host launches through that store.
+  A short-lived pinned collector mounts only exact `sessions/` and
+  `archived_sessions/` source directories read-only with no network, while the
+  host performs authenticated hub requests. One Cage installation publishes one
+  readable hub device per recognized public provider stream, and each logical
+  Codex source is a project under the stream that owns its sessions. Normal
+  launches refresh only their exact source and reuse fingerprint-bound sanitized
   snapshots for inactive peers; one cross-process coordinator serializes
   provider aggregation and performs a bounded wall-clock full reconciliation.
   Explicit `monitor sync` forces that full reconciliation and repairs a
   prepared upload generation. Every aggregate deduplicates identical or
-  monotonic session copies before provider partitioning, assigns missing or
-  multi-provider copies to `Unattributed`, and fails closed on incompatible
-  copies. Discovery is limited to Cage-named `codex-state-*` volumes. A normal
-  launch may promote an exact unchanged recovered registration's display label
-  to its project basename plus target without changing its logical ID, cached
-  state, or totals; replacement or ambiguous volumes require explicit
-  `cage monitor add` adoption. Legacy unsplit and per-volume hub devices require
-  verified, resumable `monitor migrate`; private custom pricing never enters
-  the tool container or hub credential path. Provider upload generation state,
-  split state, snapshots, and aggregate status remain private under the monitor
-  directory
+  monotonic session copies before provider partitioning, assigns missing,
+  multi-provider, and private-provider copies to `Unattributed`, and fails
+  closed on incompatible copies. Raw session IDs are replaced with stable
+  per-install HMAC pseudonyms at the hub boundary. Discovery is limited to
+  Cage-named `codex-state-*` volumes. A normal launch may promote an exact
+  unchanged recovered registration's display label to its project basename plus
+  target without changing its logical ID, cached state, or totals; replacement
+  or ambiguous volumes require explicit `cage monitor add` adoption. Legacy
+  unsplit and per-volume hub devices require verified, resumable `monitor
+  migrate`; private custom pricing never enters the tool container or hub
+  credential path. Provider upload generation state, split state, snapshots,
+  and aggregate status remain private under the monitor directory
 - `cage-config.py`, `cage-tui.py`, `cage-desktop.py`, both bridge scripts,
   `codex-remote.py`, and the container entrypoints remain compatibility
   frontends. Codex host/container/Desktop paths delegate passthrough and MCP
@@ -245,10 +249,13 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   backup files as config fragments
 - Acquires Docker images via pull-before-build: tries `docker pull` from `CAGE_REGISTRY` (ghcr.io), falls back to local `docker build` if pull fails. Local builds automatically ensure the shared base image (`cage-base:<version>`) exists first. `--rebuild` forces a local build with `--no-cache` for both the base and the selected leaf image (useful for getting the latest tool version)
 - `cage update [claude|codex|opencode]` refreshes just the tool binary without a full rebuild: it ensures the base image exists (same pull-before-build logic), then builds a tiny overlay image (`docker build --no-cache -f -` reading an inline Dockerfile from stdin) that does `FROM <current image>` and re-runs only the tool installer (Claude: `curl … install.sh`; Codex: `npm install -g @openai/codex@latest`; OpenCode: an unprivileged `npm install -g --allow-scripts=opencode-ai opencode-ai@latest` plus its image-level contract checks), re-tagging the result over `<tool>:${CAGE_VERSION}` and `:latest`. The image stays the single source of the tool version — this intentionally diverges the local image from the same-tagged registry image; `--rebuild` resets to a clean build. Tool defaults to the central default preset's tool, then `claude` when no config exists
-- `cage monitor connect|disconnect|status|sync|add|migrate|pricing|forget` manages the
-  optional host-side collector. Monitor connection state is not copied into
-  containers, and monitor failures are warnings during ordinary launches so
-  the accounting aid cannot make a coding session fail open or fail closed
+- `cage monitor connect|disconnect|status|sync|add|disable|migrate|pricing|forget`
+  manages the optional host-side collector. `monitor add --auth AUTH` is an
+  explicit, per-auth-root host-session opt-in and `monitor disable --auth AUTH`
+  reverses its routing without deleting managed history. Monitor connection
+  state is not copied into containers, and monitor failures are warnings during
+  ordinary launches so the accounting aid cannot make a coding session fail
+  open or fail closed
 - Takes a repo path, derives a unique container name + Docker volume via md5 hash of the full path
 - Ordinary same-repository launches keep one shared persistent state volume but
   use suffixed container names for parallel sessions. The collision menu reads

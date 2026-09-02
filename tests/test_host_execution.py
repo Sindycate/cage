@@ -35,6 +35,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cage_core import monitor
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CAGE = ROOT / "cage"
@@ -196,6 +198,8 @@ def setup_host_test(
     env_overrides: dict[str, str] | None = None,
     host_skills: dict[str, str] | None = None,
     codex_files: dict[str, str] | None = None,
+    monitor_auth: bool = False,
+    monitor_copy_auth: bool = True,
 ):
     """Set up a complete isolated environment for a cage launch test."""
     temporary = tempfile.TemporaryDirectory(dir=ROOT)
@@ -227,7 +231,17 @@ def setup_host_test(
         )
         (bin_dir / "gh").write_text(gh_body, encoding="utf-8")
         (bin_dir / "gh").chmod(0o755)
+    source_home = home / ".codex"
+    config_text = config_text.replace("__HOST_CODEX_DIR__", str(source_home))
     (cage_dir / "config.toml").write_text(config_text, encoding="utf-8")
+    if monitor_auth:
+        source_home.mkdir(exist_ok=True)
+        monitor.register_host_source(
+            cage_dir,
+            source_home,
+            copy_auth=monitor_copy_auth,
+            allow_replacement=True,
+        )
     env = make_env(tmp_path, bin_dir, home, xdg)
     env.update(env_overrides or {})
     args = [str(CAGE)] + (extra_args or []) + [str(repo)] + (tool_args or [])
@@ -549,6 +563,39 @@ class TestHostModeLaunches(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already exist in Codex config layer", result.stderr)
+        self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
+
+    def test_adopted_host_auth_uses_cage_only_session_store(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[auth.shared]", 'tool = "codex"',
+            'host_codex_dir = "__HOST_CODEX_DIR__"',
+            "[presets.main]", 'tool = "codex"', 'auth = "shared"',
+            'target = "host"', 'net = "open"', "",
+        ])
+        result, _, tmp_path, temporary = setup_host_test(
+            config,
+            codex_files={
+                "config.toml": 'model = "example"\n',
+                "sessions/direct.jsonl": "outside-cage",
+            },
+            monitor_auth=True,
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        source_home = tmp_path / "home" / ".codex"
+        record = next(
+            item
+            for item in monitor.load_registry(tmp_path / "xdg" / "cage")
+            if item.target == "host"
+        )
+        managed_home = monitor.host_source_home(tmp_path / "xdg" / "cage", record)
+        self.assertIn(f"CODEX_HOME={managed_home}", result.stdout)
+        self.assertNotIn(f"CODEX_HOME={source_home}", result.stdout)
+        self.assertFalse((managed_home / "sessions" / "direct.jsonl").exists())
+        self.assertTrue((source_home / "sessions" / "direct.jsonl").exists())
+        self.assertIn("Cage-managed host session store", result.stderr)
+        self.assertIn("Cage sessions only", result.stderr)
         self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
 
     def _launch(self, config, extra_args=None):
