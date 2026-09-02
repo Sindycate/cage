@@ -6,6 +6,49 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.35.1 — 2026-09-02
+
+### Serialize Codex MCP OAuth refresh-token use
+
+Who is affected: Cage Codex presets that select at least one HTTP MCP server
+with `auth = "oauth"`, including host-native, container, and Desktop targets.
+
+Previous behavior: Cage synchronized `.credentials.json` before and after a
+container run, but two live Codex processes using one `host_codex_dir` could
+still retain the same old refresh token in memory. If one process rotated or
+spent it, the other could receive an OAuth `invalid_grant` or token-used error.
+
+New behavior: Cage holds one private, non-waiting lease in the selected host
+Codex directory for the full Codex session and its post-run credential sync.
+The same lease protects `cage mcp login` and `cage mcp logout`. A second Cage
+operation using that directory fails clearly before it starts; a different
+`host_codex_dir` remains independent and must have its own OAuth login.
+
+Migration and recovery:
+
+1. Stop all Cage and separately started Codex processes that use the affected
+   `CODEX_HOME`.
+2. If a provider has already rejected the old credential, reauthenticate once
+   through the exact preset and selected server used for the launch:
+
+   ```bash
+   cage mcp logout --preset NAME SERVER /path/to/repo
+   cage mcp login --preset NAME SERVER /path/to/repo
+   ```
+
+3. Run `cage config explain --preset NAME /path/to/repo` and confirm that the
+   selected preset resolves to the expected `Codex dir` and OAuth MCP server.
+   Do not repair one auth directory by copying `.credentials.json` from
+   another.
+4. Wait for an active OAuth session to exit before starting another one with
+   the same host Codex directory. To run sessions concurrently, use separate
+   auth blocks and host Codex directories, then authenticate each directory
+   once.
+
+Rollback: installing an older Cage release removes the lease but restores the
+refresh-token race. The private `.cage-oauth-session.lock` file contains no
+credential and may remain; do not delete it while a session is active.
+
 ## 0.35.0 — 2026-08-28
 
 ### Host-wide Token Monitor scheduling and provider-generation repair

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import config
 from ..planning import PreparedLaunch
+from ..state import OAuthSessionLease, SyncError
 
 
 class HostTargetError(RuntimeError):
@@ -172,10 +173,25 @@ def run_host_target(prepared: PreparedLaunch) -> int:
             file=sys.stderr,
         )
     print("", file=sys.stderr)
-    os.chdir(repository)
-    os.execve(
-        executable,
-        [str(executable), *tool_arguments],
-        environment,
-    )
-    return 127
+
+    lease: OAuthSessionLease | None = None
+    try:
+        if any(server.get("auth") == "oauth" for server in resolved.remote_mcp):
+            lease = OAuthSessionLease.acquire(codex_home, create=True)
+            print("  OAuth:      exclusive CODEX_HOME lease", file=sys.stderr)
+            lease.preserve_across_exec()
+        os.chdir(repository)
+        os.execve(
+            executable,
+            [str(executable), *tool_arguments],
+            environment,
+        )
+        return 127
+    except SyncError as exc:
+        raise HostTargetError(f"cannot start Codex OAuth session: {exc}") from exc
+    finally:
+        if lease is not None:
+            try:
+                lease.close()
+            except SyncError:
+                pass

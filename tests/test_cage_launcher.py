@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cage_core.state import OAuthSessionLease
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CAGE = ROOT / "cage"
@@ -454,14 +456,31 @@ class CageLauncherTests(unittest.TestCase):
             env["HOME"] = str(home)
             env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
 
-            result = subprocess.run(
-                [str(CAGE), "mcp", "login", "dash0", str(repo)],
-                cwd=ROOT,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            def mcp_auth(action):
+                return subprocess.run(
+                    [str(CAGE), "mcp", action, "dash0", str(repo)],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            with OAuthSessionLease.acquire(codex_home, create=True):
+                for action in ("login", "logout"):
+                    blocked = mcp_auth(action)
+                    self.assertNotEqual(blocked.returncode, 0)
+                    self.assertIn(
+                        f"cannot start Codex MCP OAuth {action}",
+                        blocked.stderr,
+                    )
+                    self.assertIn(
+                        "another Cage Codex session is already using OAuth credentials",
+                        blocked.stderr,
+                    )
+                    self.assertNotIn("fake codex", blocked.stdout)
+
+            result = mcp_auth("login")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Codex dir: {codex_home}", result.stdout)

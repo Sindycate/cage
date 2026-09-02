@@ -36,6 +36,7 @@ from ..planning import CAGE_REGISTRY, PreparedLaunch
 from ..state import (
     ClaudeSessionSync,
     OAuthReconciler,
+    OAuthSessionLease,
     OpenCodeStateReconciler,
     SyncError,
 )
@@ -1271,6 +1272,13 @@ def _restore_signal_handlers(previous) -> None:
         signal.signal(signum, handler)
 
 
+def _has_selected_oauth_mcp(runtime: ContainerRuntime) -> bool:
+    return any(
+        server.get("auth") == "oauth"
+        for server in runtime.resolved.remote_mcp
+    )
+
+
 def run_container_target(
     prepared: PreparedLaunch,
     *,
@@ -1305,6 +1313,20 @@ def run_container_target(
         _handle_collision(runtime)
         _acquire_image(runtime)
         _prepare_codex_monitor(runtime)
+        codex_home: Path | None = None
+        if prepared.plan.tool == "codex":
+            codex_home = Path(
+                runtime.resolved.host_codex_dir
+                or (Path.home() / ".codex")
+            ).expanduser()
+            if _has_selected_oauth_mcp(runtime):
+                lease = OAuthSessionLease.acquire(codex_home, create=True)
+                # Register this before post-run reconciliation, so the latter
+                # writes the rotated credential while the lease is still held.
+                runtime.lifecycle.register(
+                    "Codex OAuth session lease",
+                    lease.close,
+                )
         if prepared.plan.tool == "opencode":
             volume = runtime.run(
                 ["volume", "create", prepared.plan.volume_name],
@@ -1382,10 +1404,7 @@ def run_container_target(
 
         oauth: OAuthReconciler | None = None
         if prepared.plan.tool == "codex":
-            codex_home = Path(
-                runtime.resolved.host_codex_dir
-                or (Path.home() / ".codex")
-            ).expanduser()
+            assert codex_home is not None
             if codex_home.is_dir():
                 oauth = OAuthReconciler(
                     volume_name=prepared.plan.volume_name,

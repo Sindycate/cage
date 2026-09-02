@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.35.1 — 2026-09-02
+
+- serialize Cage Codex sessions that select an OAuth MCP per resolved host
+  Codex directory, including host-native, container, and Desktop targets plus
+  `cage mcp login/logout`, so a concurrent process cannot spend a stale
+  in-memory refresh token after another session rotates it; a conflicting
+  launch now fails clearly and separate auth directories retain independent
+  concurrency;
+
 ## 0.35.0 — 2026-08-28
 
 - replace per-launch all-volume monitor polling with a host-wide,

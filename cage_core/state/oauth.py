@@ -26,12 +26,172 @@ from typing import Any
 MAX_CREDENTIAL_BYTES = 4 * 1024 * 1024
 MAX_STATE_BYTES = 4096
 STATE_NAME = ".cage-oauth-sync-state.json"
+SESSION_LEASE_NAME = ".cage-oauth-session.lock"
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 MISSING_HASH = "-"
 
 
 class SyncError(Exception):
     pass
+
+
+@dataclass
+class OAuthSessionLease:
+    """An exclusive, lifetime lease for mutable OAuth state in one CODEX_HOME.
+
+    OAuth providers may rotate refresh tokens.  Synchronizing the file before
+    and after a container run cannot make two independently running Codex
+    processes safe: either can retain and later spend the same old refresh
+    token.  The lease is deliberately rooted in the selected host Codex
+    directory, rather than Cage's config directory or a project volume, so all
+    Cage targets which use one ``CODEX_HOME`` coordinate with each other.
+    """
+
+    directory: Path
+    _descriptor: int | None
+
+    @classmethod
+    def acquire(
+        cls,
+        host_directory: Path | str,
+        *,
+        create: bool = False,
+    ) -> "OAuthSessionLease":
+        raw_directory = os.fspath(host_directory)
+        if not raw_directory:
+            raise SyncError("host Codex directory is empty")
+        # Do not silently canonicalize a final symlink here.  The reconciler
+        # already requires a real host credential directory, and accepting a
+        # symlink for the lease would let its target change the coordination
+        # boundary unexpectedly.
+        directory = os.path.abspath(raw_directory)
+        if create:
+            try:
+                os.makedirs(directory, mode=0o700, exist_ok=True)
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot create host Codex directory for OAuth: {exc}"
+                ) from exc
+        try:
+            before = os.lstat(directory)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot access host Codex directory for OAuth: {exc}"
+            ) from exc
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+            raise SyncError(
+                "host Codex directory for OAuth must be a real directory"
+            )
+        if before.st_uid != os.getuid():
+            raise SyncError(
+                "host Codex directory for OAuth must be owned by the current user"
+            )
+        try:
+            directory_descriptor = os.open(
+                directory,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise SyncError(
+                f"cannot safely open host Codex directory for OAuth: {exc}"
+            ) from exc
+        descriptor: int | None = None
+        try:
+            opened_directory = os.fstat(directory_descriptor)
+            current_directory = os.lstat(directory)
+            if (
+                _identity_of(before) != _identity_of(opened_directory)
+                or _identity_of(opened_directory) != _identity_of(current_directory)
+            ):
+                raise SyncError(
+                    "host Codex directory changed while preparing OAuth lease"
+                )
+            try:
+                os.fchmod(directory_descriptor, 0o700)
+            except OSError as exc:
+                raise SyncError(
+                    f"cannot secure host Codex directory for OAuth: {exc}"
+                ) from exc
+            try:
+                descriptor = os.open(
+                    SESSION_LEASE_NAME,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_descriptor,
+                )
+            except OSError as exc:
+                raise SyncError(f"cannot open Codex OAuth lease: {exc}") from exc
+            opened_lease = os.fstat(descriptor)
+            try:
+                current_lease = os.stat(
+                    SESSION_LEASE_NAME,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise SyncError(
+                    f"Codex OAuth lease changed while it was opened: {exc}"
+                ) from exc
+            if (
+                not stat.S_ISREG(opened_lease.st_mode)
+                or opened_lease.st_uid != os.getuid()
+                or opened_lease.st_nlink != 1
+                or _identity_of(opened_lease) != _identity_of(current_lease)
+            ):
+                raise SyncError("Codex OAuth lease must be a private regular file")
+            try:
+                os.fchmod(descriptor, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SyncError(
+                    "another Cage Codex session is already using OAuth credentials "
+                    f"in {directory}; stop it before launching or use a distinct "
+                    "host_codex_dir"
+                ) from exc
+            except OSError as exc:
+                raise SyncError(f"cannot acquire Codex OAuth lease: {exc}") from exc
+            lease = cls(Path(directory), descriptor)
+            descriptor = None
+            return lease
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(directory_descriptor)
+
+    def preserve_across_exec(self) -> None:
+        """Keep the kernel-held lease alive when host mode replaces Cage."""
+
+        if self._descriptor is None:
+            raise SyncError("Codex OAuth lease is already closed")
+        try:
+            os.set_inheritable(self._descriptor, True)
+        except OSError as exc:
+            raise SyncError(
+                f"cannot preserve Codex OAuth lease across exec: {exc}"
+            ) from exc
+
+    def close(self) -> int:
+        """Release the lease.  This is intentionally idempotent for cleanup."""
+
+        descriptor = self._descriptor
+        if descriptor is None:
+            return 0
+        self._descriptor = None
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            raise SyncError(f"cannot release Codex OAuth lease: {exc}") from exc
+        return 0
+
+    def __enter__(self) -> "OAuthSessionLease":
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
 
 
 def _reject_constant(value: str) -> None:

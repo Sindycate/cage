@@ -30,6 +30,7 @@ if str(_INSTALL_ROOT) not in sys.path:
 
 from cage_core.models import ContractError, ResolvedConfig, StoragePolicy
 from cage_core import bridge as bridge_policy, codex_policy, codex_runtime
+from cage_core.state import OAuthSessionLease, SyncError
 
 try:
     import tomllib
@@ -2249,7 +2250,6 @@ def command_mcp_auth(args: argparse.Namespace, action: str) -> int:
             f"MCP OAuth login/logout is not supported for {resolved.tool!r}"
         )
     codex_home = resolved.host_codex_dir or expand_path_string("~/.codex")
-    Path(codex_home).mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["CODEX_HOME"] = codex_home
@@ -2261,8 +2261,14 @@ def command_mcp_auth(args: argparse.Namespace, action: str) -> int:
         cmd.extend(["--scopes", ",".join(str(scope) for scope in server["oauth_scopes"])])
     cmd.append(args.name)
 
-    print(f"Codex dir: {codex_home}", flush=True)
-    return subprocess.call(cmd, env=env)
+    try:
+        with OAuthSessionLease.acquire(codex_home, create=True):
+            print(f"Codex dir: {codex_home}", flush=True)
+            return subprocess.call(cmd, env=env)
+    except SyncError as exc:
+        raise ConfigError(
+            f"cannot start Codex MCP OAuth {action}: {exc}"
+        ) from exc
 
 
 def command_mcp_login(args: argparse.Namespace) -> int:

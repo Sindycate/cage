@@ -121,6 +121,28 @@ def write_fake_codex(path: Path) -> None:
         '    exit 0\n'
         '  fi\n'
         'done\n'
+        'if [ "${CAGE_FAKE_CODEX_CHECK_OAUTH_LEASE:-}" = "1" ]; then\n'
+        '  python3 - "$CODEX_HOME" <<\'PY\'\n'
+        'import fcntl\n'
+        'import os\n'
+        'import sys\n'
+        'os.closerange(3, 4096)\n'
+        'descriptor = os.open(\n'
+        '    os.path.join(sys.argv[1], ".cage-oauth-session.lock"),\n'
+        '    os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),\n'
+        ')\n'
+        'try:\n'
+        '    try:\n'
+        '        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+        '    except BlockingIOError:\n'
+        '        print("OAUTH_LEASE=blocked")\n'
+        '    else:\n'
+        '        print("OAUTH_LEASE=acquired")\n'
+        '        fcntl.flock(descriptor, fcntl.LOCK_UN)\n'
+        'finally:\n'
+        '    os.close(descriptor)\n'
+        'PY\n'
+        'fi\n'
         'echo "CODEX_HOME=$CODEX_HOME"\n'
         'echo "CWD=$(pwd)"\n'
         'echo "ARGS=$*"\n'
@@ -152,6 +174,16 @@ def make_env(tmp_path: Path, bin_dir: Path, home: Path, xdg: Path) -> dict:
     # Remove ambient tokens that could leak into tests
     env.pop("GH_TOKEN", None)
     env.pop("GITHUB_TOKEN", None)
+    # Dynamic Git configuration is inherited by child processes. Tests that
+    # exercise inherited configuration add it explicitly, so the ordinary
+    # isolated launch fixtures must not retain the runner's identity values.
+    for name in list(env):
+        if (
+            name == "GIT_CONFIG_COUNT"
+            or name.startswith("GIT_CONFIG_KEY_")
+            or name.startswith("GIT_CONFIG_VALUE_")
+        ):
+            env.pop(name)
     return env
 
 
@@ -677,6 +709,23 @@ class TestHostCapabilities(unittest.TestCase):
         self.assertIn('mcp_servers.dash0.oauth.client_id="public-client-id"', result.stdout)
         self.assertIn('mcp_oauth_credentials_store="file"', result.stdout)
         self.assertNotIn("mcp_servers.dash0.auth", result.stdout)
+
+    def test_oauth_lease_survives_host_exec(self):
+        config = '\n'.join([
+            "version = 1", 'default_preset = "main"',
+            "[mcp_packs.google]",
+            'servers = [{ name = "google", type = "http", url = "https://google.example.test/mcp", auth = "oauth" }]',
+            "[presets.main]", 'tool = "codex"', 'target = "host"',
+            'net = "open"', 'mcp_packs = ["google"]', "",
+        ])
+        result, _, _, temporary = setup_host_test(
+            config,
+            env_overrides={"CAGE_FAKE_CODEX_CHECK_OAUTH_LEASE": "1"},
+        )
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OAUTH_LEASE=blocked", result.stdout)
+        self.assertIn("exclusive CODEX_HOME lease", result.stderr)
 
     def test_host_commands_rejected(self):
         config = '\n'.join([

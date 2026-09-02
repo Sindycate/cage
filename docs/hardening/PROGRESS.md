@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-02 — Codex OAuth refresh-token session lease prepared for v0.35.1
+
+The existing before/after `.credentials.json` reconciliation could preserve a
+rotated token after exit, but could not protect two live Codex processes that
+had already loaded the same old token. Cage now holds a private exclusive lease
+per selected host Codex directory for the complete selected-OAuth session,
+including post-run reconciliation. The lease applies to host-native, container,
+and Desktop targets; the host-native descriptor intentionally survives the
+`execve` into Codex. `cage mcp login/logout` use the same lease, so reauth
+cannot race an active Cage session.
+
+The lease validates a user-owned real credential directory and a private,
+single-link regular lock file. A conflicting launch fails fast with recovery
+guidance rather than waiting with a stale token. Separate host Codex directories
+remain the explicit concurrency boundary and require separate OAuth logins.
+
+Validation: focused OAuth reconciliation, MCP-login/logout contention, and
+host-exec inheritance coverage pass; the complete Python suite passes (609
+tests, 14 skipped); real-Docker smoke passes (9 tests, 1 skipped); Python
+compilation, Bash/Node syntax, Compose rendering, complete-history Gitleaks,
+and `git diff --check` pass. No provider credential, container, or personal
+configuration was changed during this work.
+
+The initial release preflight also exposed a host-execution fixture retaining
+ambient dynamic Git configuration from its parent process. The fixture now
+clears that state unless a test explicitly supplies it, preserving the separate
+coverage for inherited Git configuration.
+
 ## 2026-08-28 — Host-wide Token Monitor scheduler prepared for v0.35.0
 
 Replaced per-launch all-volume collector polling with a host-wide coordinator,

@@ -4,8 +4,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+
+from cage_core.state.oauth import OAuthSessionLease, SyncError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,11 +17,13 @@ STATE_NAME = ".cage-oauth-sync-state.json"
 
 
 FAKE_DOCKER = r'''#!/usr/bin/env python3
+import fcntl
 import json
 import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 args = sys.argv[1:]
@@ -104,6 +109,37 @@ elif action == "conflict":
 elif action == "symlink":
     credential.symlink_to(Path(os.environ["FAKE_SYMLINK_TARGET"]))
 
+if action == "hold":
+    probe_path = os.environ.get("FAKE_HOLD_PROBE")
+    if probe_path:
+        lock_path = (
+            Path(os.environ["FAKE_HOST_CREDENTIAL"]).parent
+            / ".cage-oauth-session.lock"
+        )
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                result = "blocked"
+            else:
+                result = "acquired"
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+        Path(probe_path).write_text(result + "\n", encoding="utf-8")
+    ready = Path(os.environ["FAKE_HOLD_READY"])
+    release = Path(os.environ["FAKE_HOLD_RELEASE"])
+    ready.write_text("ready\n", encoding="utf-8")
+    deadline = time.monotonic() + 20
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit("timed out waiting for test release")
+        time.sleep(0.02)
+
 if action in {"rotate", "malformed", "oversized", "conflict"}:
     os.chmod(credential, int(os.environ.get("FAKE_VOLUME_MODE", "600"), 8))
     if "FAKE_VOLUME_MTIME_NS" in os.environ:
@@ -148,35 +184,46 @@ class OAuthSyncHardeningTests(unittest.TestCase):
     def read_json(path):
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def write_config(self, codex_home):
-        (self.xdg / "cage" / "config.toml").write_text(
-            "\n".join(
+    def write_config(self, codex_home, *, oauth=False):
+        lines = [
+            "version = 1",
+            'default_preset = "codex-test"',
+            "[auth.codex-test]",
+            'tool = "codex"',
+            f'host_codex_dir = "{codex_home}"',
+            "copy_auth = false",
+        ]
+        if oauth:
+            lines.extend(
                 [
-                    "version = 1",
-                    'default_preset = "codex-test"',
-                    "[auth.codex-test]",
-                    'tool = "codex"',
-                    f'host_codex_dir = "{codex_home}"',
-                    "copy_auth = false",
-                    "[presets.codex-test]",
-                    'tool = "codex"',
-                    'auth = "codex-test"',
-                    'net = "open"',
-                    "",
+                    "[mcp_packs.oauth]",
+                    "servers = [",
+                    '  { name = "oauth", type = "http", url = "https://oauth.example.test/mcp", auth = "oauth" },',
+                    "]",
                 ]
-            ),
-            encoding="utf-8",
+            )
+        lines.extend(
+            [
+                "[presets.codex-test]",
+                'tool = "codex"',
+                'auth = "codex-test"',
+                'net = "open"',
+                *(['mcp_packs = ["oauth"]'] if oauth else []),
+                "",
+            ]
+        )
+        (self.xdg / "cage" / "config.toml").write_text(
+            "\n".join(lines), encoding="utf-8"
         )
 
-    def launch(self, codex_home, **extra_env):
-        self.write_config(codex_home)
+    def launch_environment(self, codex_home, *, volume=None, **extra_env):
         environment = os.environ.copy()
         environment.update(
             {
                 "HOME": str(self.home),
                 "XDG_CONFIG_HOME": str(self.xdg),
                 "PATH": f"{self.bin}{os.pathsep}{environment['PATH']}",
-                "FAKE_VOLUME_DIR": str(self.volume),
+                "FAKE_VOLUME_DIR": str(volume or self.volume),
                 "FAKE_DOCKER_LOG": str(self.log),
                 "FAKE_HOST_CREDENTIAL": str(codex_home / ".credentials.json"),
             }
@@ -184,6 +231,13 @@ class OAuthSyncHardeningTests(unittest.TestCase):
         for name in ("OPENAI_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"):
             environment.pop(name, None)
         environment.update({name: str(value) for name, value in extra_env.items()})
+        return environment
+
+    def launch(self, codex_home, *, oauth=False, volume=None, **extra_env):
+        self.write_config(codex_home, oauth=oauth)
+        environment = self.launch_environment(
+            codex_home, volume=volume, **extra_env
+        )
         return subprocess.run(
             [str(CAGE), str(self.repo)],
             cwd=ROOT,
@@ -192,6 +246,29 @@ class OAuthSyncHardeningTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+    def launch_process(self, codex_home, *, oauth=False, volume=None, **extra_env):
+        self.write_config(codex_home, oauth=oauth)
+        environment = self.launch_environment(
+            codex_home, volume=volume, **extra_env
+        )
+        return subprocess.Popen(
+            [str(CAGE), str(self.repo)],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    @staticmethod
+    def wait_for(path, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for {path}")
 
     def test_refresh_uses_hashes_not_mtimes_and_normalizes_private_modes(self):
         codex_home = self.make_codex_home("codex-a", {"token": "initial"}, mode=0o644)
@@ -341,6 +418,70 @@ class OAuthSyncHardeningTests(unittest.TestCase):
         failed = self.launch(codex_home, FAKE_MAIN_ACTION="malformed")
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(list((self.xdg / "cage").glob(".cage-oauth-sync-*")), [])
+
+    def test_oauth_session_lease_stays_held_while_container_runs(self):
+        codex_home = self.make_codex_home("codex-lease", {"token": "safe"})
+        ready = self.base / "lease-ready"
+        release = self.base / "lease-release"
+        probe = self.base / "lease-probe"
+        first = self.launch_process(
+            codex_home,
+            oauth=True,
+            FAKE_MAIN_ACTION="hold",
+            FAKE_HOLD_READY=ready,
+            FAKE_HOLD_RELEASE=release,
+            FAKE_HOLD_PROBE=probe,
+        )
+        try:
+            self.wait_for(ready)
+        finally:
+            release.touch()
+            stdout, stderr = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, stderr)
+        self.assertIn("Codex CLI Container", stdout)
+        self.assertEqual(probe.read_text(encoding="utf-8"), "blocked\n")
+        self.assertEqual(
+            stat.S_IMODE((codex_home / ".cage-oauth-session.lock").stat().st_mode),
+            0o600,
+        )
+
+    def test_oauth_session_lease_rejects_a_second_process_then_releases(self):
+        codex_home = self.make_codex_home("codex-lease-contention")
+        lease = OAuthSessionLease.acquire(codex_home)
+        try:
+            contender = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from cage_core.state.oauth import OAuthSessionLease; "
+                    "from pathlib import Path; import sys; "
+                    "OAuthSessionLease.acquire(Path(sys.argv[1]))",
+                    str(codex_home),
+                ],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(contender.returncode, 0)
+            self.assertIn(
+                "another Cage Codex session is already using OAuth credentials",
+                contender.stderr,
+            )
+        finally:
+            lease.close()
+        with OAuthSessionLease.acquire(codex_home) as subsequent:
+            self.assertEqual(subsequent.directory, codex_home)
+
+    def test_oauth_session_lease_rejects_a_symlinked_credential_directory(self):
+        codex_home = self.make_codex_home("codex-lease-target")
+        alias = self.base / "codex-lease-alias"
+        alias.symlink_to(codex_home, target_is_directory=True)
+
+        with self.assertRaisesRegex(SyncError, "must be a real directory"):
+            OAuthSessionLease.acquire(alias, create=True)
+
+        self.assertFalse((codex_home / ".cage-oauth-session.lock").exists())
 
 
 if __name__ == "__main__":
