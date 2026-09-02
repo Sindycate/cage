@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.3 — 2026-09-03
+
+- shorten the maintainer release path by splitting independent CI validation
+  into parallel Python, Docker, and static lanes, building the four candidate
+  leaf images in a parallel matrix after the shared base, and running the
+  publisher's independent local release gates concurrently; exact-SHA
+  candidate reuse, provenance attestations, final manifest verification, and
+  release safety gates are unchanged;
+
 ## 0.36.2 — 2026-09-02
 
 - restore explicitly owner-approved custom Token Monitor provider streams

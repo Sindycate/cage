@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Release pipeline speedup prepared for v0.36.3
+
+The current main release path was measured before changing it. Main CI run
+`33674882630` took 15m53s end to end: the validation job took 3m10s and the
+candidate job took 12m37s. Within the candidate job, the shared base build took
+5m48s and the four leaf builds plus their attestations consumed about 6m43s
+serially. The corresponding v0.36.2 release workflow took 2m46s, including a
+60s gate. On the maintainer machine, the serialized local release gates were
+about 67.1s, dominated by the 66.4s full Python suite.
+
+CI now keeps the same required gates but schedules Python tests, Docker smokes,
+and static checks as independent jobs. The candidate base remains after every
+gate, and the four candidate leaves run as a fail-fast-disabled matrix only
+after the exact resolved base digest is available. The final candidate job
+still re-resolves every GHCR tag, checks both platforms and the CI attestation,
+and writes the SHA-named manifest only after those checks pass. The publisher
+now overlaps its five independent read-only local gates while retaining stable
+report/journal order and fail-closed error handling.
+
+Validation so far: the complete Python suite passes (`637 passed, 15
+skipped`), focused publisher/supply-chain coverage passes (`149 passed`), YAML
+parsing, Python compilation, `git diff --check`, and the local parallelism
+regression pass. A controlled local-gate benchmark measured 61.872s
+sequentially versus 58.853s in parallel (3.019s, 4.9%). An ephemeral branch CI
+run is the safe validation path for the split test jobs; candidate publication
+remains restricted to pushes to `main`, so this test cannot create a release
+version.
+
 ## 2026-09-02 — Verified named-provider recovery prepared for v0.36.2
 
 The 0.36.0 fixed provider-label vocabulary incorrectly reclassified an
