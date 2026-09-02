@@ -211,16 +211,34 @@ the logical ID, project ID, volume fingerprint, cached history, and totals do
 not change. Replacements or ambiguous registrations remain fail-closed and
 require explicit `monitor add` adoption.
 
-Each recognized public provider used by a Cage installation has one readable
-hub device, for example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each
+Each recognized provider used by a Cage installation has one readable hub
+device, for example `cage-zllm-mac-…` and `cage-openai-api-mac-…`. Each
 registered Codex source remains a project under the provider device that owns
 its sessions. A repository can therefore appear under more than one provider
 device. Cage deduplicates sessions before partitioning them, then replaces each
 provider device summary. It never uploads both the old unsplit aggregate and
-its provider partitions. Unknown or private provider labels are counted as
-`Unattributed` rather than becoming a hub device name. If a provider no longer
-has any retained session, Cage uploads a zero summary for that exact,
-previously-known provider device so the hub cannot keep a stale total.
+its provider partitions.
+
+Built-in provider labels are readable by default. An arbitrary account or
+endpoint label remains `Unattributed` unless you explicitly approve that exact
+label in Cage's private monitor state. Approval changes no hub data; the
+separate migration protects an existing named stream from being duplicated or
+renamed:
+
+```bash
+cage monitor provider allow LABEL
+cage monitor provider migrate LABEL --yes
+```
+
+The migration performs a fresh, cross-source deduplicated scan, requires the
+existing named device and current `Unattributed` device to match its calculated
+totals, then reduces only the duplicate `Unattributed` total. It preserves and
+reuses the existing named device; it does not delete it. If verification or an
+upload is interrupted, normal monitor uploads pause and `cage monitor provider
+status` shows the private recovery state. Do not use `monitor forget` for this
+repair. If a provider no longer has any retained session, Cage uploads a zero
+summary for that exact, previously-known provider device so the hub cannot keep
+a stale total.
 
 Token Monitor v0.49.0 exposes one-device ingest rather than a transaction. Cage
 therefore prepares a private local generation and keeps the last-good provider
@@ -250,6 +268,9 @@ cage monitor add ~/projects/myapp --preset codex-company --container
 cage monitor add --volume codex-state-old  # adopt an exact recovered volume
 cage monitor add --auth codex-personal     # opt in Cage-only host sessions
 cage monitor disable --auth codex-personal # return host launches to source state
+cage monitor provider status               # local custom-label state only
+cage monitor provider allow LABEL          # no hub change
+cage monitor provider migrate LABEL --yes  # verified named-stream repair
 cage monitor sync                 # forced full reconciliation and repair
 cage monitor sync ~/projects/myapp # resolve, then forced full reconciliation
 cage monitor pricing status

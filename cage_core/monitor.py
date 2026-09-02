@@ -43,6 +43,8 @@ SPLIT_STATUS_VERSION = 1
 SCHEDULER_STATE_VERSION = 1
 VOLUME_SNAPSHOT_VERSION = 1
 UPLOAD_STATE_VERSION = 1
+PROVIDER_LABELS_VERSION = 1
+PROVIDER_LABEL_MIGRATION_VERSION = 1
 COLLECTOR_IMAGE = "cage-token-monitor"
 COLLECTOR_REGISTRY = "ghcr.io/sindycate/cage/token-monitor"
 COLLECTOR_DOCKERFILE = "Dockerfile.monitor"
@@ -74,6 +76,7 @@ MAX_HOST_STATIC_FILES = 256
 MAX_HOST_STATIC_DEPTH = 16
 MAX_HOST_CREDENTIAL_BYTES = 4 * 1024 * 1024
 MAX_HOST_STATIC_MANIFEST_BYTES = 128 * 1024
+MAX_PROVIDER_LABELS = 64
 
 # Token Monitor's local hub receives the upstream agent's sync payload.  Keep
 # this top-level wire contract explicit so a future upstream collector cannot
@@ -119,6 +122,8 @@ DEVICE_DIR = "devices"
 PROJECT_DIR = "projects"
 RUN_DIR = "runs"
 PRICING_FILE = "pricing.json"
+PROVIDER_LABELS_FILE = "provider-labels.json"
+PROVIDER_LABEL_MIGRATION_FILE = "provider-label-migration.json"
 AGGREGATE_STATUS_FILE = "aggregate-status.json"
 SPLIT_STATUS_FILE = "split-status.json"
 SCHEDULER_STATE_FILE = "scheduler.json"
@@ -136,10 +141,11 @@ GENERATION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CODEX_VOLUME_PREFIX = "codex-state-"
 HOST_SOURCE_PREFIX = "cage-host-source-"
 UNATTRIBUTED_PROVIDER = "unattributed"
-# Provider names originate in a local Codex session.  Do not turn an arbitrary
-# local endpoint/account label into a readable hub device or payload field.
-# These are the only deliberately public stream labels; every other value is
-# counted in the generic unattributed stream.
+# Provider names originate in a local Codex session.  Built-in public stream
+# labels are safe by default.  Other labels stay unattributed unless the owner
+# approves that exact normalized label in private monitor state and completes
+# its verified migration.  The approval is never part of central config or
+# tracked source.
 PUBLIC_PROVIDER_IDS = frozenset(
     {"openai-api", "openai-compatible", "zllm", UNATTRIBUTED_PROVIDER}
 )
@@ -929,22 +935,295 @@ def _provider_slug(value: object) -> str | None:
     return normalized
 
 
-def provider_device_id(config_root: Path, provider: str) -> str:
-    """Return a readable device identity for one provider stream."""
+def _validate_provider_label_list(value: object, *, field: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_PROVIDER_LABELS:
+        raise MonitorError("monitor provider-label state is invalid")
+    labels: list[str] = []
+    for raw_label in value:
+        label = _provider_slug(raw_label)
+        if label is None or label != raw_label or label in PUBLIC_PROVIDER_IDS:
+            raise MonitorError("monitor provider-label state is invalid")
+        labels.append(label)
+    if len(set(labels)) != len(labels):
+        raise MonitorError("monitor provider-label state is invalid")
+    return sorted(labels)
 
-    provider_id = _public_provider_id(provider)
+
+def _empty_provider_labels() -> dict[str, object]:
+    return {"version": PROVIDER_LABELS_VERSION, "approved": [], "active": []}
+
+
+def _validate_provider_labels(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {"version", "approved", "active"}:
+        raise MonitorError("monitor provider-label state is invalid")
+    if value["version"] != PROVIDER_LABELS_VERSION:
+        raise MonitorError("monitor provider-label state has an invalid version")
+    approved = _validate_provider_label_list(value["approved"], field="approved")
+    active = _validate_provider_label_list(value["active"], field="active")
+    if not set(active).issubset(approved):
+        raise MonitorError("monitor provider-label state is invalid")
+    return {
+        "version": PROVIDER_LABELS_VERSION,
+        "approved": approved,
+        "active": active,
+    }
+
+
+def load_provider_labels(config_root: Path) -> dict[str, object]:
+    """Load owner-approved readable provider labels from private state."""
+
+    value = _read_json(
+        monitor_root(config_root) / PROVIDER_LABELS_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if value is None:
+        return _empty_provider_labels()
+    return _validate_provider_labels(value)
+
+
+def save_provider_labels(config_root: Path, value: dict[str, object]) -> None:
+    _write_json(
+        monitor_root(config_root) / PROVIDER_LABELS_FILE,
+        _validate_provider_labels(value),
+    )
+
+
+def _approved_provider_ids(config_root: Path) -> frozenset[str]:
+    labels = load_provider_labels(config_root)
+    approved = labels["approved"]
+    assert isinstance(approved, list)
+    return frozenset(PUBLIC_PROVIDER_IDS | set(approved))
+
+
+def _active_provider_ids(config_root: Path) -> frozenset[str]:
+    labels = load_provider_labels(config_root)
+    active = labels["active"]
+    assert isinstance(active, list)
+    return frozenset(PUBLIC_PROVIDER_IDS | set(active))
+
+
+def _provider_id_from_allowed(
+    value: object,
+    allowed_provider_ids: frozenset[str] | set[str],
+) -> str | None:
+    provider = _provider_slug(value)
+    return provider if provider is not None and provider in allowed_provider_ids else None
+
+
+def _public_provider_id(
+    config_root: Path,
+    value: object,
+    *,
+    include_approved: bool = False,
+) -> str | None:
+    """Return an owner-approved provider name that may reach the hub.
+
+    An arbitrary session label never becomes public merely because it is a
+    syntactically safe slug.  Built-ins are active by default; a custom label
+    becomes active only after explicit local approval and verified migration.
+    """
+
+    allowed = (
+        _approved_provider_ids(config_root)
+        if include_approved
+        else _active_provider_ids(config_root)
+    )
+    return _provider_id_from_allowed(value, allowed)
+
+
+def _provider_device_id_for(
+    config_root: Path,
+    provider: str,
+    allowed_provider_ids: frozenset[str] | set[str],
+) -> str:
+    provider_id = _provider_id_from_allowed(provider, allowed_provider_ids)
     if provider_id is None:
         raise MonitorError("invalid monitor provider identity")
     return f"cage-{provider_id}-{_platform_slug()}-{host_install_id(config_root)[:8]}"
 
 
-def provider_display_name(provider: str) -> str:
-    provider_id = _public_provider_id(provider) or UNATTRIBUTED_PROVIDER
+def provider_device_id(
+    config_root: Path,
+    provider: str,
+    *,
+    include_approved: bool = False,
+) -> str:
+    """Return a readable device identity for an active provider stream.
+
+    ``include_approved`` is reserved for the verified migration path.  It
+    never makes a pending label available to normal scans.
+    """
+
+    allowed = (
+        _approved_provider_ids(config_root)
+        if include_approved
+        else _active_provider_ids(config_root)
+    )
+    return _provider_device_id_for(config_root, provider, allowed)
+
+
+def provider_display_name(
+    provider: str,
+    *,
+    allowed_provider_ids: frozenset[str] | set[str] | None = None,
+) -> str:
+    """Render a provider label only when it belongs to an allowed stream."""
+
+    allowed = PUBLIC_PROVIDER_IDS if allowed_provider_ids is None else allowed_provider_ids
+    provider_id = _provider_id_from_allowed(provider, allowed) or UNATTRIBUTED_PROVIDER
     if provider_id == "openai-api":
         return "OpenAI API"
     if provider_id == UNATTRIBUTED_PROVIDER:
         return "Unattributed"
     return provider_id.upper() if provider_id == "zllm" else provider_id
+
+
+def _validated_custom_provider_label(value: object) -> str:
+    label = _provider_slug(value)
+    if label is None or label in PUBLIC_PROVIDER_IDS:
+        raise MonitorError("invalid custom monitor provider label")
+    return label
+
+
+def _validate_provider_label_migration(
+    config_root: Path,
+    value: object,
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "label",
+        "state",
+        "baseline_unattributed_tokens",
+        "label_tokens",
+        "residual_unattributed_tokens",
+        "created_at",
+        "updated_at",
+    }:
+        raise MonitorError("monitor provider-label migration state is invalid")
+    if value["version"] != PROVIDER_LABEL_MIGRATION_VERSION:
+        raise MonitorError("monitor provider-label migration has an invalid version")
+    label = _validated_custom_provider_label(value["label"])
+    approved = _approved_provider_ids(config_root)
+    if label not in approved:
+        raise MonitorError("monitor provider-label migration is not approved")
+    if value["state"] not in {"prepared", "repartitioned"}:
+        raise MonitorError("monitor provider-label migration state is invalid")
+    totals: dict[str, float] = {}
+    for name in (
+        "baseline_unattributed_tokens",
+        "label_tokens",
+        "residual_unattributed_tokens",
+    ):
+        raw_total = value[name]
+        if (
+            type(raw_total) not in (int, float)
+            or not math.isfinite(raw_total)
+            or raw_total < 0
+        ):
+            raise MonitorError("monitor provider-label migration state is invalid")
+        totals[name] = float(raw_total)
+    for name in ("created_at", "updated_at"):
+        if not isinstance(value[name], str) or len(value[name]) > 128:
+            raise MonitorError("monitor provider-label migration state is invalid")
+    return {
+        "version": PROVIDER_LABEL_MIGRATION_VERSION,
+        "label": label,
+        "state": value["state"],
+        **totals,
+        "created_at": value["created_at"],
+        "updated_at": value["updated_at"],
+    }
+
+
+def load_provider_label_migration(config_root: Path) -> dict[str, object] | None:
+    value = _read_json(
+        monitor_root(config_root) / PROVIDER_LABEL_MIGRATION_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+    if value is None:
+        return None
+    return _validate_provider_label_migration(config_root, value)
+
+
+def save_provider_label_migration(config_root: Path, value: dict[str, object]) -> None:
+    _write_json(
+        monitor_root(config_root) / PROVIDER_LABEL_MIGRATION_FILE,
+        _validate_provider_label_migration(config_root, value),
+    )
+
+
+def remove_provider_label_migration(config_root: Path) -> None:
+    _remove_private_file(
+        monitor_root(config_root) / PROVIDER_LABEL_MIGRATION_FILE,
+        max_bytes=MAX_CONNECTION_BYTES,
+    )
+
+
+def approve_provider_label(config_root: Path, value: object) -> str:
+    """Approve one custom label locally without changing hub state."""
+
+    label = _validated_custom_provider_label(value)
+    migration = load_provider_label_migration(config_root)
+    if migration is not None and migration["label"] != label:
+        raise MonitorError("another monitor provider-label migration is pending")
+    labels = load_provider_labels(config_root)
+    approved = set(labels["approved"])
+    active = set(labels["active"])
+    pending = approved - active
+    if pending and label not in pending:
+        raise MonitorError("another monitor provider-label migration is pending")
+    if label not in approved:
+        approved.add(label)
+        save_provider_labels(
+            config_root,
+            {
+                "version": PROVIDER_LABELS_VERSION,
+                "approved": sorted(approved),
+                "active": sorted(active),
+            },
+        )
+    return label
+
+
+def _activate_provider_label(config_root: Path, label: str) -> None:
+    label = _validated_custom_provider_label(label)
+    labels = load_provider_labels(config_root)
+    approved = set(labels["approved"])
+    active = set(labels["active"])
+    if label not in approved:
+        raise MonitorError("monitor provider label is not approved")
+    if label in active:
+        return
+    active.add(label)
+    save_provider_labels(
+        config_root,
+        {
+            "version": PROVIDER_LABELS_VERSION,
+            "approved": sorted(approved),
+            "active": sorted(active),
+        },
+    )
+
+
+def provider_label_status(config_root: Path) -> dict[str, object]:
+    """Return local-only approval and migration state for CLI status."""
+
+    labels = load_provider_labels(config_root)
+    approved = list(labels["approved"])
+    active = list(labels["active"])
+    return {
+        "approved": approved,
+        "active": active,
+        "pending": sorted(set(approved) - set(active)),
+        "migration": load_provider_label_migration(config_root),
+    }
+
+
+def provider_label_migration_pending(config_root: Path) -> bool:
+    labels = load_provider_labels(config_root)
+    if set(labels["approved"]) != set(labels["active"]):
+        return True
+    return load_provider_label_migration(config_root) is not None
 
 
 def device_id_for(config_root: Path, logical_id: str = "") -> str:
@@ -965,19 +1244,6 @@ def project_id_for(config_root: Path, logical_id: str) -> str:
         hashlib.sha256,
     ).hexdigest()[:20]
     return f"cage-project-{digest}"
-
-
-def _public_provider_id(value: object) -> str | None:
-    """Return a provider name that is safe to make visible outside Cage.
-
-    A session may contain an arbitrary provider/account label.  Normalizing it
-    into a syntactically safe slug is not enough: that slug would still become
-    a readable hub device name.  Keep the public vocabulary deliberately
-    closed and place every other label in the unattributed stream.
-    """
-
-    provider = _provider_slug(value)
-    return provider if provider in PUBLIC_PROVIDER_IDS else None
 
 
 def _checked_host_source_directory(value: Path | str) -> tuple[Path, os.stat_result]:
@@ -3279,7 +3545,7 @@ def _generation_manifest_path(config_root: Path, generation: str) -> Path:
     return _generation_root(config_root) / _validate_generation_id(generation) / "generation.json"
 
 
-def _validate_upload_state(value: object) -> dict[str, Any]:
+def _validate_upload_state(config_root: Path, value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "version",
         "state",
@@ -3303,7 +3569,7 @@ def _validate_upload_state(value: object) -> dict[str, Any]:
     if not isinstance(provider_ids, dict) or len(provider_ids) > 1024:
         raise MonitorError("monitor upload provider identities are invalid")
     for raw_provider, device_id in provider_ids.items():
-        provider = _public_provider_id(raw_provider)
+        provider = _public_provider_id(config_root, raw_provider)
         if provider != raw_provider:
             raise MonitorError("monitor upload provider identity is invalid")
         validate_device_id(device_id)
@@ -3327,13 +3593,13 @@ def load_upload_state(config_root: Path) -> dict[str, Any] | None:
     )
     if value is None:
         return None
-    return _validate_upload_state(value)
+    return _validate_upload_state(config_root, value)
 
 
 def save_upload_state(config_root: Path, value: dict[str, Any]) -> None:
     _write_json(
         monitor_root(config_root) / UPLOAD_STATE_FILE,
-        _validate_upload_state(value),
+        _validate_upload_state(config_root, value),
     )
 
 
@@ -3355,7 +3621,7 @@ def _validate_exact_provider_ids(
     if not isinstance(provider_ids, dict):
         raise MonitorError("monitor provider device map is invalid")
     for raw_provider, device_id in provider_ids.items():
-        provider = _public_provider_id(raw_provider)
+        provider = _public_provider_id(config_root, raw_provider)
         if provider != raw_provider:
             raise MonitorError("monitor provider identity is invalid")
         expected = provider_device_id(config_root, provider)
@@ -3370,20 +3636,20 @@ def _is_legacy_private_provider_entry(
     raw_provider: object,
     entry: object,
 ) -> bool:
-    """Return whether one old private provider entry has its exact old ID.
+    """Return whether one unapproved old provider entry has its exact old ID.
 
     Before 0.36.0, a syntactically safe local provider label could become a
-    provider device ID.  The label is no longer safe to publish, but a prior
-    generation can still be needed as a rollback baseline.  Recognize only
-    the exact legacy shape and deterministic device ID, then deliberately
-    omit it from the returned payloads so it can never be uploaded again.
+    provider device ID without the owner's current explicit approval. A prior
+    generation can still be needed as a rollback baseline, so recognize only
+    the exact legacy shape and deterministic device ID, then omit it unless
+    the owner restores that label through the verified migration path.
     """
 
     provider = _provider_slug(raw_provider)
     if (
         provider != raw_provider
         or provider is None
-        or _public_provider_id(provider) is not None
+        or _public_provider_id(config_root, provider) is not None
         or not isinstance(entry, dict)
         or set(entry) != {"device_id"}
     ):
@@ -3406,7 +3672,7 @@ def _write_generation_payloads(
     _ensure_private_directory(directory)
     provider_ids: dict[str, str] = {}
     for provider, (payload, _status) in sorted(payloads.items()):
-        normalized = _public_provider_id(provider)
+        normalized = _public_provider_id(config_root, provider)
         if normalized != provider:
             raise MonitorError("monitor provider identity is invalid")
         device_id = provider_device_id(config_root, provider)
@@ -3451,7 +3717,7 @@ def _load_generation_payloads(
         raise MonitorError("monitor upload generation has too many providers")
     provider_ids: dict[str, str] = {}
     for raw_provider, entry in provider_entries.items():
-        provider = _public_provider_id(raw_provider)
+        provider = _public_provider_id(config_root, raw_provider)
         if provider == raw_provider and isinstance(entry, dict) and set(entry) == {"device_id"}:
             device_id = entry["device_id"]
             validate_device_id(device_id)
@@ -3599,6 +3865,8 @@ def _publish_provider_payloads(
     payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
     status: dict[str, Any],
     previous_status: dict[str, Any] | None,
+    *,
+    skip_upload_for: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     """Publish one generation and repair any interrupted older generation.
 
@@ -3608,6 +3876,9 @@ def _publish_provider_payloads(
     status authoritative locally.
     """
 
+    skipped = set(skip_upload_for)
+    if not skipped.issubset(payloads):
+        raise MonitorError("monitor provider upload skip set is invalid")
     _repair_pending_upload(config_root, connection)
     previous_generation, previous = _previous_generation(config_root, previous_status)
     generation = _write_generation_payloads(config_root, payloads)
@@ -3629,6 +3900,8 @@ def _publish_provider_payloads(
     )
     try:
         for provider in sorted(payloads):
+            if provider in skipped:
+                continue
             attempted.append(provider)
             save_upload_state(
                 config_root,
@@ -3740,18 +4013,23 @@ def _session_map(session: dict[str, Any], field: str) -> dict[str, float]:
     return result
 
 
-def session_provider(session: dict[str, Any]) -> str:
+def session_provider(
+    session: dict[str, Any],
+    *,
+    allowed_provider_ids: frozenset[str] | set[str] | None = None,
+) -> str:
     """Return the only trustworthy provider for a session.
 
     Token Monitor records provider totals in a session-level map.  One key is
-    safe to attribute only when it is one of Cage's deliberately public stream
-    labels.  Missing, private/unknown, unsafe, or multi-provider maps stay in
-    the explicit unattributed stream so Cage never guesses, duplicates tokens,
-    or publishes a local provider label.
+    safe to attribute only when it is a built-in or explicitly approved stream
+    label.  Missing, unapproved, unsafe, or multi-provider maps stay in the
+    explicit unattributed stream so Cage never guesses, duplicates tokens, or
+    publishes a local provider label.
     """
 
     providers = _session_map(session, "providers")
-    normalized = {_public_provider_id(key) for key in providers}
+    allowed = PUBLIC_PROVIDER_IDS if allowed_provider_ids is None else allowed_provider_ids
+    normalized = {_provider_id_from_allowed(key, allowed) for key in providers}
     if len(normalized) == 1 and None not in normalized:
         provider = next(iter(normalized))
         assert provider is not None
@@ -3839,10 +4117,12 @@ def _project_for_candidates(
 def _custom_session_cost(
     session: dict[str, Any],
     pricing: dict[str, dict[str, float]],
+    *,
+    allowed_provider_ids: frozenset[str] | set[str],
 ) -> tuple[str, float, int] | None:
     """Price an exactly attributable single-model session from its components."""
 
-    provider = session_provider(session)
+    provider = session_provider(session, allowed_provider_ids=allowed_provider_ids)
     if provider == UNATTRIBUTED_PROVIDER:
         return None
     models = _session_map(session, "models")
@@ -3896,6 +4176,7 @@ def _period_from_sessions(
     config_root: Path,
     occurrences: dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]],
     *,
+    allowed_provider_ids: frozenset[str] | set[str],
     winners: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], int]:
     period = _empty_aggregate_period()
@@ -3905,8 +4186,10 @@ def _period_from_sessions(
         candidates = occurrences[key]
         duplicates += max(0, len(candidates) - 1)
         session = dict(winners[key]) if winners is not None and key in winners else _select_session(candidates)
-        provider = session_provider(session)
-        custom_cost = _custom_session_cost(session, pricing)
+        provider = session_provider(session, allowed_provider_ids=allowed_provider_ids)
+        custom_cost = _custom_session_cost(
+            session, pricing, allowed_provider_ids=allowed_provider_ids
+        )
         if custom_cost is not None:
             custom_model, custom_value, _ = custom_cost
             session["costUsd"] = custom_value
@@ -4044,6 +4327,7 @@ def _build_device_payload(
     device_id: str,
     *,
     provider: str = "",
+    allowed_provider_ids: frozenset[str] | set[str],
     winners_by_period: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     periods: dict[str, dict[str, Any]] = {}
@@ -4051,13 +4335,18 @@ def _build_device_payload(
     for period_name, values in occurrences.items():
         winners = winners_by_period.get(period_name) if winners_by_period else None
         periods[period_name], duplicate_counts[period_name] = _period_from_sessions(
-            config_root, values, winners=winners
+            config_root,
+            values,
+            allowed_provider_ids=allowed_provider_ids,
+            winners=winners,
         )
     now = _now()
     payload: dict[str, Any] = {
         "deviceId": device_id,
         "hostname": (
-            f"Cage ({provider_display_name(provider)})" if provider else "Cage (local)"
+            f"Cage ({provider_display_name(provider, allowed_provider_ids=allowed_provider_ids)})"
+            if provider
+            else "Cage (local)"
         ),
         "platform": "cage",
         "osName": "Cage",
@@ -4084,8 +4373,12 @@ def _build_device_payload(
     for session in all_time["sessions"].values():
         models = _session_map(session, "models")
         model_costs = _session_map(session, "modelCosts")
-        session_provider_id = session_provider(session)
-        custom_cost = _custom_session_cost(session, pricing)
+        session_provider_id = session_provider(
+            session, allowed_provider_ids=allowed_provider_ids
+        )
+        custom_cost = _custom_session_cost(
+            session, pricing, allowed_provider_ids=allowed_provider_ids
+        )
         if custom_cost is not None:
             custom_model, _, covered = custom_cost
             priced_tokens += covered
@@ -4130,7 +4423,9 @@ def _build_device_payload(
     }
     if provider:
         status["provider"] = provider
-        status["provider_label"] = provider_display_name(provider)
+        status["provider_label"] = provider_display_name(
+            provider, allowed_provider_ids=allowed_provider_ids
+        )
     # Match the upstream wire contract: all-time session detail is local-only.
     # The exact all-time project rollup remains in the upload.
     payload["allTime"].pop("sessions", None)
@@ -4152,6 +4447,8 @@ def _empty_provider_payload(
     first: dict[str, Any],
     device_id: str,
     provider: str,
+    *,
+    allowed_provider_ids: frozenset[str] | set[str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     empty_occurrences = {name: {} for name in ("today", "month", "allTime")}
     return _build_device_payload(
@@ -4161,12 +4458,15 @@ def _empty_provider_payload(
         empty_occurrences,
         device_id,
         provider=provider,
+        allowed_provider_ids=allowed_provider_ids,
         winners_by_period={name: {} for name in empty_occurrences},
     )
 
 
 def _provider_partitions(
     occurrences: dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]],
+    *,
+    allowed_provider_ids: frozenset[str] | set[str],
 ) -> tuple[
     dict[str, dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]]],
     dict[str, dict[str, dict[str, dict[str, Any]]]],
@@ -4178,7 +4478,9 @@ def _provider_partitions(
     for period_name, values in occurrences.items():
         for key, candidates in values.items():
             winner = _select_session(candidates)
-            provider = session_provider(winner)
+            provider = session_provider(
+                winner, allowed_provider_ids=allowed_provider_ids
+            )
             partitions.setdefault(provider, {name: {} for name in occurrences})
             winners.setdefault(provider, {name: {} for name in occurrences})
             partitions[provider][period_name][key] = candidates
@@ -4193,23 +4495,52 @@ def aggregate_summaries(
     """Build the compatibility unsplit aggregate without uploading it."""
 
     first, occurrences = _collect_occurrences(summaries)
+    allowed_provider_ids = _active_provider_ids(config_root)
     return _build_device_payload(
         config_root,
         first,
         len(summaries),
         occurrences,
         host_device_id(config_root),
+        allowed_provider_ids=allowed_provider_ids,
     )
 
 
 def aggregate_provider_summaries(
     config_root: Path,
     summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+    *,
+    include_approved: bool = False,
 ) -> tuple[dict[str, tuple[dict[str, Any], dict[str, Any]]], dict[str, Any]]:
     """Build one hub payload per provider after cross-volume deduplication."""
 
+    allowed_provider_ids = (
+        _approved_provider_ids(config_root)
+        if include_approved
+        else _active_provider_ids(config_root)
+    )
+    return _aggregate_provider_summaries_for_allowed(
+        config_root, summaries, allowed_provider_ids
+    )
+
+
+def _aggregate_provider_summaries_for_allowed(
+    config_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+    allowed_provider_ids: frozenset[str] | set[str],
+) -> tuple[dict[str, tuple[dict[str, Any], dict[str, Any]]], dict[str, Any]]:
+    """Build provider payloads for one already-authorized label set.
+
+    The label-recovery path needs an explicit baseline in which the pending
+    label remains unattributed, even after a crash has activated it locally.
+    Normal callers use :func:`aggregate_provider_summaries` instead.
+    """
+
     first, occurrences = _collect_occurrences(summaries)
-    partitions, winners = _provider_partitions(occurrences)
+    allowed_provider_ids = frozenset(allowed_provider_ids)
+    partitions, winners = _provider_partitions(
+        occurrences, allowed_provider_ids=allowed_provider_ids
+    )
     result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for provider in sorted(partitions):
         result[provider] = _build_device_payload(
@@ -4217,8 +4548,9 @@ def aggregate_provider_summaries(
             first,
             len(summaries),
             partitions[provider],
-            provider_device_id(config_root, provider),
+            _provider_device_id_for(config_root, provider, allowed_provider_ids),
             provider=provider,
+            allowed_provider_ids=allowed_provider_ids,
             winners_by_period=winners[provider],
         )
     total_tokens = sum(item[1]["total_tokens"] for item in result.values())
@@ -4712,6 +5044,9 @@ def _add_previous_provider_payloads(
     split_payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
     status: dict[str, Any],
     previous_status: dict[str, Any] | None,
+    *,
+    include_approved: bool = False,
+    allowed_provider_ids: frozenset[str] | set[str] | None = None,
 ) -> None:
     previous_providers = (
         previous_status.get("providers")
@@ -4719,15 +5054,25 @@ def _add_previous_provider_payloads(
         and isinstance(previous_status.get("providers"), dict)
         else {}
     )
+    if allowed_provider_ids is None:
+        allowed_provider_ids = (
+            _approved_provider_ids(config_root)
+            if include_approved
+            else _active_provider_ids(config_root)
+        )
+    else:
+        allowed_provider_ids = frozenset(allowed_provider_ids)
     current_providers = set(split_payloads)
     for raw_provider, previous_provider_status in previous_providers.items():
-        provider = _public_provider_id(raw_provider)
+        provider = _provider_id_from_allowed(raw_provider, allowed_provider_ids)
         if provider is None or provider in current_providers:
             continue
         if not isinstance(previous_provider_status, dict):
             continue
         previous_device = previous_provider_status.get("device_id")
-        expected_device = provider_device_id(config_root, provider)
+        expected_device = _provider_device_id_for(
+            config_root, provider, allowed_provider_ids
+        )
         if previous_device != expected_device:
             raise MonitorError(
                 "previous provider device identity was invalid; hub snapshot was preserved"
@@ -4737,6 +5082,7 @@ def _add_previous_provider_payloads(
             summaries[0][1],
             expected_device,
             provider,
+            allowed_provider_ids=allowed_provider_ids,
         )
         split_payloads[provider] = (empty_payload, empty_status)
         status.setdefault("providers", {})[provider] = empty_status
@@ -4924,6 +5270,10 @@ def scan_all_registrations(
             active = [item for item in registrations if item.status == "active"]
             if not active:
                 raise MonitorError("no active Token Monitor projects")
+            if not migration and provider_label_migration_pending(config_root):
+                raise MonitorError(
+                    "provider label migration is pending; run cage monitor provider status"
+                )
             if not migration and provider_split_pending(config_root, connection):
                 raise MonitorError(
                     "provider split migration is pending; run cage monitor migrate --yes"
@@ -5027,6 +5377,10 @@ def scan_registration(
     )
     if current is None or current.status != "active":
         raise MonitorError("monitor project is not active")
+    if provider_label_migration_pending(config_root):
+        raise MonitorError(
+            "provider label migration is pending; run cage monitor provider status"
+        )
     try:
         refreshed, current_payload, content_changed, metadata_changed = _collect_current_registration(
             config_root,
@@ -5283,6 +5637,418 @@ def migrate_legacy_devices(
     return deleted
 
 
+def _provider_stream_total(
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    provider: str,
+) -> float:
+    value = payloads.get(provider)
+    if value is None:
+        return 0.0
+    status = value[1]
+    total = status.get("total_tokens")
+    if (
+        type(total) not in (int, float)
+        or not math.isfinite(total)
+        or total < 0
+    ):
+        raise MonitorError("monitor provider migration has an invalid stream total")
+    return float(total)
+
+
+def _same_token_total(left: float, right: float) -> bool:
+    """Compare collector and hub token counters at their integer boundary."""
+
+    return round(left) == round(right)
+
+
+def _ensure_provider_stream(
+    config_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    status: dict[str, Any],
+    provider: str,
+    *,
+    allowed_provider_ids: frozenset[str] | set[str],
+) -> None:
+    """Ensure an intentional zero stream has a complete replacement payload."""
+
+    if provider in payloads:
+        return
+    if not summaries:
+        raise MonitorError("no active Token Monitor projects")
+    allowed_provider_ids = frozenset(allowed_provider_ids)
+    device_id = _provider_device_id_for(
+        config_root, provider, allowed_provider_ids
+    )
+    payload, stream_status = _empty_provider_payload(
+        config_root,
+        summaries[0][1],
+        device_id,
+        provider,
+        allowed_provider_ids=allowed_provider_ids,
+    )
+    payloads[provider] = (payload, stream_status)
+    providers = status.get("providers")
+    if not isinstance(providers, dict):
+        raise MonitorError("monitor provider migration status is invalid")
+    providers[provider] = stream_status
+    device_ids = status.get("device_ids")
+    if not isinstance(device_ids, list):
+        raise MonitorError("monitor provider migration status is invalid")
+    status["device_ids"] = sorted(set(device_ids) | {device_id})
+
+
+def _provider_label_migration_record(
+    label: str,
+    *,
+    state: str,
+    baseline_unattributed_tokens: float,
+    label_tokens: float,
+    residual_unattributed_tokens: float,
+    created_at: str | None = None,
+) -> dict[str, object]:
+    now = _now()
+    return {
+        "version": PROVIDER_LABEL_MIGRATION_VERSION,
+        "label": label,
+        "state": state,
+        "baseline_unattributed_tokens": baseline_unattributed_tokens,
+        "label_tokens": label_tokens,
+        "residual_unattributed_tokens": residual_unattributed_tokens,
+        "created_at": created_at or now,
+        "updated_at": now,
+    }
+
+
+def _provider_label_migration_matches(
+    marker: dict[str, object],
+    label: str,
+    *,
+    baseline_unattributed_tokens: float,
+    label_tokens: float,
+    residual_unattributed_tokens: float,
+) -> bool:
+    if marker.get("label") != label:
+        return False
+    for name, total in (
+        ("baseline_unattributed_tokens", baseline_unattributed_tokens),
+        ("label_tokens", label_tokens),
+        ("residual_unattributed_tokens", residual_unattributed_tokens),
+    ):
+        saved = marker.get(name)
+        if type(saved) not in (int, float) or not _same_token_total(float(saved), total):
+            return False
+    return True
+
+
+def _verify_provider_label_hub_totals(
+    stats: dict[str, Any],
+    *,
+    label_device_id: str,
+    label_tokens: float,
+    unattributed_device_id: str,
+    unattributed_tokens: float,
+) -> None:
+    named_total = _hub_device_total_from_stats(stats, label_device_id)
+    if named_total is None or not _same_token_total(named_total, label_tokens):
+        raise MonitorError(
+            "named provider stream did not match the fresh local total; hub state was preserved"
+        )
+    unattributed_total = _hub_device_total_from_stats(stats, unattributed_device_id)
+    if unattributed_total is None or not _same_token_total(
+        unattributed_total, unattributed_tokens
+    ):
+        raise MonitorError(
+            "Unattributed provider stream did not match the fresh local total; hub state was preserved"
+        )
+
+
+def _verify_provider_payload_totals(
+    stats: dict[str, Any],
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+) -> None:
+    for provider, (_payload, stream_status) in payloads.items():
+        device_id = stream_status.get("device_id")
+        total = stream_status.get("total_tokens")
+        if (
+            not isinstance(device_id, str)
+            or type(total) not in (int, float)
+            or not math.isfinite(total)
+            or total < 0
+        ):
+            raise MonitorError("monitor provider migration status is invalid")
+        hub_total = _hub_device_total_from_stats(stats, device_id)
+        if hub_total is None or not _same_token_total(hub_total, float(total)):
+            raise MonitorError(
+                "provider migration did not verify every hub stream; recovery remains pending"
+            )
+
+
+def migrate_provider_label(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    label: str,
+    *,
+    version: str,
+    storage_policy: object,
+) -> dict[str, Any]:
+    """Activate one explicitly approved custom stream through a verified move.
+
+    The named hub device is never deleted or recreated.  A fresh scan produces
+    a baseline (the label still in ``Unattributed``) and a proposed split.  We
+    first prove the existing named and unattributed totals, replace only the
+    unattributed payload, and then commit a complete local generation while
+    deliberately leaving those two already-verified hub devices untouched.
+    """
+
+    label = _validated_custom_provider_label(label)
+    connection = load_connection(config_root)
+    if connection is None or not connection.enabled:
+        raise MonitorError("Token Monitor is not connected")
+    with try_coordinator_lease(config_root) as coordinator:
+        if not coordinator:
+            raise MonitorError("monitor aggregate scan already running")
+        with try_aggregate_lock(config_root) as acquired:
+            if not acquired:
+                raise MonitorError("monitor aggregate scan already running")
+            labels = load_provider_labels(config_root)
+            approved = set(labels["approved"])
+            active = set(labels["active"])
+            marker = load_provider_label_migration(config_root)
+            if label not in approved:
+                raise MonitorError(
+                    "provider label is not approved; run cage monitor provider allow LABEL first"
+                )
+            if approved - active - {label}:
+                raise MonitorError("another monitor provider-label migration is pending")
+            if marker is not None and marker.get("label") != label:
+                raise MonitorError("another monitor provider-label migration is pending")
+            if label in active and marker is None:
+                raise MonitorError("monitor provider label is already active")
+            if load_upload_state(config_root) is not None:
+                # A crash during the final local-generation commit can leave
+                # an ordinary upload marker after the named and unattributed
+                # devices have already been verified.  Repair that marker
+                # here, under the same exclusive locks, so this explicit
+                # migration remains resumable rather than deadlocking normal
+                # scans behind its own pending-label guard.
+                _repair_pending_upload(config_root, connection)
+            registrations = load_registry(config_root)
+            active_records = [item for item in registrations if item.status == "active"]
+            if not active_records:
+                raise MonitorError("no active Token Monitor projects")
+            previous_status = load_aggregate_status(config_root)
+            # Validate the old rollback source before changing the hub's
+            # unattributed stream.  A legacy private generation is accepted
+            # only under its exact deterministic binding.
+            _previous_generation(config_root, previous_status)
+            summaries = _collect_registered_summaries(
+                config_root,
+                docker,
+                install_root,
+                active_records,
+                version=version,
+                storage_policy=storage_policy,
+                allow_build=True,
+                uid=None,
+                gid=None,
+            )
+            # Keep the baseline deliberately on the pre-migration partition.
+            # If a prior attempt reached local activation before it stopped,
+            # the active set already contains ``label``; exclude it here so
+            # the persisted baseline remains stable and verifiable on retry.
+            baseline_allowed_provider_ids = frozenset(
+                _active_provider_ids(config_root) - {label}
+            )
+            proposed_allowed_provider_ids = _approved_provider_ids(config_root)
+            baseline_payloads, baseline_status = _aggregate_provider_summaries_for_allowed(
+                config_root, summaries, baseline_allowed_provider_ids
+            )
+            _add_previous_provider_payloads(
+                config_root,
+                summaries,
+                baseline_payloads,
+                baseline_status,
+                previous_status,
+                allowed_provider_ids=baseline_allowed_provider_ids,
+            )
+            proposed_payloads, proposed_status = _aggregate_provider_summaries_for_allowed(
+                config_root, summaries, proposed_allowed_provider_ids
+            )
+            _add_previous_provider_payloads(
+                config_root,
+                summaries,
+                proposed_payloads,
+                proposed_status,
+                previous_status,
+                allowed_provider_ids=proposed_allowed_provider_ids,
+            )
+            # The existing named and unattributed devices are both expected
+            # to exist.  Explicit zero payloads give the move a complete,
+            # recoverable target when one side currently has no sessions.
+            _ensure_provider_stream(
+                config_root,
+                summaries,
+                baseline_payloads,
+                baseline_status,
+                UNATTRIBUTED_PROVIDER,
+                allowed_provider_ids=baseline_allowed_provider_ids,
+            )
+            _ensure_provider_stream(
+                config_root,
+                summaries,
+                proposed_payloads,
+                proposed_status,
+                label,
+                allowed_provider_ids=proposed_allowed_provider_ids,
+            )
+            _ensure_provider_stream(
+                config_root,
+                summaries,
+                proposed_payloads,
+                proposed_status,
+                UNATTRIBUTED_PROVIDER,
+                allowed_provider_ids=proposed_allowed_provider_ids,
+            )
+            baseline_total = float(baseline_status.get("total_tokens", 0))
+            proposed_total = float(proposed_status.get("total_tokens", 0))
+            if not _same_token_total(baseline_total, proposed_total):
+                raise MonitorError(
+                    "provider migration changed the deduplicated total; hub state was preserved"
+                )
+            for provider in set(baseline_payloads) | set(proposed_payloads):
+                if provider in {label, UNATTRIBUTED_PROVIDER}:
+                    continue
+                if not _same_token_total(
+                    _provider_stream_total(baseline_payloads, provider),
+                    _provider_stream_total(proposed_payloads, provider),
+                ):
+                    raise MonitorError(
+                        "provider migration changed an unrelated stream; hub state was preserved"
+                    )
+            baseline_unattributed = _provider_stream_total(
+                baseline_payloads, UNATTRIBUTED_PROVIDER
+            )
+            label_total = _provider_stream_total(proposed_payloads, label)
+            residual_unattributed = _provider_stream_total(
+                proposed_payloads, UNATTRIBUTED_PROVIDER
+            )
+            if marker is not None and not _provider_label_migration_matches(
+                marker,
+                label,
+                baseline_unattributed_tokens=baseline_unattributed,
+                label_tokens=label_total,
+                residual_unattributed_tokens=residual_unattributed,
+            ):
+                raise MonitorError(
+                    "provider-label migration inputs changed; wait for sessions to settle and retry"
+                )
+            if marker is None:
+                marker = _provider_label_migration_record(
+                    label,
+                    state="prepared",
+                    baseline_unattributed_tokens=baseline_unattributed,
+                    label_tokens=label_total,
+                    residual_unattributed_tokens=residual_unattributed,
+                )
+                save_provider_label_migration(config_root, marker)
+            label_device_id = provider_device_id(
+                config_root, label, include_approved=True
+            )
+            unattributed_device_id = provider_device_id(config_root, UNATTRIBUTED_PROVIDER)
+            hub_stats = _hub_stats(connection)
+            split_state = load_split_status(config_root)
+            if (
+                not (split_state and split_state.get("complete") is True)
+                and host_device_id(config_root) in _hub_device_ids_from_stats(hub_stats)
+            ):
+                raise MonitorError(
+                    "provider split migration is pending; complete it before migrating a provider label"
+                )
+            named_total = _hub_device_total_from_stats(hub_stats, label_device_id)
+            if named_total is None or not _same_token_total(named_total, label_total):
+                raise MonitorError(
+                    "named provider stream did not match the fresh local total; hub state was preserved"
+                )
+            hub_unattributed = _hub_device_total_from_stats(
+                hub_stats, unattributed_device_id
+            )
+            if hub_unattributed is None:
+                raise MonitorError(
+                    "Unattributed provider stream was not visible on the hub; hub state was preserved"
+                )
+            marker_state = marker.get("state")
+            if _same_token_total(hub_unattributed, residual_unattributed):
+                if marker_state != "repartitioned":
+                    marker = _provider_label_migration_record(
+                        label,
+                        state="repartitioned",
+                        baseline_unattributed_tokens=baseline_unattributed,
+                        label_tokens=label_total,
+                        residual_unattributed_tokens=residual_unattributed,
+                        created_at=str(marker["created_at"]),
+                    )
+                    save_provider_label_migration(config_root, marker)
+            elif _same_token_total(hub_unattributed, baseline_unattributed):
+                # A prior attempt may have stopped before recording the phase
+                # transition, or a later generation may have rolled back an
+                # unrelated stream.  Re-enter the explicitly prepared phase.
+                marker = _provider_label_migration_record(
+                    label,
+                    state="prepared",
+                    baseline_unattributed_tokens=baseline_unattributed,
+                    label_tokens=label_total,
+                    residual_unattributed_tokens=residual_unattributed,
+                    created_at=str(marker["created_at"]),
+                )
+                save_provider_label_migration(config_root, marker)
+                upload_summary(
+                    connection,
+                    proposed_payloads[UNATTRIBUTED_PROVIDER][0],
+                    config_root=config_root,
+                )
+                repartitioned_stats = _hub_stats(connection)
+                _verify_provider_label_hub_totals(
+                    repartitioned_stats,
+                    label_device_id=label_device_id,
+                    label_tokens=label_total,
+                    unattributed_device_id=unattributed_device_id,
+                    unattributed_tokens=residual_unattributed,
+                )
+                marker = _provider_label_migration_record(
+                    label,
+                    state="repartitioned",
+                    baseline_unattributed_tokens=baseline_unattributed,
+                    label_tokens=label_total,
+                    residual_unattributed_tokens=residual_unattributed,
+                    created_at=str(marker["created_at"]),
+                )
+                save_provider_label_migration(config_root, marker)
+            else:
+                raise MonitorError(
+                    "Unattributed provider stream did not match either verified migration total; hub state was preserved"
+                )
+            _activate_provider_label(config_root, label)
+            proposed_status["split_complete"] = True
+            published = _publish_provider_payloads(
+                config_root,
+                connection,
+                proposed_payloads,
+                proposed_status,
+                previous_status,
+                # These two streams have just been verified at the hub.  Do
+                # not touch the named device again while the complete local
+                # generation is committed for later ordinary rollbacks.
+                skip_upload_for={label, UNATTRIBUTED_PROVIDER},
+            )
+            _verify_provider_payload_totals(_hub_stats(connection), proposed_payloads)
+            _mark_split_complete(config_root, published)
+            remove_provider_label_migration(config_root)
+            _mark_scan_success(config_root, active_records, _now())
+            return published
+
+
 class ActiveMonitor:
     """Best-effort current-volume scanner with a wall-clock cadence."""
 
@@ -5350,6 +6116,7 @@ __all__ = [
     "collector_registry_image",
     "aggregate_summaries",
     "aggregate_provider_summaries",
+    "approve_provider_label",
     "clear_legacy_device_id",
     "delete_device",
     "device_id_for",
@@ -5365,6 +6132,8 @@ __all__ = [
     "load_upload_state",
     "load_volume_snapshot",
     "load_pricing",
+    "load_provider_label_migration",
+    "load_provider_labels",
     "load_registry",
     "load_split_status",
     "logical_target_id",
@@ -5375,6 +6144,8 @@ __all__ = [
     "provider_device_id",
     "provider_device_ids",
     "provider_display_name",
+    "provider_label_migration_pending",
+    "provider_label_status",
     "provider_split_pending",
     "preview_provider_split",
     "normalize_hub_url",
@@ -5390,6 +6161,8 @@ __all__ = [
     "retire_registration",
     "save_connection",
     "save_pricing",
+    "save_provider_label_migration",
+    "save_provider_labels",
     "save_registry",
     "save_scheduler_state",
     "save_split_status",
@@ -5402,6 +6175,7 @@ __all__ = [
     "prepare_host_source",
     "finish_host_source",
     "migrate_legacy_devices",
+    "migrate_provider_label",
     "project_id_for",
     "update_registration",
     "validate_interval",

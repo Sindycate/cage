@@ -6,6 +6,78 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.2 — 2026-09-02
+
+### Restore an explicitly approved Token Monitor provider stream
+
+Who is affected: users whose existing named provider device was moved into
+`Unattributed` by the 0.36.0 closed-label change, and users who intentionally
+want one non-built-in provider/account label to remain a readable Token Monitor
+stream.
+
+Previous behavior: 0.36.0 treated every label outside its fixed built-in list
+as private. This could reclassify an existing named stream into
+`Unattributed`; if the historic named device remained on the hub, the same
+tokens appeared in both devices. The 0.36.1 compatibility repair allowed the
+new unattributed upload to resume but did not provide a verified way to restore
+the named stream.
+
+New behavior: custom labels require explicit owner approval in the private
+mode-0600 monitor state, not central Cage configuration or tracked source.
+Approval alone makes no hub request or upload. The follow-up migration does a
+fresh scan of all active Cage sources, deduplicates session copies, and proves
+both the existing named device total and the current `Unattributed` total before
+changing hub state. It reuses the deterministic existing named device, replaces
+only the duplicate `Unattributed` payload with its residual total, verifies the
+result again, and records a complete local generation for ordinary future
+uploads. It never deletes the named device.
+
+Migration and recovery:
+
+1. Install Cage 0.36.2 or later. Do not run `cage monitor sync` while this
+   repair is pending; Cage now pauses ordinary monitor uploads deliberately.
+2. Inspect only local approval/recovery state:
+
+   ```bash
+   cage monitor provider status
+   ```
+
+3. Approve the exact existing stream label. This writes only private monitor
+   state and does not scan sessions or contact the hub:
+
+   ```bash
+   cage monitor provider allow LABEL
+   ```
+
+4. Run the explicit, confirmation-gated repair:
+
+   ```bash
+   cage monitor provider migrate LABEL --yes
+   ```
+
+   It succeeds only when the old named total equals the fresh named partition
+   and the current `Unattributed` total equals the baseline partition. On a
+   resumed attempt it also accepts the already-repartitioned residual
+   `Unattributed` total. A mismatch leaves every hub device untouched and keeps
+   the local migration marker for safe retry after active sessions settle.
+5. Verify the named stream and no pending marker:
+
+   ```bash
+   cage monitor provider status
+   cage monitor status
+   ```
+
+Do not use `cage monitor forget` or manually delete either device during this
+migration. Those actions cannot distinguish the duplicate from genuine
+unattributed usage.
+
+Rollback: `cage monitor disconnect` pauses uploads without changing devices.
+If an interrupted migration needs to resume, reinstall 0.36.2 or later and run
+the same `provider migrate` command after the monitored sessions are stable.
+The migration never reads or imports ordinary host Codex history, and it does
+not modify source auth directories, repositories, Docker volumes, or session
+files.
+
 ## 0.36.1 — 2026-09-02
 
 ### Resume Token Monitor uploads after private-provider history
@@ -35,7 +107,9 @@ Migration and recovery:
 3. The old private-label hub device is deliberately left unchanged by this
    compatibility repair. Do not add its historic total to the current Cage
    provider streams when reading a hub-wide dashboard; an explicit verified
-   retirement migration is required before deleting any historical hub record.
+   migration is required before deleting any historical hub record. Install
+   0.36.2 or later and follow its custom-provider recovery when that named
+   device is intentionally required.
 
 Rollback: install 0.36.0 or earlier only after disconnecting Token Monitor if
 needed. The source Codex directory, managed host sessions, and Docker volumes

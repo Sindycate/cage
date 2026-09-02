@@ -194,15 +194,18 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
   A short-lived pinned collector mounts only exact `sessions/` and
   `archived_sessions/` source directories read-only with no network, while the
   host performs authenticated hub requests. One Cage installation publishes one
-  readable hub device per recognized public provider stream, and each logical
-  Codex source is a project under the stream that owns its sessions. Normal
+  readable hub device per built-in or explicitly owner-approved provider
+  stream, and each logical Codex source is a project under the stream that owns
+  its sessions. Custom provider approval is private local monitor state, never
+  central configuration or tracked source, and a verified migration reuses an
+  existing named hub device before that label becomes active. Normal
   launches refresh only their exact source and reuse fingerprint-bound sanitized
   snapshots for inactive peers; one cross-process coordinator serializes
   provider aggregation and performs a bounded wall-clock full reconciliation.
   Explicit `monitor sync` forces that full reconciliation and repairs a
   prepared upload generation. Every aggregate deduplicates identical or
   monotonic session copies before provider partitioning, assigns missing,
-  multi-provider, and private-provider copies to `Unattributed`, and fails
+  multi-provider, and unapproved-provider copies to `Unattributed`, and fails
   closed on incompatible copies. Raw session IDs are replaced with stable
   per-install HMAC pseudonyms at the hub boundary. Discovery is limited to
   Cage-named `codex-state-*` volumes. A normal launch may promote an exact

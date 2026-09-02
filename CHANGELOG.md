@@ -5,6 +5,16 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.2 — 2026-09-02
+
+- restore explicitly owner-approved custom Token Monitor provider streams
+  without storing their labels in tracked configuration or source: `cage
+  monitor provider allow LABEL` records a private local approval only, and
+  `cage monitor provider migrate LABEL --yes` performs a fresh deduplicated,
+  resumable verification before reusing the existing named hub device and
+  removing its duplicate contribution from `unattributed`; normal scans pause
+  while that recovery is pending rather than reclassifying history again;
+
 ## 0.36.1 — 2026-09-02
 
 - resume Token Monitor uploads after an upgrade finds a pre-0.36 private

@@ -266,9 +266,14 @@ The collector never receives a host source's root, credentials, static config,
 history, cache, or logs. Cage stores its managed host source, registry, raw
 deduplication snapshots, and upload generations privately. Before an aggregate
 reaches the hub, raw local session IDs are replaced with stable per-install HMAC
-pseudonyms. Only the fixed public provider labels `openai-api`,
-`openai-compatible`, and `zllm` can become readable provider streams; unknown
-or private labels are counted as `Unattributed`.
+pseudonyms. Built-in provider labels `openai-api`, `openai-compatible`, and
+`zllm` can become readable provider streams automatically. An otherwise
+unknown account or endpoint label remains `Unattributed` unless the owner
+explicitly approves it through `cage monitor provider allow LABEL`; that
+approval is stored only in private monitor state, never central configuration
+or tracked source. A separate verified `cage monitor provider migrate LABEL
+--yes` operation is required before the label becomes active, preserving an
+existing named hub device rather than silently reclassifying its history.
 
 This preserves Cage's existing container threat model; it does not turn the
 host ChatGPT application itself into a containerized process. The repository,

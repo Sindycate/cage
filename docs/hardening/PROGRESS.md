@@ -3,6 +3,37 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-02 — Verified named-provider recovery prepared for v0.36.2
+
+The 0.36.0 fixed provider-label vocabulary incorrectly reclassified an
+existing, explicitly readable custom provider stream into `Unattributed`
+without a migration. The original named hub device was not deleted, so a later
+replacement upload could leave the same deduplicated partition visible in both
+devices. The 0.36.1 compatibility path made sanitized uploads resumable but
+did not restore the named stream.
+
+v0.36.2 adds a local-only approval record plus an explicit, confirmation-gated
+provider-label migration. It rescans all active Cage sources, deduplicates
+before partitioning, verifies that the existing named hub device equals the
+fresh named partition and that `Unattributed` equals the old combined
+partition, then replaces only the residual `Unattributed` payload. The named
+device is reused and never deleted. A pending recovery blocks ordinary uploads
+to prevent a further unsafe reclassification. Interrupted repair handles both
+the already-repartitioned hub state and a crash after local activation or
+generation preparation, retaining the marker until every stream is verified.
+
+The custom label is stored only under private monitor state; no personal auth
+name, source path, session, credential, hub value, or provider label was added
+to tracked source, documentation examples, tests, commits, or release notes.
+
+Validation: focused Token Monitor coverage passes (`85 passed`), including
+named-device preservation, residual-only upload, hub mismatch refusal,
+legacy-generation recovery, and interrupted activation/generation recovery.
+The complete Python suite passes (`628 passed, 15 skipped`); Python
+compilation, Bash/Node syntax, Compose rendering, `git diff --check`, and the
+complete-history Gitleaks scan (`148 commits`, no leaks) pass. Publication
+remains with the canonical publisher.
+
 ## 2026-09-02 — Token Monitor legacy private-generation recovery prepared for v0.36.1
 
 Corrected the 0.36.0 host-monitor rollout blocker. An earlier Cage release

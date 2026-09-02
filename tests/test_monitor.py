@@ -955,6 +955,490 @@ class MonitorStateTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "provider identity"):
                 monitor.provider_device_id(root, private_provider)
 
+    def test_custom_provider_approval_is_private_and_inactive_until_migration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            label = "approved-provider"
+            session = self._session(
+                "approved", total=100, input_tokens=80, output_tokens=20, provider=label
+            )
+            summaries = [
+                (record, self._summary(record.device_id, {"codex:approved": session}))
+            ]
+
+            monitor.approve_provider_label(root, label)
+
+            state_path = root / "monitor" / monitor.PROVIDER_LABELS_FILE
+            self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(monitor.provider_label_status(root)["pending"], [label])
+            baseline, _ = monitor.aggregate_provider_summaries(root, summaries)
+            self.assertEqual(set(baseline), {"unattributed"})
+            self.assertNotIn(label, json.dumps(baseline, sort_keys=True))
+            with self.assertRaisesRegex(monitor.MonitorError, "provider identity"):
+                monitor.provider_device_id(root, label)
+            self.assertEqual(monitor.provider_display_name(label), "Unattributed")
+            self.assertEqual(
+                monitor.provider_display_name(
+                    label,
+                    allowed_provider_ids=frozenset({"unattributed", label}),
+                ),
+                label,
+            )
+            self.assertEqual(
+                monitor.provider_device_id(root, label, include_approved=True),
+                f"cage-{label}-{monitor._platform_slug()}-"
+                f"{monitor.host_install_id(root)[:8]}",
+            )
+
+    def test_provider_label_migration_reuses_named_device_and_removes_duplicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection = monitor.MonitorConnection("https://hub.example", "secret")
+            monitor.save_connection(root, connection)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            monitor.save_registry(root, [record])
+            label = "approved-provider"
+            monitor.approve_provider_label(root, label)
+            session = self._session(
+                "approved", total=100, input_tokens=80, output_tokens=20, provider=label
+            )
+            residual = self._session(
+                "residual",
+                total=25,
+                input_tokens=20,
+                output_tokens=5,
+                provider="still-unapproved",
+            )
+            summaries = [
+                (
+                    record,
+                    self._summary(
+                        record.device_id,
+                        {"codex:approved": session, "codex:residual": residual},
+                    ),
+                )
+            ]
+            named_device = monitor.provider_device_id(
+                root, label, include_approved=True
+            )
+            unattributed_device = monitor.provider_device_id(root, "unattributed")
+            before = {
+                "devices": [
+                    {
+                        "deviceId": named_device,
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                    {
+                        "deviceId": unattributed_device,
+                        "periods": {"allTime": {"totalTokens": 125}},
+                    },
+                ],
+                "periods": {},
+            }
+            after = {
+                "devices": [
+                    {
+                        "deviceId": named_device,
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                    {
+                        "deviceId": unattributed_device,
+                        "periods": {"allTime": {"totalTokens": 25}},
+                    },
+                ],
+                "periods": {},
+            }
+            uploaded = []
+
+            def upload(_connection, payload, *, config_root):
+                self.assertEqual(config_root, root)
+                uploaded.append(payload)
+
+            with patch.object(
+                monitor, "_collect_registered_summaries", return_value=summaries
+            ), patch.object(
+                monitor, "_hub_stats", side_effect=[before, after, after]
+            ), patch.object(monitor, "upload_summary", side_effect=upload), patch.object(
+                monitor, "delete_device"
+            ) as delete:
+                status = monitor.migrate_provider_label(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    label,
+                    version="0.36.2",
+                    storage_policy=object(),
+                )
+
+            self.assertEqual(len(uploaded), 1)
+            self.assertEqual(uploaded[0]["deviceId"], unattributed_device)
+            self.assertEqual(uploaded[0]["allTime"]["totalTokens"], 25)
+            self.assertNotEqual(uploaded[0]["deviceId"], named_device)
+            self.assertNotIn(label, json.dumps(uploaded, sort_keys=True))
+            delete.assert_not_called()
+            self.assertEqual(monitor.provider_label_status(root)["active"], [label])
+            self.assertIsNone(monitor.load_provider_label_migration(root))
+            self.assertFalse(monitor.provider_label_migration_pending(root))
+            self.assertEqual(
+                set(monitor.load_split_status(root)["device_ids"]),
+                {named_device, unattributed_device},
+            )
+            self.assertEqual(status["providers"][label]["total_tokens"], 100)
+            self.assertEqual(status["providers"]["unattributed"]["total_tokens"], 25)
+            generation, payloads = monitor._previous_generation(root, status)
+            self.assertEqual(generation, status["generation"])
+            self.assertEqual(set(payloads), {label, "unattributed"})
+            future_payloads, _ = monitor.aggregate_provider_summaries(root, summaries)
+            self.assertEqual(set(future_payloads), {label, "unattributed"})
+
+    def test_provider_label_migration_refuses_hub_mismatch_without_activation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            monitor.save_registry(root, [record])
+            label = "approved-provider"
+            monitor.approve_provider_label(root, label)
+            session = self._session(
+                "approved", total=100, input_tokens=80, output_tokens=20, provider=label
+            )
+            summaries = [
+                (record, self._summary(record.device_id, {"codex:approved": session}))
+            ]
+            hub_stats = {
+                "devices": [
+                    {
+                        "deviceId": monitor.provider_device_id(
+                            root, label, include_approved=True
+                        ),
+                        "periods": {"allTime": {"totalTokens": 99}},
+                    },
+                    {
+                        "deviceId": monitor.provider_device_id(root, "unattributed"),
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                ],
+                "periods": {},
+            }
+            with patch.object(
+                monitor, "_collect_registered_summaries", return_value=summaries
+            ), patch.object(monitor, "_hub_stats", return_value=hub_stats), patch.object(
+                monitor, "upload_summary"
+            ) as upload:
+                with self.assertRaisesRegex(monitor.MonitorError, "named provider stream"):
+                    monitor.migrate_provider_label(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        label,
+                        version="0.36.2",
+                        storage_policy=object(),
+                    )
+
+            upload.assert_not_called()
+            self.assertEqual(monitor.provider_label_status(root)["active"], [])
+            self.assertTrue(monitor.provider_label_migration_pending(root))
+
+    def test_provider_label_migration_recovers_an_old_named_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection = monitor.MonitorConnection("https://hub.example", "secret")
+            monitor.save_connection(root, connection)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            monitor.save_registry(root, [record])
+            label = "approved-provider"
+            monitor.approve_provider_label(root, label)
+            session = self._session(
+                "approved", total=100, input_tokens=80, output_tokens=20, provider=label
+            )
+            summaries = [
+                (record, self._summary(record.device_id, {"codex:approved": session}))
+            ]
+            named_device = monitor.provider_device_id(
+                root, label, include_approved=True
+            )
+            old_generation = "a" * 32
+            old_directory = monitor._generation_directory(root, old_generation)
+            old_directory.mkdir(mode=0o700)
+            monitor._write_json(
+                old_directory / "generation.json",
+                {
+                    "version": monitor.UPLOAD_STATE_VERSION,
+                    "generation": old_generation,
+                    "providers": {label: {"device_id": named_device}},
+                },
+            )
+            monitor._write_json(
+                old_directory / f"{label}.json",
+                self._summary(record.device_id, {"codex:approved": session})
+                | {"deviceId": named_device},
+            )
+            monitor._write_json(
+                monitor.monitor_root(root) / monitor.AGGREGATE_STATUS_FILE,
+                {
+                    "version": monitor.STATE_VERSION,
+                    "last_good_generation": old_generation,
+                    "providers": {label: {"device_id": named_device}},
+                },
+            )
+            before = {
+                "devices": [
+                    {
+                        "deviceId": named_device,
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                    {
+                        "deviceId": monitor.provider_device_id(root, "unattributed"),
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                ],
+                "periods": {},
+            }
+            after = {
+                "devices": [
+                    {
+                        "deviceId": named_device,
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                    {
+                        "deviceId": monitor.provider_device_id(root, "unattributed"),
+                        "periods": {"allTime": {"totalTokens": 0}},
+                    },
+                ],
+                "periods": {},
+            }
+            with patch.object(
+                monitor, "_collect_registered_summaries", return_value=summaries
+            ), patch.object(
+                monitor, "_hub_stats", side_effect=[before, after, after]
+            ), patch.object(monitor, "upload_summary"):
+                status = monitor.migrate_provider_label(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    label,
+                    version="0.36.2",
+                    storage_policy=object(),
+                )
+
+            self.assertEqual(status["providers"][label]["total_tokens"], 100)
+            self.assertEqual(monitor.provider_label_status(root)["active"], [label])
+
+    def test_provider_label_migration_resumes_after_unattributed_repartition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection = monitor.MonitorConnection("https://hub.example", "secret")
+            monitor.save_connection(root, connection)
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            monitor.save_registry(root, [record])
+            label = "approved-provider"
+            monitor.approve_provider_label(root, label)
+            monitor.save_provider_label_migration(
+                root,
+                monitor._provider_label_migration_record(
+                    label,
+                    state="prepared",
+                    baseline_unattributed_tokens=100,
+                    label_tokens=100,
+                    residual_unattributed_tokens=0,
+                ),
+            )
+            # Simulate an interruption after the named and residual hub
+            # streams were verified and the local label was activated, but
+            # before the complete replacement generation was committed.
+            monitor._activate_provider_label(root, label)
+            monitor.save_upload_state(
+                root,
+                monitor._upload_state_for_generation(
+                    generation="b" * 32,
+                    previous_generation="",
+                    provider_ids={
+                        label: monitor.provider_device_id(root, label),
+                        "unattributed": monitor.provider_device_id(
+                            root, "unattributed"
+                        ),
+                    },
+                    attempted=[],
+                    state="pending",
+                ),
+            )
+            session = self._session(
+                "approved", total=100, input_tokens=80, output_tokens=20, provider=label
+            )
+            summaries = [
+                (record, self._summary(record.device_id, {"codex:approved": session}))
+            ]
+            republished = {
+                "devices": [
+                    {
+                        "deviceId": monitor.provider_device_id(
+                            root, label, include_approved=True
+                        ),
+                        "periods": {"allTime": {"totalTokens": 100}},
+                    },
+                    {
+                        "deviceId": monitor.provider_device_id(root, "unattributed"),
+                        "periods": {"allTime": {"totalTokens": 0}},
+                    },
+                ],
+                "periods": {},
+            }
+            with patch.object(
+                monitor, "_collect_registered_summaries", return_value=summaries
+            ), patch.object(
+                monitor, "_hub_stats", side_effect=[republished, republished]
+            ), patch.object(monitor, "upload_summary") as upload:
+                monitor.migrate_provider_label(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    label,
+                    version="0.36.2",
+                    storage_policy=object(),
+                )
+
+            upload.assert_not_called()
+            self.assertEqual(monitor.provider_label_status(root)["active"], [label])
+            self.assertIsNone(monitor.load_provider_label_migration(root))
+            self.assertIsNone(monitor.load_upload_state(root))
+
+    def test_pending_provider_label_blocks_normal_uploads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            record = monitor.VolumeRegistration(
+                "a" * 32,
+                monitor.host_device_id(root),
+                "codex-state-a",
+                "container",
+                "/work/a",
+                "Cage: a (Container)",
+                FINGERPRINT,
+            )
+            monitor.save_registry(root, [record])
+            monitor.approve_provider_label(root, "approved-provider")
+            with patch.object(monitor, "_collect_registered_summaries") as collect:
+                with self.assertRaisesRegex(
+                    monitor.MonitorError, "provider label migration is pending"
+                ):
+                    monitor.scan_all_registrations(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        version="0.36.2",
+                        storage_policy=object(),
+                        allow_build=False,
+                        force=True,
+                    )
+            collect.assert_not_called()
+
+    def test_provider_cli_allow_is_local_only_and_status_is_explicit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = io.StringIO()
+            with patch.object(cli.storage, "docker_command") as docker_command, contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["provider", "allow", "approved-provider"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.36.2",
+                    ),
+                    0,
+                )
+            docker_command.assert_not_called()
+            self.assertIn("private monitor state", output.getvalue())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["provider", "status", "--json"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.36.2",
+                    ),
+                    0,
+                )
+            self.assertEqual(json.loads(output.getvalue())["pending"], ["approved-provider"])
+
+    def test_provider_cli_migrate_requires_confirmation_and_dispatches_label(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["provider", "migrate", "approved-provider"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.36.2",
+                    ),
+                    1,
+                )
+            self.assertIn("provider migrate LABEL --yes", error.getvalue())
+            output = io.StringIO()
+            with patch.object(cli.storage, "docker_command", return_value="docker"), patch.object(
+                cli.monitor,
+                "migrate_provider_label",
+                return_value={"updated_at": "now"},
+            ) as migrate, contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli._run_monitor(
+                        ["provider", "migrate", "approved-provider", "--yes"],
+                        config_root=root,
+                        install_root=Path("/work/cage"),
+                        cage_version="0.36.2",
+                    ),
+                    0,
+                )
+            self.assertEqual(migrate.call_args.args[3], "approved-provider")
+            self.assertIn("named stream was preserved", output.getvalue())
+
     def test_previous_private_provider_stream_is_not_republished(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

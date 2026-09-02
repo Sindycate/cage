@@ -66,6 +66,9 @@ Commands:
   monitor add --auth AUTH     Adopt a Cage-only native-host Codex source
   monitor disable --auth AUTH Return one adopted host auth source to direct use
   monitor migrate --yes       Replace legacy hub devices safely
+  monitor provider status     Show private custom-provider approval state
+  monitor provider allow LABEL Approve one readable provider label locally
+  monitor provider migrate LABEL --yes  Verify and restore one named provider stream
   monitor pricing ...         Manage private custom model prices
   monitor forget DEVICE_ID    Delete a Cage-owned hub device
 
@@ -682,6 +685,7 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         if isinstance(aggregate, dict) and isinstance(aggregate.get("providers"), dict)
         else {}
     )
+    provider_labels = monitor.provider_label_status(config_root)
     payload = {
         "connected": bool(connection is not None and connection.enabled),
         "hub_url": connection.hub_url if connection is not None else "",
@@ -689,6 +693,7 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         "device_id": monitor.host_device_id(config_root),
         "device_ids": device_ids,
         "providers": providers,
+        "provider_labels": provider_labels,
         "split_migration_pending": split_pending,
         "projects": rows,
         "migration_pending": sum(bool(item.legacy_device_id) for item in registrations),
@@ -746,6 +751,16 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
                 f"${provider_status.get('cost_usd', 0):.6f} for "
                 f"{provider_status.get('total_tokens', 0):,} tokens"
             )
+    approved_labels = provider_labels.get("approved", [])
+    active_labels = set(provider_labels.get("active", []))
+    migration = provider_labels.get("migration")
+    if approved_labels:
+        print("Custom provider labels (private local approval):")
+        for label in approved_labels:
+            state = "active" if label in active_labels else "migration required"
+            if isinstance(migration, dict) and migration.get("label") == label:
+                state = f"migration {migration.get('state', 'pending')}"
+            print(f"  {label}: {state}")
     if not rows:
         print("Registered Cage projects: none")
     else:
@@ -776,6 +791,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
         )
     if split_pending:
         print("Provider split migration: pending; run cage monitor migrate --yes")
+    if monitor.provider_label_migration_pending(config_root):
+        print("Provider-label migration: pending; run cage monitor provider status")
     if pending_upload is not None:
         print(
             "Provider upload repair: pending for "
@@ -841,6 +858,69 @@ def _run_monitor_pricing(arguments: list[str], *, config_root: Path) -> int:
     return 0
 
 
+def _run_monitor_provider(
+    arguments: list[str],
+    *,
+    config_root: Path,
+    install_root: Path,
+    cage_version: str,
+) -> int:
+    if not arguments:
+        raise CliError("Usage: cage monitor provider status|allow|migrate ...")
+    action, rest = arguments[0], arguments[1:]
+    if action == "status":
+        if rest not in ([], ["--json"]):
+            raise CliError("monitor provider status accepts only --json")
+        state = monitor.provider_label_status(config_root)
+        if rest == ["--json"]:
+            print(json.dumps(state, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        else:
+            approved = state.get("approved", [])
+            active = set(state.get("active", []))
+            migration = state.get("migration")
+            if not approved:
+                print("Custom Token Monitor provider labels: none")
+            else:
+                print(f"Custom Token Monitor provider labels: {len(approved)}")
+                for label in approved:
+                    label_state = "active" if label in active else "migration required"
+                    if isinstance(migration, dict) and migration.get("label") == label:
+                        label_state = f"migration {migration.get('state', 'pending')}"
+                    print(f"  {label}  {label_state}")
+        return 0
+    if action == "allow":
+        if len(rest) != 1:
+            raise CliError("monitor provider allow requires one label")
+        label = monitor.approve_provider_label(config_root, rest[0])
+        print(
+            f"Approved custom provider label {label!r} in private monitor state; "
+            f"run cage monitor provider migrate {label} --yes before normal monitoring resumes."
+        )
+        return 0
+    if action != "migrate" or len(rest) != 2 or rest[1] != "--yes":
+        raise CliError("Usage: cage monitor provider migrate LABEL --yes")
+    docker = storage.docker_command()
+    config_path = config_root / "config.toml"
+    policy = (
+        config.storage_policy_from_config(config.load_config(config_path))
+        if config_path.is_file()
+        else storage.StoragePolicy()
+    )
+    status = monitor.migrate_provider_label(
+        config_root,
+        docker,
+        install_root,
+        rest[0],
+        version=cage_version,
+        storage_policy=policy,
+    )
+    print(
+        "Token Monitor provider-label migration complete; the existing named "
+        f"stream was preserved and verified at {status.get('updated_at', 'the hub')}."
+    )
+    return 0
+
+
 def _run_monitor(
     arguments: list[str],
     *,
@@ -850,7 +930,7 @@ def _run_monitor(
 ) -> int:
     if not arguments:
         print(
-            "Usage: cage monitor connect|disconnect|status|sync|discover|add|disable|migrate|pricing|forget ...",
+            "Usage: cage monitor connect|disconnect|status|sync|discover|add|disable|migrate|provider|pricing|forget ...",
             file=sys.stderr,
         )
         return 1
@@ -859,6 +939,13 @@ def _run_monitor(
     try:
         if action == "pricing":
             return _run_monitor_pricing(rest, config_root=config_root)
+        if action == "provider":
+            return _run_monitor_provider(
+                rest,
+                config_root=config_root,
+                install_root=install_root,
+                cage_version=cage_version,
+            )
         if action == "connect":
             if not rest:
                 raise CliError("monitor connect requires a hub URL")
