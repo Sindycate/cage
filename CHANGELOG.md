@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.1 — 2026-09-02
+
+- resume Token Monitor uploads after an upgrade finds a pre-0.36 private
+  provider stream in its own last-good generation: Cage accepts only the exact
+  deterministic legacy device binding as local rollback compatibility and
+  never parses or republishes that old payload; current totals continue through
+  the generic `unattributed` stream, while actionable aggregate errors remain
+  visible unless they contain a private managed-host path;
+
 ## 0.36.0 — 2026-09-02
 
 - add opt-in `cage monitor add --auth AUTH` support for Cage-launched Codex

@@ -2291,18 +2291,25 @@ def update_registration(config_root: Path, record: VolumeRegistration) -> None:
 
 
 def _scan_error_for_records(
-    records: list[VolumeRegistration], error: str,
+    config_root: Path,
+    records: list[VolumeRegistration],
+    error: str,
 ) -> str:
     """Return a status-safe scan failure without managed host paths.
 
     Docker and filesystem diagnostics can echo a bind source.  That source is
     intentionally private, and scan errors are retained in several status
-    files as well as printed by the optional background worker.  A full
-    aggregate with any managed host source therefore uses one generic error.
+    files as well as printed by the optional background worker.  Redact only
+    errors that contain that private managed-source path so unrelated,
+    actionable aggregate failures remain visible.
     """
 
-    if any(record.target == "host" for record in records):
-        return "Token Monitor scan failed for managed host sessions"
+    for record in records:
+        if record.target != "host":
+            continue
+        source_root, _home, _snapshot = _host_source_paths(config_root, record)
+        if str(source_root) in error:
+            return "Token Monitor scan failed for managed host sessions"
     return " ".join(error.split())[:512]
 
 
@@ -2321,7 +2328,7 @@ def _record_scan_error(config_root: Path, record: VolumeRegistration, error: str
             updated = replace(
                 current,
                 last_scan_at=_now(),
-                last_error=_scan_error_for_records([current], error),
+                last_error=_scan_error_for_records(config_root, [current], error),
             )
             save_registry(
                 config_root,
@@ -3358,6 +3365,38 @@ def _validate_exact_provider_ids(
             )
 
 
+def _is_legacy_private_provider_entry(
+    config_root: Path,
+    raw_provider: object,
+    entry: object,
+) -> bool:
+    """Return whether one old private provider entry has its exact old ID.
+
+    Before 0.36.0, a syntactically safe local provider label could become a
+    provider device ID.  The label is no longer safe to publish, but a prior
+    generation can still be needed as a rollback baseline.  Recognize only
+    the exact legacy shape and deterministic device ID, then deliberately
+    omit it from the returned payloads so it can never be uploaded again.
+    """
+
+    provider = _provider_slug(raw_provider)
+    if (
+        provider != raw_provider
+        or provider is None
+        or _public_provider_id(provider) is not None
+        or not isinstance(entry, dict)
+        or set(entry) != {"device_id"}
+    ):
+        return False
+    device_id = entry["device_id"]
+    if not isinstance(device_id, str):
+        return False
+    expected = (
+        f"cage-{provider}-{_platform_slug()}-{host_install_id(config_root)[:8]}"
+    )
+    return hmac.compare_digest(device_id, expected)
+
+
 def _write_generation_payloads(
     config_root: Path,
     payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
@@ -3391,6 +3430,8 @@ def _write_generation_payloads(
 def _load_generation_payloads(
     config_root: Path,
     generation: str,
+    *,
+    allow_legacy_private: bool = False,
 ) -> dict[str, dict[str, Any]]:
     generation = _validate_generation_id(generation)
     value = _read_json(
@@ -3411,11 +3452,18 @@ def _load_generation_payloads(
     provider_ids: dict[str, str] = {}
     for raw_provider, entry in provider_entries.items():
         provider = _public_provider_id(raw_provider)
-        if provider != raw_provider or not isinstance(entry, dict) or set(entry) != {"device_id"}:
-            raise MonitorError("monitor upload generation provider is invalid")
-        device_id = entry["device_id"]
-        validate_device_id(device_id)
-        provider_ids[provider] = device_id
+        if provider == raw_provider and isinstance(entry, dict) and set(entry) == {"device_id"}:
+            device_id = entry["device_id"]
+            validate_device_id(device_id)
+            provider_ids[provider] = device_id
+            continue
+        if allow_legacy_private and _is_legacy_private_provider_entry(
+            config_root, raw_provider, entry
+        ):
+            # The old payload can contain the private label.  It is retained
+            # only as a local generation file and must not be parsed or sent.
+            continue
+        raise MonitorError("monitor upload generation provider is invalid")
     _validate_exact_provider_ids(config_root, provider_ids)
     result: dict[str, dict[str, Any]] = {}
     directory = _generation_directory(config_root, generation)
@@ -3435,7 +3483,9 @@ def _previous_generation(
     if not generation:
         return "", {}
     generation = _validate_generation_id(generation)
-    return generation, _load_generation_payloads(config_root, generation)
+    return generation, _load_generation_payloads(
+        config_root, generation, allow_legacy_private=True
+    )
 
 
 def _upload_state_for_generation(
@@ -3470,7 +3520,9 @@ def _repair_pending_upload(
     _validate_exact_provider_ids(config_root, provider_ids)
     previous_generation = pending["previous_generation"]
     previous = (
-        _load_generation_payloads(config_root, previous_generation)
+        _load_generation_payloads(
+            config_root, previous_generation, allow_legacy_private=True
+        )
         if previous_generation
         else {}
     )
@@ -4838,7 +4890,7 @@ def preview_provider_split(
                 _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
                 return manifest
             except Exception as exc:
-                safe_error = _scan_error_for_records(active, str(exc))
+                safe_error = _scan_error_for_records(config_root, active, str(exc))
                 if safe_error != str(exc):
                     raise MonitorError(safe_error) from exc
                 raise
@@ -4930,7 +4982,7 @@ def scan_all_registrations(
                 )
                 return updated_all, status
             except Exception as exc:
-                safe_error = _scan_error_for_records(active, str(exc))
+                safe_error = _scan_error_for_records(config_root, active, str(exc))
                 try:
                     _fail_full_reconciliation(config_root, scheduler, safe_error)
                 except MonitorError:
@@ -4990,7 +5042,7 @@ def scan_registration(
             force=force,
         )
     except Exception as exc:
-        safe_error = _scan_error_for_records([current], str(exc))
+        safe_error = _scan_error_for_records(config_root, [current], str(exc))
         _record_scan_error(config_root, current, safe_error)
         if isinstance(exc, MonitorError):
             if safe_error != str(exc):
@@ -5108,7 +5160,7 @@ def scan_registration(
                     )
                 return result, status
             except Exception as exc:
-                safe_error = _scan_error_for_records(active, str(exc))
+                safe_error = _scan_error_for_records(config_root, active, str(exc))
                 if full_due:
                     try:
                         _fail_full_reconciliation(config_root, scheduler, safe_error)

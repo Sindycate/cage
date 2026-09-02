@@ -6,6 +6,41 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.1 — 2026-09-02
+
+### Resume Token Monitor uploads after private-provider history
+
+Who is affected: users who upgraded to 0.36.0 after an older Cage release had
+written a private provider label into a local Token Monitor upload generation.
+
+Previous behavior: 0.36.0 correctly stopped new private provider labels from
+reaching the hub, but also rejected the entire old local generation before a
+new sanitized upload could start. The resulting monitor command could report
+a generic managed-host scan failure even when the collector scan had succeeded.
+
+New behavior: Cage recognizes an old private-provider generation only when its
+device ID exactly matches the deterministic ID that the earlier Cage release
+would have created. It skips that old payload locally; it never parses or
+uploads it again. Current sessions are deduplicated as usual and private,
+unknown, missing, or multi-provider attribution is sent only through the
+generic `unattributed` stream. Errors that do not contain a managed-host path
+now remain visible so an upload failure can be diagnosed.
+
+Migration and recovery:
+
+1. Install Cage 0.36.1 or later.
+2. Run `cage monitor sync`. A successful command means Cage completed the
+   authenticated hub ingest; `cage monitor status` then shows the new last
+   successful synchronization.
+3. The old private-label hub device is deliberately left unchanged by this
+   compatibility repair. Do not add its historic total to the current Cage
+   provider streams when reading a hub-wide dashboard; an explicit verified
+   retirement migration is required before deleting any historical hub record.
+
+Rollback: install 0.36.0 or earlier only after disconnecting Token Monitor if
+needed. The source Codex directory, managed host sessions, and Docker volumes
+are untouched by this compatibility path.
+
 ## 0.36.0 — 2026-09-02
 
 ### Explicit Token Monitor enrollment for host-native Codex

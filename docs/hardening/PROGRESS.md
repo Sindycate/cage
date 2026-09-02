@@ -3,6 +3,31 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-02 — Token Monitor legacy private-generation recovery prepared for v0.36.1
+
+Corrected the 0.36.0 host-monitor rollout blocker. An earlier Cage release
+could persist a syntactically safe but private provider label in its local
+last-good generation. The new closed provider vocabulary correctly refused to
+publish that label, but incorrectly refused to read past it before a new
+sanitized upload could reach the hub. Prior-generation and pending-repair
+loading now recognize only the exact deterministic legacy device binding,
+skip the legacy payload without parsing or republishing it, and retain strict
+validation for every current generation. A forged legacy device binding still
+fails closed.
+
+Host-source path redaction now applies only when an error contains the private
+managed-host path. This preserves source-path confidentiality while exposing
+actionable aggregate errors such as an invalid legacy generation instead of
+misreporting them as collector failures. Existing legacy hub records are not
+deleted or modified automatically; a future retirement path must verify the
+replacement before changing external history.
+
+Validation: focused Token Monitor coverage passes (`77 passed`), including a
+real ingest-call regression for a legacy private generation, forged-ID
+rejection, pending-repair compatibility, and conditional path redaction. The
+complete Python suite passes (`620 passed, 15 skipped`); Python compilation,
+Bash/Node syntax, Compose rendering, and `git diff --check` pass.
+
 ## 2026-09-02 — Opt-in host-native Codex Token Monitor prepared for v0.36.0
 
 Added explicit `cage monitor add --auth AUTH` enrollment for Codex
