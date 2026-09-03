@@ -5,6 +5,18 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.4 — 2026-09-03
+
+- make parallel maintainer-release preflight interrupt-safe: SIGINT/SIGTERM
+  now terminate active subprocess groups and descendants, cancel pending
+  gates, and preserve a valid resumable journal; each local gate also has an
+  explicit subprocess deadline;
+- shorten the maintainer release critical path: local publisher gates now run
+  concurrently with deterministic reporting, CI validates Python, Docker, and
+  static checks in parallel, and candidate images build from one verified base
+  in a four-way matrix; write-once candidate tags, digest pinning, and
+  attestation checks remain fail-closed;
+
 ## 0.36.3 — 2026-09-03
 
 - repair Token Monitor scans across a UTC day or month boundary: Cage now

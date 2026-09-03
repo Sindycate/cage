@@ -12,6 +12,8 @@ import fcntl
 import json
 import os
 import shutil
+import signal
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -801,6 +803,239 @@ print(json.dumps({{'returncode': result.returncode, 'stdout': result.stdout, 'st
                 time.sleep(0.05)
             self.assertFalse(alive, f"descendant {descendant_pid} survived timeout")
 
+    def test_sigint_and_sigterm_stop_parallel_gate_process_groups_and_keep_state(self):
+        if os.name != "posix" or shutil.which("ps") is None:
+            self.skipTest("POSIX process-group inspection unavailable")
+
+        child_code = """\
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+grandchild = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+])
+with pathlib.Path(sys.argv[1]).open("w", encoding="ascii") as pid_file:
+    pid_file.write(f"{os.getpid()}\\n")
+    pid_file.flush()
+    time.sleep(0.05)
+    pid_file.write(f"{grandchild.pid}\\n")
+    pid_file.flush()
+time.sleep(60)
+"""
+        helper = f"""\
+import importlib.util
+import os
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("publish_release", {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+sys.modules["publish_release"] = module
+spec.loader.exec_module(module)
+
+root = pathlib.Path(os.environ["PUBLISHER_SIGNAL_ROOT"])
+root.mkdir()
+state_dir = root / "state"
+state_dir.mkdir()
+orchestrator = module.Orchestrator(
+    module.Options(repo_root=root, run_local_gates=True),
+    err=lambda line: None,
+)
+orchestrator.state = module.ReleaseState(
+    version="0.0.0", commit_sha="a" * 40, tag="v0.0.0"
+)
+orchestrator._state_dir = state_dir
+orchestrator._save_state()
+
+def gate(pid_path):
+    def run():
+        result = orchestrator.runner.run(
+            [sys.executable, "-c", {child_code!r}, str(pid_path)],
+            timeout=None,
+        )
+        if not result.ok:
+            raise module.PreflightError(f"gate stopped: {{result.returncode}}")
+        return "done"
+    return run
+
+orchestrator._install_signal_handlers()
+orchestrator._record_checks_parallel((
+    ("gate-a", gate(root / "a.pids")),
+    ("gate-b", gate(root / "b.pids")),
+))
+"""
+
+        def pid_alive(pid):
+            probe = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "stat="],
+                capture_output=True,
+                text=True,
+            )
+            state = probe.stdout.strip()
+            return probe.returncode == 0 and bool(state) and not state.startswith("Z")
+
+        expected_pids_per_gate = 2
+
+        def read_pid_file(path):
+            """Return complete PID records and whether the file is complete."""
+            try:
+                contents = path.read_text(encoding="ascii")
+            except (OSError, UnicodeError):
+                return (), False
+
+            pids = []
+            for line in contents.splitlines(keepends=True):
+                # Ignore a final unterminated record: the writer may still be
+                # in the middle of its write, and that value is not safe to
+                # use for process-group cleanup yet.
+                if not line.endswith("\n"):
+                    continue
+                try:
+                    pid = int(line[:-1].strip())
+                except ValueError:
+                    return tuple(pids), False
+                if pid <= 0:
+                    return tuple(pids), False
+                pids.append(pid)
+
+            complete = (
+                contents.endswith("\n")
+                and len(pids) == expected_pids_per_gate
+            )
+            return tuple(pids), complete
+
+        def observe_pid_files(paths, started_pids, started_groups):
+            snapshots = {}
+            for path in paths:
+                current, complete = read_pid_file(path)
+                snapshots[path] = (current, complete)
+                started_pids.update(current)
+                # The first record is the process-group leader because the
+                # runner starts each gate with start_new_session=True. Keep it
+                # even when the second record has not been written yet.
+                if current:
+                    started_groups.add(current[0])
+            return snapshots
+
+        def terminate_started_groups(started_groups):
+            for process_group in tuple(started_groups):
+                try:
+                    os.killpg(process_group, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum.name):
+                root = Path(tempfile.gettempdir()) / (
+                    "publisher-signal-" + str(os.getpid())
+                )
+                shutil.rmtree(root, ignore_errors=True)
+                publisher = subprocess.Popen(
+                    [sys.executable, "-c", helper],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                    env=dict(os.environ, PUBLISHER_SIGNAL_ROOT=str(root)),
+                )
+                paths = (root / "a.pids", root / "b.pids")
+                observed_pids = set()
+                started_groups = set()
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        snapshots = observe_pid_files(
+                            paths, observed_pids, started_groups
+                        )
+                        if all(
+                            complete
+                            and len(current) == expected_pids_per_gate
+                            and len(set(current)) == expected_pids_per_gate
+                            and all(pid_alive(pid) for pid in current)
+                            for current, complete in snapshots.values()
+                        ):
+                            break
+                        if publisher.poll() is not None:
+                            stdout, stderr = publisher.communicate()
+                            self.fail(
+                                f"publisher exited before gates started: {publisher.returncode}\n"
+                                f"stdout={stdout}\nstderr={stderr}"
+                            )
+                        time.sleep(0.02)
+                    self.assertEqual(
+                        len(observed_pids),
+                        len(paths) * expected_pids_per_gate,
+                        "both gates did not start descendants",
+                    )
+                    pids = sorted(observed_pids)
+
+                    started = time.monotonic()
+                    publisher.send_signal(signum)
+                    try:
+                        returncode = publisher.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.fail(f"publisher did not stop promptly for {signum.name}")
+                    elapsed = time.monotonic() - started
+                    self.assertLess(elapsed, 3, f"slow {signum.name} shutdown")
+                    self.assertEqual(returncode, 128 + int(signum))
+
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and any(
+                        pid_alive(pid) for pid in pids
+                    ):
+                        time.sleep(0.05)
+                    self.assertFalse(
+                        any(pid_alive(pid) for pid in pids),
+                        f"descendant process survived {signum.name}: {pids}",
+                    )
+
+                    state_file = root / "state" / "v0.0.0.json"
+                    payload = json.loads(state_file.read_text(encoding="utf-8"))
+                    self.assertEqual(payload["schema"], pr.STATE_SCHEMA)
+                    self.assertEqual(payload["schema_version"], pr.STATE_SCHEMA_VERSION)
+                    self.assertEqual(payload["phase"], "local_ready")
+                    self.assertEqual(payload["checks"], [])
+                    self.assertFalse(
+                        state_file.with_name(state_file.name + ".tmp").exists()
+                    )
+                finally:
+                    if publisher.poll() is None:
+                        try:
+                            os.killpg(publisher.pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            publisher.kill()
+                        publisher.wait()
+                    publisher.communicate()
+
+                    # A failed assertion may have happened after only a
+                    # partial PID-file read. Give detached gates time to finish
+                    # publishing their group leaders, retain every record seen,
+                    # and kill each group on every pass so no unrecorded
+                    # descendant survives teardown.
+                    cleanup_deadline = time.monotonic() + 5
+                    while time.monotonic() < cleanup_deadline:
+                        snapshots = observe_pid_files(
+                            paths, observed_pids, started_groups
+                        )
+                        terminate_started_groups(started_groups)
+                        if all(
+                            complete
+                            and len(current) == expected_pids_per_gate
+                            for current, complete in snapshots.values()
+                        ) and not any(pid_alive(pid) for pid in observed_pids):
+                            break
+                        time.sleep(0.02)
+                    observe_pid_files(paths, observed_pids, started_groups)
+                    terminate_started_groups(started_groups)
+                    shutil.rmtree(root, ignore_errors=True)
+
 
 
 class PreflightTests(PublishReleaseTestCase):
@@ -824,6 +1059,102 @@ class PreflightTests(PublishReleaseTestCase):
             patch.object(pr.sys, "version", "3.12.0 (test)"),
         ):
             self.assertEqual(orch._check_python(), "3.12.0")
+
+    def test_local_gates_run_in_parallel_with_stable_report_order(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        entered = threading.Barrier(5)
+
+        def gate(name):
+            def run():
+                entered.wait(timeout=3)
+                return name
+
+            return run
+
+        checks = tuple(
+            (name, gate(name))
+            for name in (
+                "unit-tests",
+                "python-compile",
+                "shell-syntax",
+                "compose-config",
+                "reproducible-archive",
+            )
+        )
+        orch._record_checks_parallel(checks)
+
+        self.assertEqual(
+            [check.name for check in orch.preflight_checks],
+            [name for name, _ in checks],
+        )
+        self.assertEqual(
+            [check.detail for check in orch.preflight_checks],
+            [name for name, _ in checks],
+        )
+
+    def test_local_gates_use_explicit_subprocess_timeouts(self):
+        scenario = Scenario()
+        orch, *_ = make_orch(scenario)
+        orch.context.version = scenario.version
+
+        orch._gate_unit_tests()
+        orch._gate_compileall()
+        orch._gate_shell_syntax()
+        orch._gate_compose()
+        orch._gate_archive()
+
+        records = scenario.runner.call_records
+        unit = next(
+            record
+            for record in records
+            if record["argv"][:2] == [sys.executable, "-m"]
+            and "pytest" in record["argv"]
+        )
+        compileall = next(
+            record
+            for record in records
+            if record["argv"][:3] == [sys.executable, "-m", "compileall"]
+        )
+        shell = [record for record in records if record["argv"][0] == pr.REQUIRED_BASH]
+        compose = next(
+            record
+            for record in records
+            if record["argv"][:3] == ["docker", "compose", "config"]
+        )
+        archive = [
+            record
+            for record in records
+            if record["argv"][0] == sys.executable
+            and any("build-release.py" in part for part in record["argv"])
+        ]
+        archive_epoch = next(
+            record
+            for record in records
+            if record["argv"][:2] == ["git", "show"]
+            and "--format=%ct" in record["argv"]
+        )
+
+        self.assertEqual(unit["timeout"], pr.LOCAL_GATE_TIMEOUTS["unit-tests"])
+        self.assertEqual(compileall["timeout"], pr.LOCAL_GATE_TIMEOUTS["python-compile"])
+        self.assertTrue(shell)
+        self.assertTrue(
+            all(
+                record["timeout"] == pr.LOCAL_GATE_TIMEOUTS["shell-syntax"]
+                for record in shell
+            )
+        )
+        self.assertEqual(compose["timeout"], pr.LOCAL_GATE_TIMEOUTS["compose-config"])
+        self.assertEqual(len(archive), 2)
+        self.assertTrue(
+            all(
+                record["timeout"] == pr.LOCAL_GATE_TIMEOUTS["reproducible-archive"]
+                for record in archive
+            )
+        )
+        self.assertEqual(
+            archive_epoch["timeout"], pr.LOCAL_GATE_TIMEOUTS["reproducible-archive"]
+        )
 
     def test_baseline_preflight_passes_and_detects_local_ready(self):
         scenario = Scenario()  # ahead=1, clean, no tags, no release

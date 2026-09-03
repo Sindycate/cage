@@ -3,6 +3,74 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Release speedup prepared for v0.36.4
+
+The release-speedup work and its interrupt-safe PID-file regression follow-up
+are now finalized for the next release checkpoint. `CAGE_VERSION` is
+`0.36.4`; the corresponding changelog and migration entries are no longer
+under `Unreleased`. The final CI candidate job now independently resolves and
+attests the base candidate from GHCR, compares that digest with
+`candidate-base`, and writes the manifest only after the base and all four
+leaves pass the same registry checks. No version tag, `latest` tag, GitHub
+Release, or production image has been published by this checkpoint.
+
+## 2026-09-03 — Interrupt-safe parallel release preflight
+
+The parallel local release gates could leave a publisher stuck after SIGINT or
+SIGTERM: `SystemExit` unwound into an executor shutdown that waited for
+workers, while detached child process groups kept `communicate()` blocked.
+`SubprocessRunner` now tracks every active `Popen` process group under a lock,
+closes the fork-to-registration interruption race, and sends TERM/KILL to all
+active groups. Parallel preflight cancels pending futures and uses
+`shutdown(wait=False, cancel_futures=True)` only after process cleanup; the
+group termination makes the interpreter's eventual worker join bounded. Each
+local gate now also supplies an explicit subprocess timeout.
+
+Validation: the real subprocess signal regression passes for both SIGINT and
+SIGTERM, terminating two gates plus their descendants promptly while leaving a
+valid atomic resumable journal with no partial checks or temporary state file.
+The complete Python suite passes (`643 passed, 15 skipped`); Python
+compilation, Bash syntax, Compose rendering, and `git diff --check` pass.
+
+## 2026-09-03 — Release pipeline parallelization measured
+
+The release critical path had two avoidable serial sections. In the baseline
+`v0.36.3` main CI run (`33729747088`), the combined validation job took 3m21s
+and the candidate image job took 13m25s, for a 16m52s end-to-end span. The
+candidate job built the shared base and all four leaf images one after another.
+The release workflow itself was already fan-out based and completed in 2m14s
+in run `33731224427`.
+
+The CI workflow now runs Python, Docker, and static validation as independent
+gates, builds and attests the shared candidate base once, then builds the four
+leaf candidates in a fail-fast-disabled matrix. A final job resolves every
+candidate digest from GHCR and revalidates platforms and attestations before
+writing the release manifest. The publisher runs its five independent local
+gates concurrently while preserving declaration-order reports and failure
+handling. No version tag, latest tag, GitHub Release, or production image was
+changed by this work.
+
+Local publisher timing samples improved from 66.247s sequential to 59.487s
+parallel (6.760s, 10.2%); the full Python suite dominates these samples and
+normal test-runtime variance applies. Feature-branch CI run `33735484713`
+passed in about 2m35s overall, with the critical `test-docker` lane at 2m31s.
+
+An isolated benchmark of the exact PR commit, using temporary
+`candidate-e68184a8fab733c8692e0eff50aa3f7ef490ac85` tags and no release
+version, measured the formerly largest slice directly. The shared base took
+6m21s, consistent with the old roughly six-minute base prerequisite; the four
+leaves then ran as a matrix and
+the last leaf finished 3m22s after the base, followed by a 39s final evidence
+gate. The complete candidate pipeline fell from 13m25s to 10m24s: 3m01s or
+22.5% faster. The full run fell from 16m52s to 14m49s: 2m03s or 12.2% faster.
+The leaf jobs completed in Claude 1m51s, Codex 2m43s (after a 38s runner
+queue), OpenCode 2m18s, and Token Monitor 2m02s. Benchmark run `33737889348`
+passed all gates. Its temporary branch was deleted; no version tag, `latest`
+tag, GitHub Release, or production image was changed. The five exact
+temporary candidate tags are not release inputs and must not be promoted; the
+current credential could verify them through the public registry but lacks the
+GitHub Packages scope needed to delete their package-version records.
+
 ## 2026-09-03 — Token Monitor UTC rollover repair prepared for v0.36.3
 
 The monitor cache could combine a fresh collector summary for a new UTC day or

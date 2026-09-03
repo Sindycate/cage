@@ -16,6 +16,7 @@ Standard library only; requires Python 3.12+.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import fcntl
 import hashlib
@@ -27,6 +28,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -73,6 +75,16 @@ CONFIRMATION_HINT = "release v{version} from {short_sha}"
 DEFAULT_POLL_INTERVAL = 15.0
 DEFAULT_WORKFLOW_TIMEOUT = 3600.0  # 60 minutes, accommodates cold CI
 DEFAULT_EXTERNAL_COMMAND_TIMEOUT = 120.0
+# Local gates are intentionally bounded independently.  These are subprocess
+# deadlines, not a replacement for the process-group interruption path: a
+# release can still be interrupted immediately while a gate is running.
+LOCAL_GATE_TIMEOUTS: dict[str, float] = {
+    "unit-tests": 300.0,
+    "python-compile": 120.0,
+    "shell-syntax": 120.0,
+    "compose-config": 120.0,
+    "reproducible-archive": 300.0,
+}
 PUBLIC_RETRY_ATTEMPTS = 5
 PUBLIC_RETRY_DELAY_SECONDS = 5.0
 ANONYMOUS_PULL_ATTEMPTS = 2
@@ -419,21 +431,67 @@ class Options:
 class SubprocessRunner:
     """Runs non-interactive commands without a shell and captures output."""
 
+    def __init__(self) -> None:
+        self._active_lock = threading.RLock()
+        self._active_processes: dict[int, subprocess.Popen] = {}
+        self._interrupted = False
+
+    @staticmethod
+    def _signal_process_group(process: subprocess.Popen, signum: signal.Signals) -> None:
+        """Signal a detached process group, tolerating a concurrent exit."""
+        try:
+            os.killpg(process.pid, signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def _register_process(self, process: subprocess.Popen) -> bool:
+        """Register a process, or kill it if interruption already started.
+
+        The registration and interruption flag share one lock.  This closes the
+        small fork-to-registration window in which a signal could otherwise
+        miss a newly created process and leave its worker in communicate().
+        """
+        with self._active_lock:
+            if self._interrupted:
+                should_terminate = True
+            else:
+                self._active_processes[process.pid] = process
+                should_terminate = False
+        if should_terminate:
+            self._signal_process_group(process, signal.SIGTERM)
+            self._signal_process_group(process, signal.SIGKILL)
+        return not should_terminate
+
+    def _unregister_process(self, process: subprocess.Popen) -> None:
+        with self._active_lock:
+            self._active_processes.pop(process.pid, None)
+
+    def terminate_active_process_groups(self) -> None:
+        """Stop every currently running command and its detached descendants.
+
+        The signal handler cannot safely wait for worker threads.  It therefore
+        sends TERM followed immediately by KILL to each exact process group;
+        workers' existing communicate() calls then wake and can unwind without
+        an executor shutdown waiting indefinitely.
+        """
+        with self._active_lock:
+            self._interrupted = True
+            processes = tuple(self._active_processes.values())
+        for process in processes:
+            self._signal_process_group(process, signal.SIGTERM)
+        for process in processes:
+            self._signal_process_group(process, signal.SIGKILL)
+
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen) -> tuple[str, str]:
         """Stop a detached command and its descendants, then drain diagnostics."""
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        # The group can still contain descendants after the Popen parent has
+        # exited and closed its own status, so do not gate killpg on poll().
+        SubprocessRunner._signal_process_group(process, signal.SIGTERM)
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            SubprocessRunner._signal_process_group(process, signal.SIGKILL)
             stdout, stderr = process.communicate()
         return stdout or "", stderr or ""
 
@@ -464,6 +522,7 @@ class SubprocessRunner:
                 text=True,
                 start_new_session=True,
             )
+            self._register_process(process)
             stdout, stderr = process.communicate(input=input_text, timeout=timeout)
         except FileNotFoundError as exc:
             return CommandResult(argv, 127, "", f"command not found: {exc.filename}")
@@ -493,6 +552,9 @@ class SubprocessRunner:
             if process is not None:
                 self._terminate_process_group(process)
             raise
+        finally:
+            if process is not None:
+                self._unregister_process(process)
         return CommandResult(argv, process.returncode, stdout or "", stderr or "")
 
 
@@ -603,8 +665,20 @@ class Orchestrator:
                 # Not on the main thread (e.g. under test); skip.
                 pass
 
+    def _terminate_active_process_groups(self) -> None:
+        terminate = getattr(self.runner, "terminate_active_process_groups", None)
+        if not callable(terminate):
+            return
+        try:
+            terminate()
+        except Exception:
+            # Signal cleanup must not mask the interruption or prevent the
+            # executor from reaching its non-waiting shutdown path.
+            pass
+
     def _on_signal(self, signum, frame) -> None:  # pragma: no cover - async
         self._interrupted = True
+        self._terminate_active_process_groups()
         try:
             self._save_state()
         except Exception:
@@ -792,8 +866,13 @@ class Orchestrator:
             raise ReleaseError(f"git {args[0]} failed: {bounded(result.stderr or result.stdout)}")
         return result
 
-    def git_out(self, *args: str, cwd: Optional[Path] = None) -> str:
-        return self.git(*args, cwd=cwd).stdout.strip()
+    def git_out(
+        self,
+        *args: str,
+        cwd: Optional[Path] = None,
+        timeout: Optional[float] = DEFAULT_EXTERNAL_COMMAND_TIMEOUT,
+    ) -> str:
+        return self.git(*args, cwd=cwd, timeout=timeout).stdout.strip()
 
     def gh(
         self,
@@ -888,15 +967,56 @@ class Orchestrator:
 
     # -- preflight ----------------------------------------------------------
 
-    def _record_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
+    def _evaluate_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
         start = self.clock.now()
         try:
             detail = fn() or ""
             result = CheckResult(name, "passed", self.clock.now() - start, str(detail))
         except ReleaseError as exc:
             result = CheckResult(name, "failed", self.clock.now() - start, str(exc))
+        return result
+
+    def _record_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
+        result = self._evaluate_check(name, fn)
         self.preflight_checks.append(result)
         return result
+
+    def _record_checks_parallel(
+        self, checks: Sequence[tuple[str, Callable[[], object]]]
+    ) -> None:
+        """Run independent checks concurrently, retaining deterministic output order.
+
+        The checks are read-only gates: they invoke subprocesses, inspect the
+        worktree, or build temporary verification artifacts. Results are joined
+        in declaration order and appended only by the calling thread, so the
+        release journal and failure report remain stable while local wall time
+        tracks the slowest gate instead of the sum of all gates.
+        """
+        if not checks:
+            return
+        executor = ThreadPoolExecutor(
+            max_workers=len(checks), thread_name_prefix="release-check"
+        )
+        futures = []
+        try:
+            for name, fn in checks:
+                futures.append(executor.submit(self._evaluate_check, name, fn))
+            results = [future.result() for future in futures]
+        except BaseException:
+            # A signal raises SystemExit in the main thread.  Do not enter the
+            # executor context manager's implicit shutdown(wait=True): cancel
+            # work that has not started, terminate active process groups, and
+            # let already-running workers unwind without waiting here.  The
+            # process-group kill is what makes Python's eventual executor
+            # thread join at interpreter exit bounded in the real CLI.
+            for future in futures:
+                future.cancel()
+            self._terminate_active_process_groups()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
+            self.preflight_checks.extend(results)
 
     def _abort_if_failed(self) -> None:
         failed = [c for c in self.preflight_checks if c.status == "failed"]
@@ -921,11 +1041,15 @@ class Orchestrator:
         self._record_check("docker-usable", self._check_docker)
         self._record_check("github-release", self._check_existing_release)
         if self.options.run_local_gates:
-            self._record_check("unit-tests", self._gate_unit_tests)
-            self._record_check("python-compile", self._gate_compileall)
-            self._record_check("shell-syntax", self._gate_shell_syntax)
-            self._record_check("compose-config", self._gate_compose)
-            self._record_check("reproducible-archive", self._gate_archive)
+            self._record_checks_parallel(
+                (
+                    ("unit-tests", self._gate_unit_tests),
+                    ("python-compile", self._gate_compileall),
+                    ("shell-syntax", self._gate_shell_syntax),
+                    ("compose-config", self._gate_compose),
+                    ("reproducible-archive", self._gate_archive),
+                )
+            )
         self._abort_if_failed()
 
     def _check_python(self) -> str:
@@ -1128,7 +1252,9 @@ class Orchestrator:
 
     def _gate_unit_tests(self) -> str:
         result = self.runner.run(
-            [sys.executable, "-m", "pytest", "-q"], cwd=self.repo_root
+            [sys.executable, "-m", "pytest", "-q"],
+            cwd=self.repo_root,
+            timeout=LOCAL_GATE_TIMEOUTS["unit-tests"],
         )
         if not result.ok:
             raise PreflightError(
@@ -1153,7 +1279,9 @@ class Orchestrator:
             "scripts",
         ]
         result = self.runner.run(
-            [sys.executable, "-m", "compileall", "-q", *targets], cwd=self.repo_root
+            [sys.executable, "-m", "compileall", "-q", *targets],
+            cwd=self.repo_root,
+            timeout=LOCAL_GATE_TIMEOUTS["python-compile"],
         )
         if not result.ok:
             raise PreflightError(
@@ -1171,13 +1299,20 @@ class Orchestrator:
             "install.sh",
             ".github/scripts/install-gitleaks.sh",
         ]
+        timeout = LOCAL_GATE_TIMEOUTS["shell-syntax"]
         for name in files:
-            result = self.runner.run([REQUIRED_BASH, "-n", name], cwd=self.repo_root)
+            result = self.runner.run(
+                [REQUIRED_BASH, "-n", name], cwd=self.repo_root, timeout=timeout
+            )
             if not result.ok:
                 raise PreflightError(f"bash -n {name} failed:\n{bounded(result.stderr)}")
         node = shutil.which("node")
         if node:
-            result = self.runner.run([node, "--check", "token-monitor-collector.js"], cwd=self.repo_root)
+            result = self.runner.run(
+                [node, "--check", "token-monitor-collector.js"],
+                cwd=self.repo_root,
+                timeout=timeout,
+            )
             if not result.ok:
                 raise PreflightError(
                     f"node --check token-monitor-collector.js failed:\n{bounded(result.stderr)}"
@@ -1185,7 +1320,12 @@ class Orchestrator:
         return "passed"
 
     def _gate_compose(self) -> str:
-        result = self.docker("compose", "config", check=False)
+        result = self.docker(
+            "compose",
+            "config",
+            check=False,
+            timeout=LOCAL_GATE_TIMEOUTS["compose-config"],
+        )
         if not result.ok:
             raise PreflightError(
                 f"docker compose config failed:\n{bounded(result.stderr or result.stdout)}"
@@ -1193,7 +1333,10 @@ class Orchestrator:
         return "passed"
 
     def _gate_archive(self) -> str:
-        epoch = self.git_out("show", "-s", "--format=%ct", "HEAD")
+        timeout = LOCAL_GATE_TIMEOUTS["reproducible-archive"]
+        epoch = self.git_out(
+            "show", "-s", "--format=%ct", "HEAD", timeout=timeout
+        )
         packager = self.repo_root / "scripts" / "build-release.py"
         digests = []
         for _ in range(2):
@@ -1203,6 +1346,7 @@ class Orchestrator:
                     [sys.executable, str(packager), self.context.version, temporary],
                     cwd=self.repo_root,
                     env=env,
+                    timeout=timeout,
                 )
                 if not result.ok:
                     raise PreflightError(
