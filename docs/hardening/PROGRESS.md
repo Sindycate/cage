@@ -23,10 +23,12 @@ changed by this work.
 
 Local publisher timing samples improved from 66.247s sequential to 59.487s
 parallel (6.760s, 10.2%); the full Python suite dominates these samples and
-normal test-runtime variance applies. The feature-branch CI run is the
-validation evidence for the split jobs; candidate publication remains gated to
-pushes on `main`, so the matrix is verified structurally and by fail-closed
-shell tests without publishing branch candidates.
+normal test-runtime variance applies. Feature-branch CI run `33735484713`
+passed in about 2m35s overall, with the critical `test-docker` lane at 2m31s;
+the old combined validation lane was about 3m21s. Candidate publication
+remains gated to pushes on `main`, so this run verified the split jobs and the
+matrix by structure and fail-closed shell tests without publishing branch
+candidates.
 
 ## 2026-09-03 — Token Monitor UTC rollover repair prepared for v0.36.3
 
