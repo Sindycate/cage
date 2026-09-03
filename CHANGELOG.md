@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+- build candidate images one architecture at a time on native amd64 and arm64
+  runners, hand off only immutable architecture digests, and assemble the
+  final multi-architecture indexes without QEMU; retain exact-source
+  attestations, SBOMs, provenance, write-once candidate tags, and schema-v3
+  release manifests;
+
 ## 0.36.4 — 2026-09-03
 
 - make parallel maintainer-release preflight interrupt-safe: SIGINT/SIGTERM

@@ -389,7 +389,7 @@ only production dependencies and official Tokscale 4.14, and runs
 summary only over loopback and writes one bounded JSON result to the
 host-provided output bind; it never receives the real hub secret.
 
-**`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, the `mcp-relay`/`host-cmd-relay` bridge scripts, and the shared fail-closed user-remapping helper. Contains no agent binaries, no entrypoints, no Cage tool accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI cache sharing and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
+**`Dockerfile.base`**: Shared base image (`cage-base:<version>`) containing Ubuntu 24.04, system packages (bash, bubblewrap, ca-certificates, curl, git, gosu, jq, less, procps, python3, pip, venv, ripgrep, sudo), Node.js LTS, GitHub CLI, the `mcp-relay`/`host-cmd-relay` bridge scripts, and the shared fail-closed user-remapping helper. Contains no agent binaries, no entrypoints, no Cage tool accounts, and no `openssh-server`. Published to `ghcr.io/sindycate/cage/base` for CI candidate assembly and transparency. See `docs/adr-001-shared-base-image.md` for the architecture decision.
 
 All five Dockerfiles end with OCI version plus `io.cage.managed`,
 `io.cage.role`, and `io.cage.version` labels. Local launcher, Compose, update
@@ -482,29 +482,36 @@ SBOM attestation separately. It is not part of the `cage` CLI and is excluded
 from the release archive.
 
 **`.github/workflows/ci.yml`**: In addition to the secret-scan, macOS Bash 3.2
-installer, and Python 3.12 test/Docker/Desktop gates, a `candidate` job
-runs only on a `push` to `main` after every gate passes. It builds the shared
-base for `linux/amd64`+`linux/arm64`, publishes it as
-`ghcr.io/sindycate/cage/base:candidate-<full-SHA>`, builds all four leaves from
-that exact base digest, publishes `claude-code`/`codex`/`opencode`/`token-monitor`
-candidate tags, retains BuildKit SBOM and `provenance: mode=max`, signs GitHub
-provenance attestations for all five digests, and uploads a schema-v3
-`release-candidate-<SHA>` manifest
-artifact. Candidate tags are public, write-once, serialized per SHA
-(`cancel-in-progress: false`), and never referenced by Cage's pull logic. On a
-rerun for the same SHA, an existing candidate is verified (amd64/arm64 platforms
-and its `ci.yml` provenance attestation for the exact source SHA) and reused —
-its build/attest steps are skipped — while an unverifiable candidate fails
-closed rather than being rebuilt. No cross-version BuildKit cache is used.
+installer, and Python 3.12 test/Docker/Desktop gates, candidate publication
+runs only on a `push` to `main` after every gate passes. The shared base is
+built one platform at a time on native `ubuntu-24.04` (`linux/amd64`) and
+`ubuntu-24.04-arm` (`linux/arm64`) runners; QEMU is not used. Each architecture
+is pushed under its canonical digest reference with BuildKit SBOM and
+`provenance: mode=max`, and only a small digest artifact crosses into the
+assembler. The assembler creates the public
+`ghcr.io/sindycate/cage/base:candidate-<full-SHA>` index, then a dynamic
+image-by-architecture matrix builds all four leaves from that exact assembled
+base digest and assembles one write-once candidate index per image. The final
+`candidate` job independently resolves all five final tags, requires exactly
+the runnable `linux/amd64` and `linux/arm64` platforms (ignoring only
+`unknown/unknown` attestation descriptors), verifies each exact-source `ci.yml`
+attestation, and uploads the unchanged schema-v3
+`release-candidate-<SHA>` manifest artifact. Candidate tags are public,
+serialized per image and SHA (`cancel-in-progress: false`), and never
+referenced by Cage's pull logic. On a rerun for the same SHA, an existing
+candidate is verified and reused; an unverifiable or ambiguously reported
+candidate fails closed rather than being rebuilt. No cross-version BuildKit
+cache is used.
 
 **`.github/workflows/release.yml`**: Five logical stages, all actions pinned to
 immutable commit SHAs (maintained by Dependabot), serialized per tag with
 cancellation disabled. (1) **Exact-commit gate**: requires an annotated
 `v<VERSION>` tag whose commit matches `CAGE_VERSION` and `GITHUB_SHA`, finds a
 successful `ci.yml` push run for exactly that SHA on `main`, downloads its
-candidate manifest, and verifies the five candidate digests, their
-amd64/arm64 platforms, and their CI attestations (expected repo, exact source
-digest, `refs/heads/main`, pinned `ci.yml` signer); fails closed if a version
+candidate manifest, and verifies the five candidate digests, their exact
+`linux/amd64`/`linux/arm64` platforms, and their CI attestations (expected
+repo, exact source digest, `refs/heads/main`, pinned `ci.yml` signer); fails
+closed if a version
 tag already exists with a different digest. This gate protects manual tag
 pushes too. (2) **Source package**: reproducible tarball, archive-content
 secret scan, checksum, SPDX SBOM, and source provenance/SBOM attestations. (3)
@@ -512,8 +519,9 @@ secret scan, checksum, SPDX SBOM, and source provenance/SBOM attestations. (3)
 digests (`docker buildx imagetools create`, never rebuild/QEMU), re-attests
 each digest from the release workflow, and only then moves `latest`; idempotent
 for resume. (4) **Public consumer gate**: from a fresh empty Docker credential
-directory, verifies all five version and `latest` digests, their amd64/arm64
-platforms, and literal anonymous pulls. (5) **GitHub Release**: reverifies the
+directory, verifies all five version and `latest` digests, their exact
+`linux/amd64`/`linux/arm64` platforms, and literal anonymous pulls. (5)
+**GitHub Release**: reverifies the
 downloaded assets and creates the release last. The
 exact successful CI run replaces the duplicated Python/macOS/Docker/history-scan
 jobs; the archive-content scan stays because it validates the generated

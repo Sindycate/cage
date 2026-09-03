@@ -6,6 +6,15 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+### Native multi-architecture candidate builds
+
+No user configuration migration. This maintainer-only CI change builds each
+candidate architecture on its matching native GitHub runner, transfers only
+digest metadata to the assembler, and keeps the existing candidate manifest,
+image names, release promotion, and exact-source verification contracts. No
+Cage CLI, central configuration, state volume, or image-consumer behavior
+changes. QEMU is no longer used by the candidate pipeline.
+
 ## 0.36.4 — 2026-09-03
 
 ### Interrupt-safe parallel release preflight
