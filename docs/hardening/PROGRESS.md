@@ -3,7 +3,7 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
-## 2026-09-03 — Native ARM candidate pipeline prepared
+## 2026-09-03 — Native ARM candidate pipeline measured
 
 Iteration 1 replaces the QEMU multi-platform candidate builds with native
 architecture jobs: `ubuntu-24.04` for `linux/amd64` and `ubuntu-24.04-arm` for
@@ -17,11 +17,33 @@ attestation descriptors when checking the runnable platform set. QEMU and
 mutable temporary architecture tags are absent. The final verifier explicitly handles Bash command-substitution
 failure semantics so a failed attestation cannot be masked.
 
-Local validation: the complete Python suite passes (`656 passed, 15 skipped`);
+Local validation: the complete Python suite passes (`657 passed, 15 skipped`);
 workflow YAML parsing, Python compilation, Bash/Node syntax, Compose rendering,
 focused release-supply-chain tests, and `git diff --check` pass. No Iteration 2
-cache work has started. Live native-runner timings are intentionally recorded
-only after two isolated benchmark runs with temporary candidate tags.
+cache work has not started.
+
+The isolated benchmark used only temporary branch refs and SHA candidate tags;
+it did not touch a version tag, `latest`, a GitHub Release, or production
+images. Queue time is from workflow creation to the first started job; runner
+execution is from that first job to the final candidate job. The PR #11 baseline
+was run `33737889348`; the two native runs were `33755195224` and
+`33756043306`.
+
+| run | queue | runner execution | wall (created → final) | candidate path (plan → final) |
+| --- | ---: | ---: | ---: | ---: |
+| PR #11 baseline | 2s | 14m46s | 14m49s | 10m24s |
+| native run 1 | 2s | 8m06s | 8m09s | 5m29s |
+| native run 2 | 2s | 8m05s | 8m08s | 5m33s |
+
+Native base execution was 1m28s and 1m26s on arm64 (amd64 was 1m06s and
+1m11s); the slowest leaf was 1m22s and 1m11s. Both runs passed every test,
+architecture build, index assembly, final five-image verification, exact-source
+attestation check, and schema-v3 manifest upload. The two native runs average
+8m09s wall time, a 6m40s improvement over the baseline (45.0%). Native
+execution is already below the 9–11 minute acceptance range, so Iteration 2 is
+not recommended: cache policy, refresh epochs, and cache-poisoning controls
+would add complexity without a demonstrated need. The intentional cold-build
+path remains unchanged.
 
 ## 2026-09-03 — Release speedup prepared for v0.36.4
 
