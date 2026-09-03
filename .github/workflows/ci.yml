@@ -414,8 +414,12 @@ jobs:
             echo "ERROR: invalid base candidate digest: ${BASE_DIGEST}" >&2; exit 1
           fi
 
-          resolve_leaf() {
+          resolve_candidate() {
             local name="$1"
+            local expected=""
+            if [ "$#" -ge 2 ]; then
+              expected="$2"
+            fi
             local repo_path="sindycate/cage/${name}"
             local ref="ghcr.io/sindycate/cage/${name}:candidate-${SHA}"
             local status
@@ -429,6 +433,9 @@ jobs:
             digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}')"
             if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "ERROR: invalid digest for ${name}: ${digest}" >&2; exit 1
+            fi
+            if [ -n "$expected" ] && [ "$digest" != "$expected" ]; then
+              echo "ERROR: candidate $name digest $digest != expected $expected" >&2; exit 1
             fi
 
             local arches
@@ -447,10 +454,13 @@ jobs:
             printf '%s' "$digest"
           }
 
-          CLAUDE_DIGEST="$(resolve_leaf "claude-code")"
-          CODEX_DIGEST="$(resolve_leaf "codex")"
-          OPENCODE_DIGEST="$(resolve_leaf "opencode")"
-          MONITOR_DIGEST="$(resolve_leaf "token-monitor")"
+          # Re-resolve the base candidate independently from GHCR and compare it
+          # with candidate-base's output before using it in the manifest.
+          BASE_DIGEST="$(resolve_candidate "base" "$BASE_DIGEST")"
+          CLAUDE_DIGEST="$(resolve_candidate "claude-code")"
+          CODEX_DIGEST="$(resolve_candidate "codex")"
+          OPENCODE_DIGEST="$(resolve_candidate "opencode")"
+          MONITOR_DIGEST="$(resolve_candidate "token-monitor")"
 
           python3 - "$SHA" "$VERSION" "$RUN_ID" "$BASE_DIGEST" \
             "$CLAUDE_DIGEST" "$CODEX_DIGEST" "$OPENCODE_DIGEST" "$MONITOR_DIGEST" <<'PY'

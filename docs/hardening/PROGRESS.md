@@ -3,6 +3,17 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Release speedup prepared for v0.36.4
+
+The release-speedup work and its interrupt-safe PID-file regression follow-up
+are now finalized for the next release checkpoint. `CAGE_VERSION` is
+`0.36.4`; the corresponding changelog and migration entries are no longer
+under `Unreleased`. The final CI candidate job now independently resolves and
+attests the base candidate from GHCR, compares that digest with
+`candidate-base`, and writes the manifest only after the base and all four
+leaves pass the same registry checks. No version tag, `latest` tag, GitHub
+Release, or production image has been published by this checkpoint.
+
 ## 2026-09-03 — Interrupt-safe parallel release preflight
 
 The parallel local release gates could leave a publisher stuck after SIGINT or

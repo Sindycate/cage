@@ -179,6 +179,15 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("name: release-candidate-${{ needs.candidate-base.outputs.sha }}", text)
         self.assertIn('"schema": "cage.release-candidate"', text)
         self.assertIn('"schema_version": 3', text)
+        self.assertIn("resolve_candidate()", text)
+        self.assertIn(
+            'if [ -n "$expected" ] && [ "$digest" != "$expected" ]; then',
+            text,
+        )
+        self.assertIn(
+            'BASE_DIGEST="$(resolve_candidate "base" "$BASE_DIGEST")"',
+            text,
+        )
 
     def test_ci_candidates_are_write_once_verify_reuse_or_fail_closed(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")

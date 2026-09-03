@@ -5,6 +5,8 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.4 — 2026-09-03
+
 - make parallel maintainer-release preflight interrupt-safe: SIGINT/SIGTERM
   now terminate active subprocess groups and descendants, cancel pending
   gates, and preserve a valid resumable journal; each local gate also has an

@@ -6,6 +6,8 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.4 — 2026-09-03
+
 ### Interrupt-safe parallel release preflight
 
 No user configuration migration. The maintainer-only
