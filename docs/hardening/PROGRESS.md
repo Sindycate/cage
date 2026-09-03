@@ -3,6 +3,31 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Release pipeline parallelization prepared
+
+The release critical path had two avoidable serial sections. In the baseline
+`v0.36.3` main CI run (`33729747088`), the combined validation job took about
+3m21s and the candidate image job took about 13m25s, for an end-to-end span of
+about 16m48s. The candidate job built the shared base and all four leaf images
+one after another. The release workflow itself was already fan-out based and
+completed in about 2m14s in run `33731224427`.
+
+The CI workflow now runs Python, Docker, and static validation as independent
+gates, builds and attests the shared candidate base once, then builds the four
+leaf candidates in a fail-fast-disabled matrix. A final job resolves every
+candidate digest from GHCR and revalidates platforms and attestations before
+writing the release manifest. The publisher runs its five independent local
+gates concurrently while preserving declaration-order reports and failure
+handling. No version tag, latest tag, GitHub Release, or production image was
+changed by this work.
+
+Local publisher timing samples improved from 66.247s sequential to 59.487s
+parallel (6.760s, 10.2%); the full Python suite dominates these samples and
+normal test-runtime variance applies. The feature-branch CI run is the
+validation evidence for the split jobs; candidate publication remains gated to
+pushes on `main`, so the matrix is verified structurally and by fail-closed
+shell tests without publishing branch candidates.
+
 ## 2026-09-03 — Token Monitor UTC rollover repair prepared for v0.36.3
 
 The monitor cache could combine a fresh collector summary for a new UTC day or
