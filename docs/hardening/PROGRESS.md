@@ -3,6 +3,24 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Interrupt-safe parallel release preflight
+
+The parallel local release gates could leave a publisher stuck after SIGINT or
+SIGTERM: `SystemExit` unwound into an executor shutdown that waited for
+workers, while detached child process groups kept `communicate()` blocked.
+`SubprocessRunner` now tracks every active `Popen` process group under a lock,
+closes the fork-to-registration interruption race, and sends TERM/KILL to all
+active groups. Parallel preflight cancels pending futures and uses
+`shutdown(wait=False, cancel_futures=True)` only after process cleanup; the
+group termination makes the interpreter's eventual worker join bounded. Each
+local gate now also supplies an explicit subprocess timeout.
+
+Validation: the real subprocess signal regression passes for both SIGINT and
+SIGTERM, terminating two gates plus their descendants promptly while leaving a
+valid atomic resumable journal with no partial checks or temporary state file.
+The complete Python suite passes (`643 passed, 15 skipped`); Python
+compilation, Bash syntax, Compose rendering, and `git diff --check` pass.
+
 ## 2026-09-03 — Release pipeline parallelization measured
 
 The release critical path had two avoidable serial sections. In the baseline

@@ -6,6 +6,15 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+### Interrupt-safe parallel release preflight
+
+No user configuration migration. The maintainer-only
+`scripts/publish_release.py` now gives each local gate an explicit subprocess
+deadline and terminates active process groups, including descendants, when
+SIGINT or SIGTERM interrupts parallel preflight. Pending gates are cancelled
+and the private resumable journal remains atomically written and safe to
+resume. The script remains excluded from the end-user release archive.
+
 ## 0.36.3 — 2026-09-03
 
 ### Repair mixed Token Monitor UTC reporting periods
