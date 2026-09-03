@@ -3,6 +3,29 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Token Monitor UTC rollover repair prepared for v0.36.3
+
+The monitor cache could combine a fresh collector summary for a new UTC day or
+month with inactive-project snapshots from the preceding reporting period.
+The aggregate guard correctly rejected that mixed input, but normal launches
+then repeatedly reused the incompatible snapshots until a later full scan
+completed by chance.
+
+v0.36.3 treats a cached snapshot as trusted for an aggregate only when its
+`periodWindows` marker matches the fresh reference. It collects only the
+different sources. A full scan that crosses a reporting boundary makes one
+bounded retry of the sources that differ from its newest observation. A second
+mismatch remains fail-closed: no aggregate is uploaded and the hub keeps its
+last good payload. The same repair is used by normal and scheduled scans,
+provider-split previews, and the verified custom-provider migration. It does
+not change a separate upstream collector failure into a successful upload.
+
+Validation: focused Token Monitor and bootstrap coverage passes (`103 passed`);
+the complete Python suite passes (`632 passed, 15 skipped`); the isolated
+managed-host collector smoke test passes (`1 passed, 10 deselected`). Python
+compilation, Bash/Node syntax, Compose rendering, `git diff --check`, and the
+complete-history Gitleaks scan (`149 commits`, no leaks) pass.
+
 ## 2026-09-02 — Verified named-provider recovery prepared for v0.36.2
 
 The 0.36.0 fixed provider-label vocabulary incorrectly reclassified an

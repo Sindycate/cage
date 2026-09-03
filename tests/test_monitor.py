@@ -681,11 +681,11 @@ class MonitorStateTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _summary(device_id, sessions):
+    def _summary(device_id, sessions, *, period_windows=None):
         total = sum(item["totalTokens"] for item in sessions.values())
         cost = sum(item["costUsd"] for item in sessions.values())
         period = {"totalTokens": total, "costUsd": cost, "sessions": sessions}
-        return {
+        summary = {
             "deviceId": device_id,
             "trackedClients": ["codex"],
             "limits": {"updatedAt": "", "refreshMs": 0, "providers": []},
@@ -693,6 +693,45 @@ class MonitorStateTests(unittest.TestCase):
             "month": dict(period),
             "allTime": dict(period),
         }
+        if period_windows is not None:
+            summary["periodWindows"] = period_windows
+        return summary
+
+    @staticmethod
+    def _period_windows(day):
+        return {
+            "today": {"key": day},
+            "month": {"key": day[:7]},
+        }
+
+    def _registered_monitor_projects(self, root, *names):
+        device_id = monitor.host_device_id(root)
+        records = [
+            monitor.VolumeRegistration(
+                f"{index:032x}",
+                device_id,
+                f"codex-state-{name}",
+                "container",
+                f"/work/{name}",
+                f"Cage: {name} (Container)",
+                dict(FINGERPRINT, name=f"codex-state-{name}"),
+            )
+            for index, name in enumerate(names)
+        ]
+        monitor.save_registry(root, records)
+        return records
+
+    def _period_summary(self, record, session_id, total, day):
+        return self._summary(
+            record.device_id,
+            {f"codex:{session_id}": self._session(
+                session_id,
+                total=total,
+                input_tokens=total,
+                output_tokens=0,
+            )},
+            period_windows=self._period_windows(day),
+        )
 
     def test_aggregate_deduplicates_identical_and_monotonic_session_copies(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2461,6 +2500,228 @@ class MonitorStateTests(unittest.TestCase):
                 monitor.load_volume_snapshot(root, peer)["allTime"]["totalTokens"],
                 11,
             )
+
+    def test_incremental_scan_refreshes_cached_peer_after_utc_rollover(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            records = self._registered_monitor_projects(root, "current", "peer")
+            current, peer = records
+            current_window = self._period_windows("2026-09-03")
+            monitor._save_volume_snapshot(
+                root,
+                peer,
+                self._period_summary(peer, "peer", 11, "2026-09-02"),
+            )
+            scheduler = monitor._default_scheduler_state()
+            scheduler["next_full_reconciliation_at"] = time.time() + 3600
+            monitor.save_scheduler_state(root, scheduler)
+            current_payload = self._period_summary(
+                current, "current", 7, "2026-09-03"
+            )
+            peer_payload = self._period_summary(peer, "peer", 11, "2026-09-03")
+            calls = []
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                calls.append(record.logical_id)
+                return (
+                    current_payload
+                    if record.logical_id == current.logical_id
+                    else peer_payload
+                )
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload:
+                _updated, status = monitor.scan_registration(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    current,
+                    version="0.36.3",
+                    storage_policy=object(),
+                    allow_build=False,
+                )
+
+            self.assertEqual(calls, [current.logical_id, peer.logical_id])
+            self.assertEqual(collector.call_count, 2)
+            upload.assert_called_once()
+            self.assertEqual(status["total_tokens"], 18)
+            self.assertEqual(
+                monitor.load_volume_snapshot(root, peer)["periodWindows"],
+                current_window,
+            )
+
+    def test_full_scan_retries_only_pre_rollover_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            records = self._registered_monitor_projects(root, "a", "b")
+            current_window = self._period_windows("2026-09-03")
+            old_a = self._period_summary(records[0], "a", 100, "2026-09-02")
+            new_b = self._period_summary(records[1], "b", 100, "2026-09-03")
+            new_a = self._period_summary(records[0], "a", 100, "2026-09-03")
+            responses = [old_a, new_b, new_a]
+            calls = []
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                calls.append(record.logical_id)
+                return responses.pop(0)
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload:
+                _updated, status = monitor.scan_all_registrations(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    version="0.36.3",
+                    storage_policy=object(),
+                    allow_build=False,
+                    force=True,
+                )
+
+            self.assertEqual(
+                calls,
+                [records[0].logical_id, records[1].logical_id, records[0].logical_id],
+            )
+            self.assertEqual(collector.call_count, 3)
+            upload.assert_called_once()
+            self.assertEqual(status["total_tokens"], 200)
+            for record in records:
+                self.assertEqual(
+                    monitor.load_volume_snapshot(root, record)["periodWindows"],
+                    current_window,
+                )
+
+    def test_due_reconciliation_retries_current_summary_after_utc_rollover(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            records = self._registered_monitor_projects(root, "current", "peer")
+            current, peer = records
+            old_current = self._period_summary(
+                current, "current", 7, "2026-09-02"
+            )
+            new_peer = self._period_summary(peer, "peer", 11, "2026-09-03")
+            new_current = self._period_summary(
+                current, "current", 7, "2026-09-03"
+            )
+            responses = [old_current, new_peer, new_current]
+            calls = []
+
+            scheduler = monitor._default_scheduler_state()
+            scheduler["next_full_reconciliation_at"] = 0.0
+            monitor.save_scheduler_state(root, scheduler)
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                calls.append(record.logical_id)
+                return responses.pop(0)
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload:
+                _updated, status = monitor.scan_registration(
+                    root,
+                    "docker",
+                    Path("/work/cage"),
+                    current,
+                    version="0.36.3",
+                    storage_policy=object(),
+                    allow_build=False,
+                )
+
+            self.assertEqual(
+                calls,
+                [current.logical_id, peer.logical_id, current.logical_id],
+            )
+            self.assertEqual(collector.call_count, 3)
+            upload.assert_called_once()
+            self.assertEqual(status["total_tokens"], 18)
+
+    def test_full_scan_preserves_hub_snapshot_when_retry_still_crosses_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor.save_connection(
+                root, monitor.MonitorConnection("https://hub.example", "secret")
+            )
+            records = self._registered_monitor_projects(root, "a", "b")
+            responses = [
+                self._period_summary(records[0], "a", 100, "2026-09-02"),
+                self._period_summary(records[1], "b", 100, "2026-09-03"),
+                self._period_summary(records[0], "a", 100, "2026-09-02"),
+            ]
+            calls = []
+
+            def collect(_docker, _image, record, _root, **_kwargs):
+                calls.append(record.logical_id)
+                return responses.pop(0)
+
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            with patch.object(
+                monitor,
+                "volume_fingerprint",
+                side_effect=lambda _docker, name: fingerprints[name],
+            ), patch.object(
+                monitor, "ensure_collector_image", return_value="collector"
+            ), patch.object(
+                monitor, "_run_collector", side_effect=collect
+            ) as collector, patch.object(
+                monitor, "_hub_request", return_value={"devices": [], "periods": {}}
+            ), patch.object(monitor, "upload_summary") as upload:
+                with self.assertRaisesRegex(
+                    monitor.MonitorError,
+                    "collector period windows changed during the aggregate scan",
+                ):
+                    monitor.scan_all_registrations(
+                        root,
+                        "docker",
+                        Path("/work/cage"),
+                        version="0.36.3",
+                        storage_policy=object(),
+                        allow_build=False,
+                        force=True,
+                    )
+
+            self.assertEqual(
+                calls,
+                [records[0].logical_id, records[1].logical_id, records[0].logical_id],
+            )
+            self.assertEqual(collector.call_count, 3)
+            upload.assert_not_called()
 
     def test_incremental_scan_rejects_replaced_cached_peer(self):
         with tempfile.TemporaryDirectory() as temporary:

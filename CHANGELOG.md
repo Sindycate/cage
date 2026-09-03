@@ -5,6 +5,14 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.3 — 2026-09-03
+
+- repair Token Monitor scans across a UTC day or month boundary: Cage now
+  rereads only cached or freshly collected project snapshots with a different
+  `periodWindows` marker, once, before it builds an aggregate; a persistent
+  mismatch still preserves the hub's last good data rather than publishing an
+  incorrect period total;
+
 ## 0.36.2 — 2026-09-02
 
 - restore explicitly owner-approved custom Token Monitor provider streams

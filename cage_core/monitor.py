@@ -4279,9 +4279,9 @@ def _collect_occurrences(
     occurrences: dict[str, dict[str, list[tuple[VolumeRegistration, dict[str, Any]]]]] = {
         name: {} for name in ("today", "month", "allTime")
     }
-    first_windows = summaries[0][1].get("periodWindows")
+    first = summaries[0][1]
     for record, payload in summaries:
-        if payload.get("periodWindows") != first_windows:
+        if not _same_period_windows(payload, first):
             raise MonitorError("collector period windows changed during the aggregate scan")
         if payload.get("sessionDetailsOmitted"):
             raise MonitorError("collector omitted session details; hub snapshot was preserved")
@@ -4317,6 +4317,21 @@ def _collect_occurrences(
                     f"collector {period_name} sessions do not cover its token total; hub snapshot was preserved"
                 )
     return summaries[0][1], occurrences
+
+
+def _same_period_windows(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    """Return whether two collector observations cover the same periods.
+
+    Older collector snapshots do not have a ``periodWindows`` marker.  Keeping
+    ``None == None`` compatible lets those older snapshots retain their
+    existing behavior, while a marked current observation cannot be combined
+    with an unmarked or differently marked cached observation.
+    """
+
+    return left.get("periodWindows") == right.get("periodWindows")
 
 
 def _build_device_payload(
@@ -4956,24 +4971,40 @@ def _summaries_from_cached_or_collected(
     gid: int | None,
     overrides: dict[str, dict[str, Any]] | None = None,
     full: bool = False,
-) -> list[tuple[VolumeRegistration, dict[str, Any]]]:
-    """Use trusted per-volume state and collect only missing/full inputs."""
+    reference_payload: dict[str, Any] | None = None,
+) -> tuple[list[tuple[VolumeRegistration, dict[str, Any]]], bool]:
+    """Use compatible trusted state and return whether stale windows refreshed."""
 
     overrides = overrides or {}
     cached: dict[str, dict[str, Any]] = {}
     missing: list[VolumeRegistration] = []
+    period_windows_refreshed = False
     for record in active:
         _checked_volume_fingerprint(config_root, docker, record)
         override = overrides.get(record.logical_id)
         if override is not None and not full:
-            cached[record.logical_id] = _validate_summary(override, record.device_id)
+            payload = _validate_summary(override, record.device_id)
+            if (
+                reference_payload is None
+                or _same_period_windows(payload, reference_payload)
+            ):
+                cached[record.logical_id] = payload
+                continue
+            period_windows_refreshed = True
+            missing.append(record)
             continue
         if not full:
             payload, _metadata_changed = _load_trusted_volume_snapshot(config_root, record)
             if payload is not None:
-                cached[record.logical_id] = payload
-                continue
+                if (
+                    reference_payload is None
+                    or _same_period_windows(payload, reference_payload)
+                ):
+                    cached[record.logical_id] = payload
+                    continue
+                period_windows_refreshed = True
         missing.append(record)
+    collected: list[tuple[VolumeRegistration, dict[str, Any]]] = []
     if missing:
         collected = _collect_registered_summaries(
             config_root,
@@ -4990,7 +5021,32 @@ def _summaries_from_cached_or_collected(
         cached.update({record.logical_id: payload for record, payload in collected})
     if len(cached) != len(active):
         raise MonitorError("monitor aggregate has no trusted snapshot for every active volume")
-    return [(record, cached[record.logical_id]) for record in active]
+    summaries = [(record, cached[record.logical_id]) for record in active]
+    newest_collected = next(
+        (
+            payload
+            for record, payload in reversed(collected)
+            if record.logical_id not in overrides
+        ),
+        None,
+    )
+    summaries, corrected = _repair_period_window_mismatch(
+        config_root,
+        docker,
+        install_root,
+        summaries,
+        version=version,
+        storage_policy=storage_policy,
+        allow_build=allow_build,
+        uid=uid,
+        gid=gid,
+        reference_payload=(
+            newest_collected
+            if newest_collected is not None
+            else reference_payload
+        ),
+    )
+    return summaries, period_windows_refreshed or corrected
 
 
 def _collect_registered_summaries(
@@ -5036,6 +5092,67 @@ def _collect_registered_summaries(
             _save_volume_snapshot(config_root, record, payload)
             result.append((record, payload))
     return result
+
+
+def _repair_period_window_mismatch(
+    config_root: Path,
+    docker: str,
+    install_root: Path,
+    summaries: list[tuple[VolumeRegistration, dict[str, Any]]],
+    *,
+    version: str,
+    storage_policy: object,
+    allow_build: bool,
+    uid: int | None,
+    gid: int | None,
+    reference_payload: dict[str, Any] | None = None,
+) -> tuple[list[tuple[VolumeRegistration, dict[str, Any]]], bool]:
+    """Retry only stale period observations once before an aggregate upload.
+
+    A collector can begin just before the UTC reporting boundary and finish
+    after it.  Its observations then legitimately use different day/month
+    markers, but combining them would make a false aggregate.  The last
+    collection is the newest observation, so reread only sources with a
+    different marker.  A second mismatch is not guessed at: the existing
+    aggregate guard remains fail-closed and the hub keeps its last good payload.
+    """
+
+    if not summaries:
+        return summaries, False
+    reference = (
+        reference_payload
+        if reference_payload is not None
+        else summaries[-1][1]
+    )
+    stale = [
+        record
+        for record, payload in summaries
+        if not _same_period_windows(payload, reference)
+    ]
+    if not stale:
+        return summaries, False
+    refreshed = _collect_registered_summaries(
+        config_root,
+        docker,
+        install_root,
+        stale,
+        version=version,
+        storage_policy=storage_policy,
+        allow_build=allow_build,
+        uid=uid,
+        gid=gid,
+    )
+    refreshed_by_id = {record.logical_id: payload for record, payload in refreshed}
+    repaired = [
+        (record, refreshed_by_id.get(record.logical_id, payload))
+        for record, payload in summaries
+    ]
+    if any(
+        not _same_period_windows(payload, reference)
+        for _record, payload in repaired
+    ):
+        raise MonitorError("collector period windows changed during the aggregate scan")
+    return repaired, True
 
 
 def _add_previous_provider_payloads(
@@ -5233,6 +5350,17 @@ def preview_provider_split(
                     uid=uid,
                     gid=gid,
                 )
+                summaries, _period_windows_refreshed = _repair_period_window_mismatch(
+                    config_root,
+                    docker,
+                    install_root,
+                    summaries,
+                    version=version,
+                    storage_policy=storage_policy,
+                    allow_build=allow_build,
+                    uid=uid,
+                    gid=gid,
+                )
                 _payloads, manifest = aggregate_provider_summaries(config_root, summaries)
                 return manifest
             except Exception as exc:
@@ -5294,6 +5422,17 @@ def scan_all_registrations(
                     docker,
                     install_root,
                     active,
+                    version=version,
+                    storage_policy=storage_policy,
+                    allow_build=allow_build,
+                    uid=uid,
+                    gid=gid,
+                )
+                summaries, _period_windows_refreshed = _repair_period_window_mismatch(
+                    config_root,
+                    docker,
+                    install_root,
+                    summaries,
                     version=version,
                     storage_policy=storage_policy,
                     allow_build=allow_build,
@@ -5363,8 +5502,9 @@ def scan_registration(
     """Refresh one current volume, then merge it with trusted cached volumes.
 
     A final lifecycle refresh is deliberately current-volume-only: it may
-    publish already-trusted peer snapshots, but it never starts the bounded
-    host-wide safety reconciliation or collects a missing peer.
+    publish already-trusted peer snapshots and reread a stale reporting-period
+    peer, but it never starts the bounded host-wide safety reconciliation or
+    collects a peer with no snapshot.
     """
 
     connection = load_connection(config_root)
@@ -5456,8 +5596,28 @@ def scan_registration(
                         gid=gid,
                         overrides=overrides,
                     )
+                    newest_collected = next(
+                        (
+                            payload
+                            for item, payload in reversed(summaries)
+                            if item.logical_id != refreshed.logical_id
+                        ),
+                        current_payload,
+                    )
+                    summaries, period_windows_refreshed = _repair_period_window_mismatch(
+                        config_root,
+                        docker,
+                        install_root,
+                        summaries,
+                        version=version,
+                        storage_policy=storage_policy,
+                        allow_build=allow_build,
+                        uid=uid,
+                        gid=gid,
+                        reference_payload=newest_collected,
+                    )
                 else:
-                    summaries = _summaries_from_cached_or_collected(
+                    summaries, period_windows_refreshed = _summaries_from_cached_or_collected(
                         config_root,
                         docker,
                         install_root,
@@ -5468,6 +5628,7 @@ def scan_registration(
                         uid=uid,
                         gid=gid,
                         overrides=overrides,
+                        reference_payload=current_payload,
                     )
                 should_publish = bool(
                     force
@@ -5475,6 +5636,7 @@ def scan_registration(
                     or content_changed
                     or metadata_changed
                     or not cache_complete
+                    or period_windows_refreshed
                     or previous_status is None
                     or load_upload_state(config_root) is not None
                 )
@@ -5848,6 +6010,17 @@ def migrate_provider_label(
                 docker,
                 install_root,
                 active_records,
+                version=version,
+                storage_policy=storage_policy,
+                allow_build=True,
+                uid=None,
+                gid=None,
+            )
+            summaries, _period_windows_refreshed = _repair_period_window_mismatch(
+                config_root,
+                docker,
+                install_root,
+                summaries,
                 version=version,
                 storage_policy=storage_policy,
                 allow_build=True,

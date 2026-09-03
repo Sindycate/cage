@@ -6,6 +6,49 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.3 — 2026-09-03
+
+### Repair mixed Token Monitor UTC reporting periods
+
+Who is affected: Token Monitor users with more than one active Cage Codex
+source, especially when a normal monitored launch or `cage monitor sync` runs
+at the UTC day or month boundary.
+
+Previous behavior: a current collector result could use the new reporting day
+while an inactive project's trusted cached snapshot still used the previous
+day. Cage rejected that mixed aggregate, reported the same error for active
+projects, and left the monitor unable to publish until another full scan
+happened to succeed.
+
+New behavior: Cage treats a cached snapshot as usable only when its
+`periodWindows` marker matches the current collector result. It rereads only
+the sources with a different marker. If a full scan itself crosses the UTC
+boundary, Cage makes one bounded retry of only the observations that differ
+from the newest result. This adds one short collector pass only during that
+repair. If the retry still has mixed periods, Cage does not guess or upload;
+the hub keeps its last good data.
+
+Migration and recovery:
+
+1. Install Cage 0.36.3 or later. No configuration, credential, repository, or
+   Docker-volume migration is required.
+2. Start a monitored Cage Codex session normally. Cage repairs old mixed local
+   snapshots automatically when it can obtain matching reporting periods.
+3. If the monitor remains inconsistent because a collector is unavailable or
+   the reporting boundary is still changing, wait briefly and run the explicit
+   recovery command:
+
+   ```bash
+   cage monitor sync
+   ```
+
+4. If that command reports that period windows changed during the aggregate
+   scan, no new hub total was published. Retry after the UTC boundary has
+   settled; do not delete monitor state, sessions, or Docker volumes.
+
+Rollback: install the previous version only if needed. It has no configuration
+migration to reverse, but it can again reject mixed cached reporting periods.
+
 ## 0.36.2 — 2026-09-02
 
 ### Restore an explicitly approved Token Monitor provider stream
