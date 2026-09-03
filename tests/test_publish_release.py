@@ -821,9 +821,12 @@ grandchild = subprocess.Popen([
     "-c",
     "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
 ])
-pathlib.Path(sys.argv[1]).write_text(
-    f"{os.getpid()} {grandchild.pid}", encoding="ascii"
-)
+with pathlib.Path(sys.argv[1]).open("w", encoding="ascii") as pid_file:
+    pid_file.write(f"{os.getpid()}\\n")
+    pid_file.flush()
+    time.sleep(0.05)
+    pid_file.write(f"{grandchild.pid}\\n")
+    pid_file.flush()
 time.sleep(60)
 """
         helper = f"""\
@@ -878,6 +881,56 @@ orchestrator._record_checks_parallel((
             state = probe.stdout.strip()
             return probe.returncode == 0 and bool(state) and not state.startswith("Z")
 
+        expected_pids_per_gate = 2
+
+        def read_pid_file(path):
+            """Return complete PID records and whether the file is complete."""
+            try:
+                contents = path.read_text(encoding="ascii")
+            except (OSError, UnicodeError):
+                return (), False
+
+            pids = []
+            for line in contents.splitlines(keepends=True):
+                # Ignore a final unterminated record: the writer may still be
+                # in the middle of its write, and that value is not safe to
+                # use for process-group cleanup yet.
+                if not line.endswith("\n"):
+                    continue
+                try:
+                    pid = int(line[:-1].strip())
+                except ValueError:
+                    return tuple(pids), False
+                if pid <= 0:
+                    return tuple(pids), False
+                pids.append(pid)
+
+            complete = (
+                contents.endswith("\n")
+                and len(pids) == expected_pids_per_gate
+            )
+            return tuple(pids), complete
+
+        def observe_pid_files(paths, started_pids, started_groups):
+            snapshots = {}
+            for path in paths:
+                current, complete = read_pid_file(path)
+                snapshots[path] = (current, complete)
+                started_pids.update(current)
+                # The first record is the process-group leader because the
+                # runner starts each gate with start_new_session=True. Keep it
+                # even when the second record has not been written yet.
+                if current:
+                    started_groups.add(current[0])
+            return snapshots
+
+        def terminate_started_groups(started_groups):
+            for process_group in tuple(started_groups):
+                try:
+                    os.killpg(process_group, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
         for signum in (signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=signum.name):
                 root = Path(tempfile.gettempdir()) / (
@@ -892,17 +945,22 @@ orchestrator._record_checks_parallel((
                     start_new_session=True,
                     env=dict(os.environ, PUBLISHER_SIGNAL_ROOT=str(root)),
                 )
-                pids = []
+                paths = (root / "a.pids", root / "b.pids")
+                observed_pids = set()
+                started_groups = set()
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
-                        paths = (root / "a.pids", root / "b.pids")
-                        if all(path.is_file() for path in paths):
-                            pids = [
-                                int(pid)
-                                for path in paths
-                                for pid in path.read_text(encoding="ascii").split()
-                            ]
+                        snapshots = observe_pid_files(
+                            paths, observed_pids, started_groups
+                        )
+                        if all(
+                            complete
+                            and len(current) == expected_pids_per_gate
+                            and len(set(current)) == expected_pids_per_gate
+                            and all(pid_alive(pid) for pid in current)
+                            for current, complete in snapshots.values()
+                        ):
                             break
                         if publisher.poll() is not None:
                             stdout, stderr = publisher.communicate()
@@ -911,7 +969,12 @@ orchestrator._record_checks_parallel((
                                 f"stdout={stdout}\nstderr={stderr}"
                             )
                         time.sleep(0.02)
-                    self.assertEqual(len(pids), 4, "both gates did not start descendants")
+                    self.assertEqual(
+                        len(observed_pids),
+                        len(paths) * expected_pids_per_gate,
+                        "both gates did not start descendants",
+                    )
+                    pids = sorted(observed_pids)
 
                     started = time.monotonic()
                     publisher.send_signal(signum)
@@ -944,13 +1007,33 @@ orchestrator._record_checks_parallel((
                     )
                 finally:
                     if publisher.poll() is None:
-                        publisher.kill()
-                        publisher.wait()
-                    for pid in pids:
                         try:
-                            os.killpg(pid, signal.SIGKILL)
+                            os.killpg(publisher.pid, signal.SIGKILL)
                         except (ProcessLookupError, PermissionError):
-                            pass
+                            publisher.kill()
+                        publisher.wait()
+                    publisher.communicate()
+
+                    # A failed assertion may have happened after only a
+                    # partial PID-file read. Give detached gates time to finish
+                    # publishing their group leaders, retain every record seen,
+                    # and kill each group on every pass so no unrecorded
+                    # descendant survives teardown.
+                    cleanup_deadline = time.monotonic() + 5
+                    while time.monotonic() < cleanup_deadline:
+                        snapshots = observe_pid_files(
+                            paths, observed_pids, started_groups
+                        )
+                        terminate_started_groups(started_groups)
+                        if all(
+                            complete
+                            and len(current) == expected_pids_per_gate
+                            for current, complete in snapshots.values()
+                        ) and not any(pid_alive(pid) for pid in observed_pids):
+                            break
+                        time.sleep(0.02)
+                    observe_pid_files(paths, observed_pids, started_groups)
+                    terminate_started_groups(started_groups)
                     shutil.rmtree(root, ignore_errors=True)
 
 
