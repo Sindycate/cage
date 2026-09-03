@@ -3,6 +3,26 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Native ARM candidate pipeline prepared
+
+Iteration 1 replaces the QEMU multi-platform candidate builds with native
+architecture jobs: `ubuntu-24.04` for `linux/amd64` and `ubuntu-24.04-arm` for
+`linux/arm64`. The base is assembled first from digest-only architecture
+artifacts; the four leaves then consume its exact assembled digest through an
+image-by-architecture matrix. Final candidate assembly is serialized per image
+and SHA, rechecks the authoritative GHCR status, and verifies all five final
+indexes, exact runnable platforms, and exact-source `ci.yml` attestations before
+writing the unchanged schema-v3 manifest. It ignores only `unknown/unknown`
+attestation descriptors when checking the runnable platform set. QEMU and
+mutable temporary architecture tags are absent. The final verifier explicitly handles Bash command-substitution
+failure semantics so a failed attestation cannot be masked.
+
+Local validation: the complete Python suite passes (`656 passed, 15 skipped`);
+workflow YAML parsing, Python compilation, Bash/Node syntax, Compose rendering,
+focused release-supply-chain tests, and `git diff --check` pass. No Iteration 2
+cache work has started. Live native-runner timings are intentionally recorded
+only after two isolated benchmark runs with temporary candidate tags.
+
 ## 2026-09-03 — Release speedup prepared for v0.36.4
 
 The release-speedup work and its interrupt-safe PID-file regression follow-up

@@ -139,6 +139,17 @@ jobs:
               if not re.fullmatch(r"sha256:[0-9a-f]{64}", entry.get("digest", "")):
                   raise SystemExit("ERROR: candidate manifest digest mismatch for " + name)
           PY
+          verify_exact_platforms() {
+            local ref="$1"
+            local label="$2"
+            local platforms actual
+            platforms="$(docker buildx imagetools inspect "$ref" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
+            actual="$(printf '%s' "$platforms" | tr ' ' '\n' | sed '/^$/d' | awk '$0 != "unknown/unknown"' | LC_ALL=C sort -u)"
+            if [ "$actual" != $'linux/amd64\nlinux/arm64' ]; then
+              echo "ERROR: ${label} must contain exactly linux/amd64 and linux/arm64 (${platforms})" >&2
+              exit 1
+            fi
+          }
           for image in base claude-code codex opencode token-monitor; do
             case "$image" in
               base) key=base ;;
@@ -153,11 +164,7 @@ jobs:
             if [ "$actual" != "$expected" ]; then
               echo "ERROR: candidate ${image} digest ${actual} != manifest ${expected}"; exit 1
             fi
-            arches="$(docker buildx imagetools inspect "$candidate" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}')"
-            case "$arches" in
-              *amd64*arm64*) ;;
-              *) echo "ERROR: candidate ${image} missing amd64/arm64 (${arches})"; exit 1 ;;
-            esac
+            verify_exact_platforms "$candidate" "candidate ${image}"
             gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${expected}" \
               --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
@@ -432,6 +439,23 @@ jobs:
             echo "ERROR: anonymous Docker credential directory is not empty" >&2
             exit 1
           fi
+          verify_exact_platforms() {
+            local ref="$1"
+            local label="$2"
+            local platforms actual
+            platforms="$(env \
+              -u GH_TOKEN -u GITHUB_TOKEN \
+              -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+              -u DOCKER_AUTH_CONFIG -u REGISTRY_AUTH_FILE \
+              DOCKER_CONFIG="$credential_dir" \
+              docker buildx imagetools inspect "$ref" \
+                --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
+            actual="$(printf '%s' "$platforms" | tr ' ' '\n' | sed '/^$/d' | awk '$0 != "unknown/unknown"' | LC_ALL=C sort -u)"
+            if [ "$actual" != $'linux/amd64\nlinux/arm64' ]; then
+              echo "ERROR: ${label} must contain exactly linux/amd64 and linux/arm64 (${platforms})" >&2
+              exit 1
+            fi
+          }
           for tag in "$VERSION" latest; do
             ref="ghcr.io/sindycate/cage/${{ matrix.image }}:${tag}"
             actual_digest="$(env \
@@ -445,21 +469,7 @@ jobs:
               echo "ERROR: public ${ref} digest ${actual_digest} != ${EXPECTED_DIGEST}" >&2
               exit 1
             fi
-            platforms="$(env \
-              -u GH_TOKEN -u GITHUB_TOKEN \
-              -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
-              -u DOCKER_AUTH_CONFIG -u REGISTRY_AUTH_FILE \
-              DOCKER_CONFIG="$credential_dir" \
-              docker buildx imagetools inspect "$ref" \
-                --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
-            case "$platforms" in
-              *linux/amd64*) ;;
-              *) echo "ERROR: public ${ref} is missing linux/amd64 (${platforms})" >&2; exit 1 ;;
-            esac
-            case "$platforms" in
-              *linux/arm64*) ;;
-              *) echo "ERROR: public ${ref} is missing linux/arm64 (${platforms})" >&2; exit 1 ;;
-            esac
+            verify_exact_platforms "$ref" "public ${ref}"
             env \
               -u GH_TOKEN -u GITHUB_TOKEN \
               -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
