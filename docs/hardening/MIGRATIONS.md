@@ -15,6 +15,19 @@ image names, release promotion, and exact-source verification contracts. No
 Cage CLI, central configuration, state volume, or image-consumer behavior
 changes. QEMU is no longer used by the candidate pipeline.
 
+### Recovery of an unattested candidate index
+
+No user configuration migration. If an immutable candidate index was created
+but its final GitHub Actions attestation was interrupted, a rerun may attest
+that same index only after inspecting the original SHA-scoped amd64 and arm64
+architecture-index artifacts. Each must contain exactly one runnable child for
+its platform and no other runnable platform; the final index's complete child
+descriptor set must equal their union, including unknown/unknown
+SBOM/provenance children. The index is never deleted, replaced, or retagged. A
+changed index, invalid or ambiguous attestation state, or missing/ambiguous
+architecture artifacts still fails closed. Candidates with a valid exact-source
+attestation continue to be verified and reused normally.
+
 ## 0.36.4 — 2026-09-03
 
 ### Interrupt-safe parallel release preflight

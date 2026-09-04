@@ -10,6 +10,12 @@ details live in the linked migration guide.
   final multi-architecture indexes without QEMU; retain exact-source
   attestations, SBOMs, provenance, write-once candidate tags, and schema-v3
   release manifests;
+- recover an existing candidate index after an interrupted final attestation
+  only when inspecting its exact SHA-scoped architecture-index artifacts
+  produces a child-descriptor union matching the unchanged final index,
+  including unknown/unknown SBOM/provenance children; never replace or retag
+  the existing index, and continue to fail closed for invalid attestations or
+  ambiguous recovery state;
 
 ## 0.36.4 — 2026-09-03
 

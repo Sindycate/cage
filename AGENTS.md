@@ -499,9 +499,13 @@ attestation, and uploads the unchanged schema-v3
 `release-candidate-<SHA>` manifest artifact. Candidate tags are public,
 serialized per image and SHA (`cancel-in-progress: false`), and never
 referenced by Cage's pull logic. On a rerun for the same SHA, an existing
-candidate is verified and reused; an unverifiable or ambiguously reported
-candidate fails closed rather than being rebuilt. No cross-version BuildKit
-cache is used.
+candidate is verified and reused; an index left unattested by an interrupted
+final attestation may only be re-attested after its SHA-scoped amd64/arm64
+architecture-index artifacts are inspected and their complete child descriptor
+union (the runnable children plus unknown/unknown SBOM/provenance children)
+exactly matches the unchanged index, without any tag replacement. An invalid
+or ambiguously reported candidate or recovery state fails closed rather than
+being rebuilt. No cross-version BuildKit cache is used.
 
 **`.github/workflows/release.yml`**: Five logical stages, all actions pinned to
 immutable commit SHAs (maintained by Dependabot), serialized per tag with
