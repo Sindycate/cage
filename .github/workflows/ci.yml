@@ -305,7 +305,7 @@ jobs:
           name: candidate-base-digest-${{ needs.candidate-base-plan.outputs.sha }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/cage-digests/${{ matrix.arch }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
 
   candidate-base:
     needs: [candidate-base-plan, candidate-base-arch]
@@ -453,6 +453,7 @@ jobs:
                 exit 1
               fi
               load_arch_digests
+              verify_architecture_indexes "$IMAGE" "base candidate source" "$AMD64_DIGEST" "$ARM64_DIGEST"
               docker buildx imagetools create \
                 --tag "$REF" \
                 "${IMAGE}@${AMD64_DIGEST}" \
@@ -693,7 +694,7 @@ jobs:
           name: candidate-${{ matrix.image }}-digest-${{ needs.candidate-base.outputs.sha }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/cage-digests/${{ matrix.arch }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
 
   candidate-leaf-assemble:
     needs: [candidate-base, candidate-leaf-plan, candidate-leaf-arch]
@@ -851,6 +852,7 @@ jobs:
                 exit 1
               fi
               load_arch_digests
+              verify_architecture_indexes "$IMAGE" "${IMAGE_NAME} candidate source" "$AMD64_DIGEST" "$ARM64_DIGEST"
               docker buildx imagetools create \
                 --tag "$REF" \
                 "${IMAGE}@${AMD64_DIGEST}" \

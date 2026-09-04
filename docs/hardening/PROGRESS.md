@@ -3,6 +3,16 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-04 — Candidate source validation retained for reruns
+
+Native base and leaf architecture digest artifacts now remain available for at
+least 30 days, matching the supported GitHub Actions rerun window. Both fresh
+assembly paths validate each downloaded parent architecture index before
+`imagetools create`: complete descriptor shape, exactly one expected runnable
+platform, exactly one linked BuildKit attestation, and duplicate rejection.
+The existing post-create complete descriptor-union comparison remains in place,
+and no existing candidate is replaced or retagged.
+
 ## 2026-09-03 — Candidate attestation recovery gap repaired
 
 An interrupted final `actions/attest` step can leave an immutable candidate

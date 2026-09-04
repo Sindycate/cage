@@ -28,6 +28,12 @@ changed index, invalid or ambiguous attestation state, or missing/ambiguous
 architecture artifacts still fails closed. Candidates with a valid exact-source
 attestation continue to be verified and reused normally.
 
+The native architecture digest artifacts are retained for at least 30 days so
+the recovery window does not expire before the artifacts needed for validation.
+Fresh assembly validates both complete nested architecture indexes, including
+their linked BuildKit attestations and duplicate checks, before creating the
+immutable candidate tag.
+
 ## 0.36.4 — 2026-09-03
 
 ### Interrupt-safe parallel release preflight

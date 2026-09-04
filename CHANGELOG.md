@@ -16,6 +16,9 @@ details live in the linked migration guide.
   including unknown/unknown SBOM/provenance children; never replace or retag
   the existing index, and continue to fail closed for invalid attestations or
   ambiguous recovery state;
+- retain the tiny SHA-scoped architecture digest artifacts for 30 days and
+  validate both complete nested architecture indexes before creating a fresh
+  immutable candidate tag;
 
 ## 0.36.4 — 2026-09-03
 

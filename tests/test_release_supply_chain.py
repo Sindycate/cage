@@ -177,6 +177,24 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("actions/download-artifact@", text)
         self.assertIn("actions/upload-artifact@", text)
         self.assertIn("merge-multiple: true", text)
+        for job in ("candidate-base-arch:", "candidate-leaf-arch:"):
+            start = text.index(f"  {job}")
+            end = text.find("\n  candidate-", start + 1)
+            block = text[start:] if end == -1 else text[start:end]
+            retention = re.search(r"retention-days:\s*(\d+)", block)
+            self.assertIsNotNone(retention, f"{job} has no artifact retention")
+            self.assertGreaterEqual(int(retention.group(1)), 30, job)
+            self.assertNotIn("retention-days: 1", block)
+        for step_name in (
+            "Assemble or verify final base candidate",
+            "Assemble or verify final leaf candidate",
+        ):
+            assembly = _extract_run_block(CI_WORKFLOW, step_name)
+            self.assertLess(
+                assembly.index("verify_architecture_indexes"),
+                assembly.index("docker buildx imagetools create"),
+                step_name,
+            )
         self.assertIn(
             'printf \'%s\\n\' "$DIGEST" > "$RUNNER_TEMP/cage-digests/${{ matrix.arch }}"',
             text,
@@ -1576,6 +1594,42 @@ class CandidateAssemblyTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
         self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_fresh_assembly_rejects_invalid_source_indexes_before_create(self):
+        malformed_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        malformed_amd64[0]["size"] = "not-an-integer"
+
+        missing_arm64 = [copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS[0])]
+
+        duplicate_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        duplicate_amd64.append(copy.deepcopy(duplicate_amd64[1]))
+
+        mislinked_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        mislinked_arm64[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_AMD64
+
+        cases = (
+            ("malformed", {"amd64_descriptors": malformed_amd64}),
+            ("missing attestation", {"arm64_descriptors": missing_arm64}),
+            ("duplicate descriptor", {"amd64_descriptors": duplicate_amd64}),
+            ("mis-linked attestation", {"arm64_descriptors": mislinked_arm64}),
+        )
+        for name, overrides in cases:
+            with self.subTest(name=name):
+                result, _, created = self._run_assembly(
+                    "absent_then_present",
+                    artifacts=(
+                        ("amd64", self.ARCH_INDEX_AMD64),
+                        ("arm64", self.ARCH_INDEX_ARM64),
+                    ),
+                    **overrides,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(
+                    created,
+                    f"invalid source index must fail before CREATE_CALLED: {result.stderr}",
+                )
 
     def test_partial_rerun_reuses_candidate_that_appeared_after_planning(self):
         result, outputs, created = self._run_assembly(

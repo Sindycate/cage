@@ -165,6 +165,30 @@ candidate_inspect_architecture_descriptor_set() {
   printf '%s\n' "$lines" | LC_ALL=C sort
 }
 
+# Validate both downloaded architecture-index digests before they can be used
+# as inputs to imagetools create. Keep this separate from the final-index
+# comparison so fresh assembly cannot publish a candidate from a malformed,
+# incomplete, duplicated, or mis-linked source index.
+verify_architecture_indexes() {
+  local image_ref="$1"
+  local label="$2"
+  local expected_amd64_index="$3"
+  local expected_arm64_index="$4"
+  local image
+
+  image="${image_ref%@*}"
+  if ! candidate_inspect_architecture_descriptor_set \
+      "${image}@${expected_amd64_index}" \
+      "${label} amd64 architecture index" amd64 >/dev/null; then
+    return 1
+  fi
+  if ! candidate_inspect_architecture_descriptor_set \
+      "${image}@${expected_arm64_index}" \
+      "${label} arm64 architecture index" arm64 >/dev/null; then
+    return 1
+  fi
+}
+
 # Verify that the final index contains exactly the complete child descriptors
 # supplied by the two native architecture indexes. The architecture artifact
 # digests remain the inputs to imagetools create; only their inspected child
