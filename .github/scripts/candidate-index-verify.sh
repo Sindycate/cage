@@ -74,6 +74,34 @@ candidate_reject_duplicate_descriptor_lines() {
   fi
 }
 
+candidate_reject_duplicate_descriptor_digests() {
+  local label="$1"
+  local lines="$2"
+  local digests digest_count unique_count
+
+  if ! digests="$(printf '%s\n' "$lines" | jq -e -r '
+    if type == "object" and (.digest | type == "string") then
+      .digest
+    else
+      error("descriptor has no digest")
+    end
+  ')"; then
+    echo "ERROR: ${label} contains a descriptor without a digest" >&2
+    return 1
+  fi
+  if [ -z "$digests" ]; then
+    echo "ERROR: ${label} contains no child digests" >&2
+    return 1
+  fi
+
+  digest_count="$(printf '%s\n' "$digests" | awk 'NF { count++ } END { print count + 0 }')"
+  unique_count="$(printf '%s\n' "$digests" | LC_ALL=C sort -u | awk 'NF { count++ } END { print count + 0 }')"
+  if [ "$digest_count" -ne "$unique_count" ]; then
+    echo "ERROR: ${label} contains duplicate child digest(s)" >&2
+    return 1
+  fi
+}
+
 candidate_inspect_descriptor_json() {
   local ref="$1"
   local label="$2"
@@ -145,7 +173,8 @@ candidate_inspect_architecture_descriptor_set() {
       else
         ($attestations[0]) as $attestation
         | ($runnable_candidates[0]) as $runnable
-        | if $attestation.mediaType != "application/vnd.oci.image.manifest.v1+json" then false
+        | if $runnable.mediaType != "application/vnd.oci.image.manifest.v1+json" then false
+          elif $attestation.mediaType != "application/vnd.oci.image.manifest.v1+json" then false
           elif ($attestation | is_exact_unknown_platform) | not then false
           elif ($attestation.annotations["vnd.docker.reference.type"] != "attestation-manifest") then false
           elif ($attestation.annotations["vnd.docker.reference.digest"] != $runnable.digest) then false
@@ -174,19 +203,22 @@ verify_architecture_indexes() {
   local label="$2"
   local expected_amd64_index="$3"
   local expected_arm64_index="$4"
-  local image
+  local image amd64_children arm64_children source_children
 
   image="${image_ref%@*}"
-  if ! candidate_inspect_architecture_descriptor_set \
+  if ! amd64_children="$(candidate_inspect_architecture_descriptor_set \
       "${image}@${expected_amd64_index}" \
-      "${label} amd64 architecture index" amd64 >/dev/null; then
+      "${label} amd64 architecture index" amd64)"; then
     return 1
   fi
-  if ! candidate_inspect_architecture_descriptor_set \
+  if ! arm64_children="$(candidate_inspect_architecture_descriptor_set \
       "${image}@${expected_arm64_index}" \
-      "${label} arm64 architecture index" arm64 >/dev/null; then
+      "${label} arm64 architecture index" arm64)"; then
     return 1
   fi
+
+  source_children="$(printf '%s\n%s\n' "$amd64_children" "$arm64_children" | sed '/^$/d')"
+  candidate_reject_duplicate_descriptor_digests "${label} source architecture indexes" "$source_children" || return 1
 }
 
 # Verify that the final index contains exactly the complete child descriptors
@@ -217,6 +249,7 @@ verify_index_matches_arch_digests() {
   local source_children
   source_children="$(printf '%s\n%s\n' "$amd64_children" "$arm64_children" | sed '/^$/d')"
   candidate_reject_duplicate_descriptor_lines "${label} source architecture indexes" "$source_children" || return 1
+  candidate_reject_duplicate_descriptor_digests "${label} source architecture indexes" "$source_children" || return 1
   expected_children="$(printf '%s\n' "$source_children" | LC_ALL=C sort)"
   if ! actual_children="$(candidate_inspect_descriptor_set "$final_ref" "$label")"; then
     return 1

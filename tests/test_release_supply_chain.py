@@ -360,7 +360,10 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         body = helper.read_text(encoding="utf-8")
         for fragment in (
             "candidate_inspect_architecture_descriptor_set",
+            "candidate_reject_duplicate_descriptor_digests",
+            "verify_architecture_indexes",
             "unknown/unknown",
+            "application/vnd.oci.image.manifest.v1+json",
             "child descriptor set does not equal the union",
             "imagetools create",
         ):
@@ -1609,11 +1612,46 @@ class CandidateAssemblyTests(unittest.TestCase):
             "vnd.docker.reference.digest"
         ] = self.RUNNABLE_AMD64
 
+        runnable_collision_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        runnable_collision_arm64[0]["digest"] = self.RUNNABLE_AMD64
+        runnable_collision_arm64[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_AMD64
+
+        attestation_collision_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        attestation_collision_arm64[1]["digest"] = self.ATTESTATION_AMD64
+
+        arbitrary_media_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        arbitrary_media_amd64[0]["mediaType"] = (
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+
+        nested_index_media_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        nested_index_media_amd64[0]["mediaType"] = (
+            "application/vnd.oci.image.index.v1+json"
+        )
+
         cases = (
             ("malformed", {"amd64_descriptors": malformed_amd64}),
             ("missing attestation", {"arm64_descriptors": missing_arm64}),
             ("duplicate descriptor", {"amd64_descriptors": duplicate_amd64}),
             ("mis-linked attestation", {"arm64_descriptors": mislinked_arm64}),
+            (
+                "runnable digest collision",
+                {"arm64_descriptors": runnable_collision_arm64},
+            ),
+            (
+                "attestation digest collision",
+                {"arm64_descriptors": attestation_collision_arm64},
+            ),
+            (
+                "arbitrary runnable media type",
+                {"amd64_descriptors": arbitrary_media_amd64},
+            ),
+            (
+                "nested index runnable media type",
+                {"amd64_descriptors": nested_index_media_amd64},
+            ),
         )
         for name, overrides in cases:
             with self.subTest(name=name):

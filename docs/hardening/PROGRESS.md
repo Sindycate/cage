@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-04 — Candidate source digest and media validation tightened
+
+The pre-create native source-index check now rejects a child digest repeated
+across the amd64 and arm64 parent indexes regardless of descriptor metadata,
+covering both runnable and BuildKit attestation collisions. It also requires
+the runnable child to use `application/vnd.oci.image.manifest.v1+json`, so a
+nested OCI index or arbitrary media type cannot be assembled as a runnable
+manifest. The post-create complete descriptor-union check remains unchanged;
+invalid sources fail before `imagetools create` and existing candidates are
+never replaced or retagged.
+
+Focused supply-chain coverage passes (`132 passed`), the complete Python suite
+passes (`710 passed, 15 skipped`), and shell/Python/Node syntax, Compose
+validation, and `git diff --check` pass locally.
+
 ## 2026-09-04 — Candidate source validation retained for reruns
 
 Native base and leaf architecture digest artifacts now remain available for at

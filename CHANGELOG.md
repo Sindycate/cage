@@ -19,6 +19,8 @@ details live in the linked migration guide.
 - retain the tiny SHA-scoped architecture digest artifacts for 30 days and
   validate both complete nested architecture indexes before creating a fresh
   immutable candidate tag;
+- reject cross-architecture child-digest collisions before assembly and require
+  runnable children to use the OCI image-manifest media type;
 
 ## 0.36.4 — 2026-09-03
 

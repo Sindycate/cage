@@ -34,6 +34,11 @@ Fresh assembly validates both complete nested architecture indexes, including
 their linked BuildKit attestations and duplicate checks, before creating the
 immutable candidate tag.
 
+Source indexes are also rejected before assembly if any runnable or attestation
+child digest is repeated across the two architectures, even when descriptor
+metadata differs. Runnable children must use the OCI image-manifest media type;
+an OCI index or arbitrary media type is not accepted as a runnable child.
+
 ## 0.36.4 — 2026-09-03
 
 ### Interrupt-safe parallel release preflight
