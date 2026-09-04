@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -267,6 +268,14 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("refusing to recreate it", text)
         self.assertIn("needs_attestation=false", text)
         self.assertIn("needs_attestation=true", text)
+        self.assertIn("candidate_attestation_state", text)
+        self.assertEqual(text.count(". .github/scripts/candidate-index-verify.sh"), 2)
+        self.assertIn("PLAN_RECOVERY_REQUESTED", text)
+        self.assertIn("verify_index_matches_arch_digests", text)
+        self.assertIn("Reattesting unchanged existing", text)
+        # Recovery is allowed to emit the existing digest for actions/attest;
+        # it must never invoke imagetools create on the 200 path.
+        self.assertIn("existing unattested", text)
         # Effective digests are validated before the manifest is written.
         self.assertIn("Resolve candidate digests from GHCR and write candidate manifest", text)
         self.assertIn(
@@ -310,6 +319,34 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("ghcr_status()", body)
         self.assertIn("ghcr.io/token", body)
         self.assertIn("'%{http_code}'", body)
+        result = subprocess.run(
+            ["bash", "-n", str(helper)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_candidate_attestation_status_helper_is_present_and_valid_bash(self):
+        helper = ROOT / ".github" / "scripts" / "candidate-attestation-status.sh"
+        self.assertTrue(helper.is_file(), "candidate attestation status helper missing")
+        body = helper.read_text(encoding="utf-8")
+        self.assertIn("candidate_attestation_state()", body)
+        self.assertIn("/attestations/", body)
+        self.assertIn("repository access could not be confirmed", body)
+        result = subprocess.run(
+            ["bash", "-n", str(helper)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_candidate_index_verifier_is_present_and_valid_bash(self):
+        helper = ROOT / ".github" / "scripts" / "candidate-index-verify.sh"
+        self.assertTrue(helper.is_file(), "candidate index verifier missing")
+        body = helper.read_text(encoding="utf-8")
+        for fragment in (
+            "candidate_inspect_architecture_descriptor_set",
+            "unknown/unknown",
+            "child descriptor set does not equal the union",
+            "imagetools create",
+        ):
+            self.assertIn(fragment, body)
         result = subprocess.run(
             ["bash", "-n", str(helper)], capture_output=True, text=True
         )
@@ -921,6 +958,17 @@ DOCKER_FUNC_ASSEMBLY = '''
 docker() {
   if [ "$1" = "buildx" ] && [ "$2" = "imagetools" ]; then
     if [ "$3" = "inspect" ]; then
+      local ref="${4:-}"
+      local format="${@: -1}"
+      if [[ "$format" == *json* ]]; then
+        if [[ "$ref" == *@"${STUB_ARCH_AMD64_DIGEST:-}" ]]; then
+          printf '%s' "${STUB_AMD64_DESCRIPTORS:-}"; return 0
+        fi
+        if [[ "$ref" == *@"${STUB_ARCH_ARM64_DIGEST:-}" ]]; then
+          printf '%s' "${STUB_ARM64_DESCRIPTORS:-}"; return 0
+        fi
+        printf '%s' "${STUB_FINAL_DESCRIPTORS:-}"; return 0
+      fi
       for a in "$@"; do
         case "$a" in
           *Manifest.Digest*) printf '%s' "${STUB_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"; return 0 ;;
@@ -958,11 +1006,36 @@ docker() {
 
 GH_FUNC = '''
 gh() {
+  if [ "$1" = "api" ]; then
+    if [[ "$*" == *"/attestations/"* ]]; then
+      case "${STUB_ATTEST_LOOKUP:-absent}" in
+        absent)
+          printf 'HTTP/2.0 404 Not Found\\n\\n'
+          return 1 ;;
+        present)
+          printf 'HTTP/2.0 200 OK\\n\\n1\\n'
+          return 0 ;;
+        empty)
+          printf 'HTTP/2.0 200 OK\\n\\n0\\n'
+          return 0 ;;
+        error)
+          printf 'HTTP/2.0 503 Service Unavailable\\n\\n'
+          return 1 ;;
+        malformed)
+          printf 'HTTP/2.0 200 OK\\n\\nnot-a-count\\n'
+          return 0 ;;
+      esac
+    fi
+    # The helper validates repository access before accepting a 404 from the
+    # subject-digest endpoint as an absent attestation.
+    printf 'HTTP/2.0 200 OK\\n\\n'
+    return 0
+  fi
   if [ "$1" = "attestation" ] && [ "$2" = "verify" ]; then
     if [ -n "${STUB_ATTEST_LOG:-}" ]; then
       printf '%s\n' "$*" >> "${STUB_ATTEST_LOG}"
     fi
-    if [ "${STUB_ATTEST:-}" = "fail" ]; then
+    if [ "${STUB_ATTEST:-}" = "fail" ] || [ "${STUB_ATTEST:-}" = "missing" ]; then
       echo "attestation verification failed" >&2
       return 1
     fi
@@ -1123,6 +1196,7 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
         env["GH_TOKEN"] = "dummy-token"
         env["STUB_MODE"] = mode
         env["STUB_ATTEST"] = attest
+        env["STUB_ATTEST_LOOKUP"] = "present" if attest == "fail" else "absent"
         if platforms is not None:
             env["STUB_PLATFORMS"] = platforms
         if missing_repo is not None:
@@ -1148,6 +1222,14 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(outputs.get("base_exists"), "true", outputs)
         self.assertTrue(outputs.get("base_digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("recovery_requested"), "false", outputs)
+
+    def test_existing_unattested_candidate_authorizes_artifact_recovery(self):
+        result, outputs = self._run_resolve("present", attest="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("base_exists"), "true", outputs)
+        self.assertEqual(outputs.get("needs_build"), "false", outputs)
+        self.assertEqual(outputs.get("recovery_requested"), "true", outputs)
 
     def test_attestation_descriptors_do_not_count_as_runnable_platforms(self):
         result, outputs = self._run_resolve(
@@ -1232,6 +1314,7 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
         env["GH_TOKEN"] = "dummy-token"
         env["STUB_MODE"] = mode
         env["STUB_ATTEST"] = attest
+        env["STUB_ATTEST_LOOKUP"] = "present" if attest == "fail" else "absent"
         if platforms is not None:
             env["STUB_PLATFORMS"] = platforms
         if missing_repo is not None:
@@ -1278,6 +1361,13 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
         self.assertEqual(outputs.get("claude_build"), "false", outputs)
         self.assertEqual(outputs.get("needs_build"), "false", outputs)
         self.assertTrue(outputs.get("claude_digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("claude_recovery_requested"), "false", outputs)
+
+    def test_existing_unattested_candidate_authorizes_artifact_recovery(self):
+        result, outputs = self._run_resolve("present", attest="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("claude_build"), "false", outputs)
+        self.assertEqual(outputs.get("claude_recovery_requested"), "true", outputs)
 
     def test_401_unauthorized_fails_closed(self):
         result, outputs = self._run_resolve("unauthorized")
@@ -1321,9 +1411,56 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
 class CandidateAssemblyTests(unittest.TestCase):
     """Execute the native digest handoff and write-once assembly block."""
 
-    DIGEST_AMD64 = "sha256:" + "a" * 64
-    DIGEST_ARM64 = "sha256:" + "b" * 64
-    INDEX_DIGEST = "sha256:" + "1" * 64
+    IMAGE_NAME = "base"
+    # BuildKit emits these parent architecture indexes. Their runnable child
+    # manifests and unknown/unknown SBOM/provenance descriptors are distinct.
+    # The amd64 values mirror the real benchmark shape: dc11626... contains
+    # bf746c..., while the final 411e972... index contains bf746c....
+    ARCH_INDEX_AMD64 = "sha256:dc11626" + "a" * 57
+    ARCH_INDEX_ARM64 = "sha256:dc11627" + "b" * 57
+    RUNNABLE_AMD64 = "sha256:bf746c" + "c" * 58
+    RUNNABLE_ARM64 = "sha256:bf746d" + "d" * 58
+    ATTESTATION_AMD64 = "sha256:" + "e" * 64
+    ATTESTATION_ARM64 = "sha256:" + "f" * 64
+    INDEX_DIGEST = "sha256:411e972" + "1" * 57
+    OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+    SOURCE_AMD64_DESCRIPTORS = [
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": RUNNABLE_AMD64,
+            "size": 1001,
+            "platform": {"architecture": "amd64", "os": "linux"},
+        },
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": ATTESTATION_AMD64,
+            "size": 2001,
+            "annotations": {
+                "vnd.docker.reference.digest": RUNNABLE_AMD64,
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            "platform": {"architecture": "unknown", "os": "unknown"},
+        },
+    ]
+    SOURCE_ARM64_DESCRIPTORS = [
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": RUNNABLE_ARM64,
+            "size": 1002,
+            "platform": {"architecture": "arm64", "os": "linux"},
+        },
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": ATTESTATION_ARM64,
+            "size": 2002,
+            "annotations": {
+                "vnd.docker.reference.digest": RUNNABLE_ARM64,
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            "platform": {"architecture": "unknown", "os": "unknown"},
+        },
+    ]
+    FINAL_DESCRIPTORS = SOURCE_AMD64_DESCRIPTORS + SOURCE_ARM64_DESCRIPTORS
 
     @classmethod
     def setUpClass(cls):
@@ -1343,6 +1480,11 @@ class CandidateAssemblyTests(unittest.TestCase):
         platforms=None,
         attest="ok",
         artifacts=(),
+        manifests=None,
+        amd64_descriptors=None,
+        arm64_descriptors=None,
+        plan_recovery_requested="false",
+        attestation_lookup=None,
     ):
         base = Path(tempfile.mkdtemp(prefix="candidate-assembly-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
@@ -1375,10 +1517,31 @@ class CandidateAssemblyTests(unittest.TestCase):
                 "SHA": "a" * 40,
                 "PLAN_NEEDS_BUILD": plan_needs_build,
                 "PLAN_DIGEST": plan_digest,
+                "PLAN_RECOVERY_REQUESTED": plan_recovery_requested,
                 "STUB_MODE": mode,
                 "STUB_STATE_FILE": str(state_file),
                 "CREATE_MARKER": str(marker),
                 "STUB_ATTEST": attest,
+                "STUB_ATTEST_LOOKUP": attestation_lookup or (
+                    "present" if attest == "fail" else "absent"
+                ),
+                "STUB_DIGEST": self.INDEX_DIGEST,
+                "STUB_ARCH_AMD64_DIGEST": self.ARCH_INDEX_AMD64,
+                "STUB_ARCH_ARM64_DIGEST": self.ARCH_INDEX_ARM64,
+                "STUB_AMD64_DESCRIPTORS": json.dumps(
+                    amd64_descriptors or self.SOURCE_AMD64_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "STUB_ARM64_DESCRIPTORS": json.dumps(
+                    arm64_descriptors or self.SOURCE_ARM64_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "STUB_FINAL_DESCRIPTORS": json.dumps(
+                    manifests or self.FINAL_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "IMAGE": f"ghcr.io/sindycate/cage/{self.IMAGE_NAME}",
+                "IMAGE_NAME": self.IMAGE_NAME,
             }
         )
         if platforms is not None:
@@ -1395,14 +1558,18 @@ class CandidateAssemblyTests(unittest.TestCase):
             if "=" in line:
                 key, value = line.split("=", 1)
                 outputs[key] = value
-        return result, outputs, "CREATE_CALLED" in marker.read_text(encoding="utf-8")
+        self.last_create_marker = marker.read_text(encoding="utf-8")
+        return result, outputs, "CREATE_CALLED" in self.last_create_marker
 
     def test_fresh_candidate_is_assembled_from_exact_architecture_digests(self):
+        final_digests = [descriptor["digest"] for descriptor in self.FINAL_DESCRIPTORS]
+        self.assertIn(self.RUNNABLE_AMD64, final_digests)
+        self.assertNotIn(self.ARCH_INDEX_AMD64, final_digests)
         result, outputs, created = self._run_assembly(
             "absent_then_present",
             artifacts=(
-                ("amd64", self.DIGEST_AMD64),
-                ("arm64", self.DIGEST_ARM64),
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
             ),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1419,9 +1586,358 @@ class CandidateAssemblyTests(unittest.TestCase):
         self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
         self.assertEqual(outputs.get("needs_attestation"), "false", outputs)
 
+    def test_failed_final_attestation_rerun_recovers_matching_unchanged_index(self):
+        # The original plan authorized the architecture builds and the index
+        # write succeeded, but the final actions/attest step failed. A
+        # gh-run-rerun-failed-equivalent assembly sees the existing tag and may
+        # only request attestation after matching the retained artifacts.
+        result, outputs, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created, "recovery must never recreate the existing tag")
+        self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
+        self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_plan_recovery_state_also_reuses_matching_unchanged_index(self):
+        result, outputs, created = self._run_assembly(
+            "present",
+            plan_needs_build="false",
+            plan_recovery_requested="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created)
+        self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_recovery_rejects_existing_index_with_wrong_nested_child(self):
+        # Regression for the real shape: the final index must contain the
+        # runnable bf746c... child, never the dc11626... parent index digest.
+        wrong_child = self.ARCH_INDEX_AMD64
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["digest"] = wrong_child
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created, "mismatched recovery must never overwrite the tag")
+
+    def test_recovery_rejects_extra_runnable_platform_in_nested_index(self):
+        extra_runnable = "sha256:" + "9" * 64
+        arm64_descriptors = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        arm64_descriptors.insert(
+            1,
+            {
+                "mediaType": self.OCI_MANIFEST_MEDIA_TYPE,
+                "digest": extra_runnable,
+                "size": 1003,
+                "platform": {"architecture": "ppc64le", "os": "linux"},
+            },
+        )
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            arm64_descriptors=arm64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected runnable platform", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_missing_architecture_attestation(self):
+        amd64_descriptors = [copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS[0])]
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_duplicate_architecture_attestation(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors.append(copy.deepcopy(amd64_descriptors[1]))
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_mislinked_architecture_attestation(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_ARM64
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_wrong_architecture_attestation_reference_type(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors[1]["annotations"][
+            "vnd.docker.reference.type"
+        ] = "not-attestation-manifest"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_missing_final_child_descriptor(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.pop()
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_extra_final_child_descriptor(self):
+        extra = "sha256:" + "9" * 64
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.append(
+            {
+                "mediaType": self.OCI_MANIFEST_MEDIA_TYPE,
+                "digest": extra,
+                "size": 3001,
+                "platform": {"architecture": "unknown", "os": "unknown"},
+            }
+        )
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_duplicate_final_descriptor(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.append(copy.deepcopy(final_descriptors[0]))
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("duplicate child descriptors", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_changed_size(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["size"] += 1
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_changed_media_type(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_extra_platform_field(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["platform"]["variant"] = "v8"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_extra_annotation(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["annotations"] = {"unexpected": "value"}
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_existing_index_when_plan_digest_differs(self):
+        wrong_index = "sha256:" + "2" * 64
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            plan_digest=wrong_index,
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("changed between plan and assembly", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_requires_both_architecture_artifacts(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(("amd64", self.ARCH_INDEX_AMD64),),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing or unsafe architecture digest artifact", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_extra_architecture_artifact(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+                ("ppc64le", self.ARCH_INDEX_AMD64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_fails_closed_when_attestation_lookup_is_ambiguous(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            attestation_lookup="error",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unable to determine attestation state", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_present_but_invalid_attestation(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="fail",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed the exact policy", result.stderr)
+        self.assertFalse(created)
+
     def test_missing_architecture_artifact_fails_before_assembly(self):
         result, _, created = self._run_assembly(
-            "absent_then_present", artifacts=(("amd64", self.DIGEST_AMD64),)
+            "absent_then_present", artifacts=(("amd64", self.ARCH_INDEX_AMD64),)
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("missing or unsafe architecture digest artifact", result.stderr)
@@ -1453,6 +1969,21 @@ class CandidateAssemblyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("ambiguous registry status (503)", result.stderr)
         self.assertFalse(created)
+
+
+class CandidateLeafAssemblyTests(CandidateAssemblyTests):
+    """Run the same recovery contract against the leaf assembly path."""
+
+    IMAGE_NAME = "claude-code"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(
+            CI_WORKFLOW, "Assemble or verify final leaf candidate"
+        )
+        assert "push-by-digest" not in cls.script
+        assert "docker buildx imagetools create" in cls.script
+        assert "read_arch_digest" in cls.script
 
 
 class ManifestAssemblerTests(unittest.TestCase):

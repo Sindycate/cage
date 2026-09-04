@@ -3,6 +3,30 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-03 — Candidate attestation recovery gap repaired
+
+An interrupted final `actions/attest` step can leave an immutable candidate
+index present but unattested. Base and leaf assembly now distinguish that
+narrow state from a present-but-invalid attestation: they query the repository
+attestation state, load the exact SHA-named amd64 and arm64 digest artifacts,
+inspect each parent architecture index, require exactly one expected runnable
+child and no other runnable platform, and compare the final index's complete
+child-descriptor set with their union, including unknown/unknown
+SBOM/provenance children, before requesting attestation of the unchanged index.
+Existing invalid,
+ambiguous, changed, or artifact-missing states still fail closed, and recovery
+never invokes `imagetools create`.
+
+Focused supply-chain regression coverage exercises failed-attestation reruns,
+artifact-matching recovery, mismatched indexes, changed descriptor identity,
+changed planned digests, missing/extra artifacts, and invalid existing
+attestations for both base and leaf assembly paths. Source architecture indexes
+must have exactly one linked BuildKit attestation; final comparison preserves
+complete descriptor identity and rejects duplicates before union normalization.
+The focused suite passes (`130 passed`) and the complete Python suite passes
+(`708 passed, 15 skipped`). The release manifest remains schema-v3 and
+Iteration 2 caching remains intentionally unimplemented.
+
 ## 2026-09-03 — Native ARM candidate pipeline measured
 
 Iteration 1 replaces the QEMU multi-platform candidate builds with native
@@ -19,7 +43,7 @@ failure semantics so a failed attestation cannot be masked.
 
 Local validation: the complete Python suite passes (`657 passed, 15 skipped`);
 workflow YAML parsing, Python compilation, Bash/Node syntax, Compose rendering,
-focused release-supply-chain tests, and `git diff --check` pass. No Iteration 2
+focused release-supply-chain tests, and `git diff --check` pass. Iteration 2
 cache work has not started.
 
 The isolated benchmark used only temporary branch refs and SHA candidate tags;
@@ -34,6 +58,11 @@ was run `33737889348`; the two native runs were `33755195224` and
 | PR #11 baseline | 2s | 14m46s | 14m49s | 10m24s |
 | native run 1 | 2s | 8m06s | 8m09s | 5m29s |
 | native run 2 | 2s | 8m05s | 8m08s | 5m33s |
+
+Ordinary branch-validation run `33757065706` lasted about 2m45s and skipped
+all candidate jobs; it is validation evidence only, not candidate-path timing
+evidence. The candidate timings above are specifically from runs
+`33755195224` and `33756043306`.
 
 Native base execution was 1m28s and 1m26s on arm64 (amd64 was 1m06s and
 1m11s); the slowest leaf was 1m22s and 1m11s. Both runs passed every test,

@@ -122,7 +122,7 @@ jobs:
 
       - name: Check shell syntax
         run: |
-          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh .github/scripts/install-gitleaks.sh
+          bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh .github/scripts/install-gitleaks.sh .github/scripts/candidate-attestation-status.sh .github/scripts/candidate-index-verify.sh
           node --check token-monitor-collector.js
 
       - name: Validate Compose configuration
@@ -148,6 +148,7 @@ jobs:
       base_exists: ${{ steps.resolve.outputs.base_exists }}
       base_digest: ${{ steps.resolve.outputs.base_digest }}
       needs_build: ${{ steps.resolve.outputs.needs_build }}
+      recovery_requested: ${{ steps.resolve.outputs.recovery_requested }}
       version: ${{ steps.meta.outputs.version }}
       sha: ${{ steps.meta.outputs.sha }}
     steps:
@@ -181,6 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           . .github/scripts/ghcr-status.sh
+          . .github/scripts/candidate-attestation-status.sh
 
           verify_exact_platforms() {
             local ref="$1"
@@ -204,12 +206,22 @@ jobs:
                 echo "ERROR: invalid digest for existing base candidate: ${digest}" >&2; exit 1
               fi
               verify_exact_platforms "$ref" "existing base candidate"
-              gh attestation verify "oci://ghcr.io/sindycate/cage/base@${digest}" \
+              if gh attestation verify "oci://ghcr.io/sindycate/cage/base@${digest}" \
                 --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
                 --source-digest "${SHA}" \
-                --source-ref refs/heads/main
-              echo "Reusing verified existing base candidate@${digest}"
+                --source-ref refs/heads/main; then
+                echo "Reusing verified existing base candidate@${digest}"
+                echo "recovery_requested=false" >> "$GITHUB_OUTPUT"
+              else
+                attestation_state="$(candidate_attestation_state "$digest")"
+                if [ "$attestation_state" != "absent" ]; then
+                  echo "ERROR: existing base candidate has an attestation that failed the exact policy; refusing recovery." >&2
+                  exit 1
+                fi
+                echo "Existing base candidate has no attestation; artifact-backed recovery is authorized."
+                echo "recovery_requested=true" >> "$GITHUB_OUTPUT"
+              fi
               echo "base_exists=true" >> "$GITHUB_OUTPUT"
               echo "base_digest=${digest}" >> "$GITHUB_OUTPUT"
               echo "needs_build=false" >> "$GITHUB_OUTPUT"
@@ -219,6 +231,7 @@ jobs:
               echo "base_exists=false" >> "$GITHUB_OUTPUT"
               echo "base_digest=" >> "$GITHUB_OUTPUT"
               echo "needs_build=true" >> "$GITHUB_OUTPUT"
+              echo "recovery_requested=false" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "ERROR: ambiguous registry status (${status}) for ${ref}; refusing to build to protect the write-once candidate tag." >&2
@@ -328,7 +341,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download base architecture digest metadata
-        if: needs.candidate-base-plan.outputs.needs_build == 'true'
+        if: >-
+          needs.candidate-base-plan.outputs.needs_build == 'true' ||
+          needs.candidate-base-plan.outputs.recovery_requested == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: candidate-base-digest-${{ needs.candidate-base-plan.outputs.sha }}-*
@@ -341,10 +356,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLAN_NEEDS_BUILD: ${{ needs.candidate-base-plan.outputs.needs_build }}
           PLAN_DIGEST: ${{ needs.candidate-base-plan.outputs.base_digest }}
+          PLAN_RECOVERY_REQUESTED: ${{ needs.candidate-base-plan.outputs.recovery_requested }}
           SHA: ${{ needs.candidate-base-plan.outputs.sha }}
         run: |
           set -euo pipefail
           . .github/scripts/ghcr-status.sh
+          . .github/scripts/candidate-attestation-status.sh
+          . .github/scripts/candidate-index-verify.sh
 
           verify_exact_platforms() {
             local ref="$1"
@@ -373,6 +391,25 @@ jobs:
             printf '%s' "$digest"
           }
 
+          load_arch_digests() {
+            local digest_dir="$RUNNER_TEMP/cage-digests"
+            if [ ! -d "$digest_dir" ]; then
+              echo "ERROR: base architecture digest artifact directory is missing" >&2
+              exit 1
+            fi
+            for entry in "$digest_dir"/*; do
+              [ -e "$entry" ] || continue
+              [ ! -L "$entry" ] || { echo "ERROR: unsafe base digest artifact ${entry}" >&2; exit 1; }
+              [ -f "$entry" ] || { echo "ERROR: non-file base digest artifact ${entry}" >&2; exit 1; }
+              case "$(basename "$entry")" in
+                amd64|arm64) ;;
+                *) echo "ERROR: unexpected base architecture artifact ${entry}" >&2; exit 1 ;;
+              esac
+            done
+            AMD64_DIGEST="$(read_arch_digest "$digest_dir/amd64")"
+            ARM64_DIGEST="$(read_arch_digest "$digest_dir/arm64")"
+          }
+
           IMAGE="ghcr.io/sindycate/cage/base"
           REF="${IMAGE}:candidate-${SHA}"
           status="$(ghcr_status "sindycate/cage/base" "candidate-${SHA}")"
@@ -386,36 +423,36 @@ jobs:
                 echo "ERROR: base candidate changed between plan and assembly (${PLAN_DIGEST} -> ${digest})" >&2
                 exit 1
               fi
-              verify_exact_platforms "$REF" "base candidate"
-              gh attestation verify "oci://${IMAGE}@${digest}" \
+              verify_exact_platforms "${IMAGE}@${digest}" "base candidate"
+              if gh attestation verify "oci://${IMAGE}@${digest}" \
                 --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
                 --source-digest "$SHA" \
-                --source-ref refs/heads/main
+                --source-ref refs/heads/main; then
+                echo "needs_attestation=false" >> "$GITHUB_OUTPUT"
+              else
+                attestation_state="$(candidate_attestation_state "$digest")"
+                if [ "$attestation_state" != "absent" ]; then
+                  echo "ERROR: existing base candidate has an attestation that failed the exact policy; refusing recovery." >&2
+                  exit 1
+                fi
+                if [ "${PLAN_NEEDS_BUILD:-false}" != "true" ] && [ "${PLAN_RECOVERY_REQUESTED:-false}" != "true" ]; then
+                  echo "ERROR: existing unattested base candidate was not authorized by the original build plan; refusing recovery." >&2
+                  exit 1
+                fi
+                load_arch_digests
+                verify_index_matches_arch_digests "${IMAGE}@${digest}" "base candidate" "$AMD64_DIGEST" "$ARM64_DIGEST"
+                echo "Reattesting unchanged existing base candidate@${digest} after exact architecture comparison"
+                echo "needs_attestation=true" >> "$GITHUB_OUTPUT"
+              fi
               echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-              echo "needs_attestation=false" >> "$GITHUB_OUTPUT"
               ;;
             404)
               if [ "$PLAN_NEEDS_BUILD" != "true" ]; then
                 echo "ERROR: base candidate disappeared after a verified existing result; refusing to recreate it." >&2
                 exit 1
               fi
-              DIGEST_DIR="$RUNNER_TEMP/cage-digests"
-              if [ ! -d "$DIGEST_DIR" ]; then
-                echo "ERROR: base architecture digest artifact directory is missing" >&2
-                exit 1
-              fi
-              for entry in "$DIGEST_DIR"/*; do
-                [ -e "$entry" ] || continue
-                [ ! -L "$entry" ] || { echo "ERROR: unsafe base digest artifact ${entry}" >&2; exit 1; }
-                [ -f "$entry" ] || { echo "ERROR: non-file base digest artifact ${entry}" >&2; exit 1; }
-                case "$(basename "$entry")" in
-                  amd64|arm64) ;;
-                  *) echo "ERROR: unexpected base architecture artifact ${entry}" >&2; exit 1 ;;
-                esac
-              done
-              AMD64_DIGEST="$(read_arch_digest "$DIGEST_DIR/amd64")"
-              ARM64_DIGEST="$(read_arch_digest "$DIGEST_DIR/arm64")"
+              load_arch_digests
               docker buildx imagetools create \
                 --tag "$REF" \
                 "${IMAGE}@${AMD64_DIGEST}" \
@@ -426,7 +463,8 @@ jobs:
               if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 echo "ERROR: invalid assembled base candidate digest: ${digest}" >&2; exit 1
               fi
-              verify_exact_platforms "$REF" "assembled base candidate"
+              verify_exact_platforms "${IMAGE}@${digest}" "assembled base candidate"
+              verify_index_matches_arch_digests "${IMAGE}@${digest}" "assembled base candidate" "$AMD64_DIGEST" "$ARM64_DIGEST"
               echo "digest=${digest}" >> "$GITHUB_OUTPUT"
               echo "needs_attestation=true" >> "$GITHUB_OUTPUT"
               ;;
@@ -461,12 +499,16 @@ jobs:
       needs_build: ${{ steps.plan.outputs.needs_build }}
       claude_build: ${{ steps.plan.outputs.claude_build }}
       claude_digest: ${{ steps.plan.outputs.claude_digest }}
+      claude_recovery_requested: ${{ steps.plan.outputs.claude_recovery_requested }}
       codex_build: ${{ steps.plan.outputs.codex_build }}
       codex_digest: ${{ steps.plan.outputs.codex_digest }}
+      codex_recovery_requested: ${{ steps.plan.outputs.codex_recovery_requested }}
       opencode_build: ${{ steps.plan.outputs.opencode_build }}
       opencode_digest: ${{ steps.plan.outputs.opencode_digest }}
+      opencode_recovery_requested: ${{ steps.plan.outputs.opencode_recovery_requested }}
       monitor_build: ${{ steps.plan.outputs.monitor_build }}
       monitor_digest: ${{ steps.plan.outputs.monitor_digest }}
+      monitor_recovery_requested: ${{ steps.plan.outputs.monitor_recovery_requested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -489,6 +531,7 @@ jobs:
         run: |
           set -euo pipefail
           . .github/scripts/ghcr-status.sh
+          . .github/scripts/candidate-attestation-status.sh
 
           verify_exact_platforms() {
             local ref="$1"
@@ -520,12 +563,22 @@ jobs:
                   echo "ERROR: invalid digest for existing ${image} candidate: ${digest}" >&2; exit 1
                 fi
                 verify_exact_platforms "$ref" "existing ${image} candidate"
-                gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${digest}" \
+                if gh attestation verify "oci://ghcr.io/sindycate/cage/${image}@${digest}" \
                   --repo "$GITHUB_REPOSITORY" \
                   --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
                   --source-digest "$SHA" \
-                  --source-ref refs/heads/main
-                echo "Reusing verified existing ${image} candidate@${digest}"
+                  --source-ref refs/heads/main; then
+                  echo "Reusing verified existing ${image} candidate@${digest}"
+                  echo "${key}_recovery_requested=false" >> "$GITHUB_OUTPUT"
+                else
+                  attestation_state="$(candidate_attestation_state "$digest")"
+                  if [ "$attestation_state" != "absent" ]; then
+                    echo "ERROR: existing ${image} candidate has an attestation that failed the exact policy; refusing recovery." >&2
+                    exit 1
+                  fi
+                  echo "Existing ${image} candidate has no attestation; artifact-backed recovery is authorized."
+                  echo "${key}_recovery_requested=true" >> "$GITHUB_OUTPUT"
+                fi
                 echo "${key}_build=false" >> "$GITHUB_OUTPUT"
                 echo "${key}_digest=${digest}" >> "$GITHUB_OUTPUT"
                 ;;
@@ -533,6 +586,7 @@ jobs:
                 echo "No existing ${image} candidate; native architecture builds are authorized."
                 echo "${key}_build=true" >> "$GITHUB_OUTPUT"
                 echo "${key}_digest=" >> "$GITHUB_OUTPUT"
+                echo "${key}_recovery_requested=false" >> "$GITHUB_OUTPUT"
                 missing_images="${missing_images}${missing_images:+ }${image}"
                 ;;
               *)
@@ -684,7 +738,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download leaf architecture digest metadata
-        if: needs.candidate-leaf-plan.outputs[format('{0}_build', matrix.key)] == 'true'
+        if: >-
+          needs.candidate-leaf-plan.outputs[format('{0}_build', matrix.key)] == 'true' ||
+          needs.candidate-leaf-plan.outputs[format('{0}_recovery_requested', matrix.key)] == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: candidate-${{ matrix.image }}-digest-${{ needs.candidate-base.outputs.sha }}-*
@@ -699,10 +755,13 @@ jobs:
           IMAGE_NAME: ${{ matrix.image }}
           PLAN_NEEDS_BUILD: ${{ needs.candidate-leaf-plan.outputs[format('{0}_build', matrix.key)] }}
           PLAN_DIGEST: ${{ needs.candidate-leaf-plan.outputs[format('{0}_digest', matrix.key)] }}
+          PLAN_RECOVERY_REQUESTED: ${{ needs.candidate-leaf-plan.outputs[format('{0}_recovery_requested', matrix.key)] }}
           SHA: ${{ needs.candidate-base.outputs.sha }}
         run: |
           set -euo pipefail
           . .github/scripts/ghcr-status.sh
+          . .github/scripts/candidate-attestation-status.sh
+          . .github/scripts/candidate-index-verify.sh
 
           verify_exact_platforms() {
             local ref="$1"
@@ -731,6 +790,25 @@ jobs:
             printf '%s' "$digest"
           }
 
+          load_arch_digests() {
+            local digest_dir="$RUNNER_TEMP/cage-digests"
+            if [ ! -d "$digest_dir" ]; then
+              echo "ERROR: ${IMAGE_NAME} architecture digest artifact directory is missing" >&2
+              exit 1
+            fi
+            for entry in "$digest_dir"/*; do
+              [ -e "$entry" ] || continue
+              [ ! -L "$entry" ] || { echo "ERROR: unsafe ${IMAGE_NAME} digest artifact ${entry}" >&2; exit 1; }
+              [ -f "$entry" ] || { echo "ERROR: non-file ${IMAGE_NAME} digest artifact ${entry}" >&2; exit 1; }
+              case "$(basename "$entry")" in
+                amd64|arm64) ;;
+                *) echo "ERROR: unexpected ${IMAGE_NAME} architecture artifact ${entry}" >&2; exit 1 ;;
+              esac
+            done
+            AMD64_DIGEST="$(read_arch_digest "$digest_dir/amd64")"
+            ARM64_DIGEST="$(read_arch_digest "$digest_dir/arm64")"
+          }
+
           REF="${IMAGE}:candidate-${SHA}"
           status="$(ghcr_status "sindycate/cage/${IMAGE_NAME}" "candidate-${SHA}")"
           case "$status" in
@@ -743,36 +821,36 @@ jobs:
                 echo "ERROR: ${IMAGE_NAME} candidate changed between plan and assembly (${PLAN_DIGEST} -> ${digest})" >&2
                 exit 1
               fi
-              verify_exact_platforms "$REF" "${IMAGE_NAME} candidate"
-              gh attestation verify "oci://${IMAGE}@${digest}" \
+              verify_exact_platforms "${IMAGE}@${digest}" "${IMAGE_NAME} candidate"
+              if gh attestation verify "oci://${IMAGE}@${digest}" \
                 --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
                 --source-digest "$SHA" \
-                --source-ref refs/heads/main
+                --source-ref refs/heads/main; then
+                echo "needs_attestation=false" >> "$GITHUB_OUTPUT"
+              else
+                attestation_state="$(candidate_attestation_state "$digest")"
+                if [ "$attestation_state" != "absent" ]; then
+                  echo "ERROR: existing ${IMAGE_NAME} candidate has an attestation that failed the exact policy; refusing recovery." >&2
+                  exit 1
+                fi
+                if [ "${PLAN_NEEDS_BUILD:-false}" != "true" ] && [ "${PLAN_RECOVERY_REQUESTED:-false}" != "true" ]; then
+                  echo "ERROR: existing unattested ${IMAGE_NAME} candidate was not authorized by the original build plan; refusing recovery." >&2
+                  exit 1
+                fi
+                load_arch_digests
+                verify_index_matches_arch_digests "${IMAGE}@${digest}" "${IMAGE_NAME} candidate" "$AMD64_DIGEST" "$ARM64_DIGEST"
+                echo "Reattesting unchanged existing ${IMAGE_NAME} candidate@${digest} after exact architecture comparison"
+                echo "needs_attestation=true" >> "$GITHUB_OUTPUT"
+              fi
               echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-              echo "needs_attestation=false" >> "$GITHUB_OUTPUT"
               ;;
             404)
               if [ "$PLAN_NEEDS_BUILD" != "true" ]; then
                 echo "ERROR: ${IMAGE_NAME} candidate disappeared after a verified existing result; refusing to recreate it." >&2
                 exit 1
               fi
-              DIGEST_DIR="$RUNNER_TEMP/cage-digests"
-              if [ ! -d "$DIGEST_DIR" ]; then
-                echo "ERROR: ${IMAGE_NAME} architecture digest artifact directory is missing" >&2
-                exit 1
-              fi
-              for entry in "$DIGEST_DIR"/*; do
-                [ -e "$entry" ] || continue
-                [ ! -L "$entry" ] || { echo "ERROR: unsafe ${IMAGE_NAME} digest artifact ${entry}" >&2; exit 1; }
-                [ -f "$entry" ] || { echo "ERROR: non-file ${IMAGE_NAME} digest artifact ${entry}" >&2; exit 1; }
-                case "$(basename "$entry")" in
-                  amd64|arm64) ;;
-                  *) echo "ERROR: unexpected ${IMAGE_NAME} architecture artifact ${entry}" >&2; exit 1 ;;
-                esac
-              done
-              AMD64_DIGEST="$(read_arch_digest "$DIGEST_DIR/amd64")"
-              ARM64_DIGEST="$(read_arch_digest "$DIGEST_DIR/arm64")"
+              load_arch_digests
               docker buildx imagetools create \
                 --tag "$REF" \
                 "${IMAGE}@${AMD64_DIGEST}" \
@@ -783,7 +861,8 @@ jobs:
               if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 echo "ERROR: invalid assembled ${IMAGE_NAME} candidate digest: ${digest}" >&2; exit 1
               fi
-              verify_exact_platforms "$REF" "assembled ${IMAGE_NAME} candidate"
+              verify_exact_platforms "${IMAGE}@${digest}" "assembled ${IMAGE_NAME} candidate"
+              verify_index_matches_arch_digests "${IMAGE}@${digest}" "assembled ${IMAGE_NAME} candidate" "$AMD64_DIGEST" "$ARM64_DIGEST"
               echo "digest=${digest}" >> "$GITHUB_OUTPUT"
               echo "needs_attestation=true" >> "$GITHUB_OUTPUT"
               ;;
