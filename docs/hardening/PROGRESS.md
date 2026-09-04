@@ -13,6 +13,12 @@ platform, exactly one linked BuildKit attestation, and duplicate rejection.
 The existing post-create complete descriptor-union comparison remains in place,
 and no existing candidate is replaced or retagged.
 
+Focused supply-chain coverage passes (`132 passed`), the complete Python suite
+passes (`710 passed, 15 skipped`), and shell/Python/Node syntax, Compose
+validation, and `git diff --check` pass. PR run `33856610399` passed all
+ordinary gates; its candidate jobs were correctly skipped because the pushed
+branch is not `refs/heads/main`.
+
 ## 2026-09-03 — Candidate attestation recovery gap repaired
 
 An interrupted final `actions/attest` step can leave an immutable candidate
