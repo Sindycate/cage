@@ -6,6 +6,41 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.5 — 2026-09-04
+
+### Native multi-architecture candidate builds
+
+No user configuration migration. This maintainer-only CI change builds each
+candidate architecture on its matching native GitHub runner, transfers only
+digest metadata to the assembler, and keeps the existing candidate manifest,
+image names, release promotion, and exact-source verification contracts. No
+Cage CLI, central configuration, state volume, or image-consumer behavior
+changes. QEMU is no longer used by the candidate pipeline.
+
+### Recovery of an unattested candidate index
+
+No user configuration migration. If an immutable candidate index was created
+but its final GitHub Actions attestation was interrupted, a rerun may attest
+that same index only after inspecting the original SHA-scoped amd64 and arm64
+architecture-index artifacts. Each must contain exactly one runnable child for
+its platform and no other runnable platform; the final index's complete child
+descriptor set must equal their union, including unknown/unknown
+SBOM/provenance children. The index is never deleted, replaced, or retagged. A
+changed index, invalid or ambiguous attestation state, or missing/ambiguous
+architecture artifacts still fails closed. Candidates with a valid exact-source
+attestation continue to be verified and reused normally.
+
+The native architecture digest artifacts are retained for at least 30 days so
+the recovery window does not expire before the artifacts needed for validation.
+Fresh assembly validates both complete nested architecture indexes, including
+their linked BuildKit attestations and duplicate checks, before creating the
+immutable candidate tag.
+
+Source indexes are also rejected before assembly if any runnable or attestation
+child digest is repeated across the two architectures, even when descriptor
+metadata differs. Runnable children must use the OCI image-manifest media type;
+an OCI index or arbitrary media type is not accepted as a runnable child.
+
 ## 0.36.4 — 2026-09-03
 
 ### Interrupt-safe parallel release preflight

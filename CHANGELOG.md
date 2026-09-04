@@ -5,6 +5,25 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.5 — 2026-09-04
+
+- build candidate images one architecture at a time on native amd64 and arm64
+  runners, hand off only immutable architecture digests, and assemble the
+  final multi-architecture indexes without QEMU; retain exact-source
+  attestations, SBOMs, provenance, write-once candidate tags, and schema-v3
+  release manifests;
+- recover an existing candidate index after an interrupted final attestation
+  only when inspecting its exact SHA-scoped architecture-index artifacts
+  produces a child-descriptor union matching the unchanged final index,
+  including unknown/unknown SBOM/provenance children; never replace or retag
+  the existing index, and continue to fail closed for invalid attestations or
+  ambiguous recovery state;
+- retain the tiny SHA-scoped architecture digest artifacts for 30 days and
+  validate both complete nested architecture indexes before creating a fresh
+  immutable candidate tag;
+- reject cross-architecture child-digest collisions before assembly and require
+  runnable children to use the OCI image-manifest media type;
+
 ## 0.36.4 — 2026-09-03
 
 - make parallel maintainer-release preflight interrupt-safe: SIGINT/SIGTERM

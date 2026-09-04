@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -129,9 +130,12 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("group: candidate-${{ github.sha }}", text)
         self.assertIn("cancel-in-progress: false", text)
         # Candidate publication follows every gate in file order.
-        candidate_index = text.index("  candidate-base:")
+        candidate_index = text.index("  candidate-base-plan:")
         for gate in ("test-python", "test-docker", "test-static"):
             self.assertLess(text.index(f"  {gate}:"), candidate_index)
+        self.assertLess(text.index("  candidate-base-plan:"), text.index("  candidate:"))
+        self.assertLess(text.index("  candidate-base:"), text.index("  candidate:"))
+        self.assertLess(text.index("  candidate-leaf-assemble:"), text.index("  candidate:"))
 
     def test_ci_uses_one_python_312_lane_and_preserves_all_smokes(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
@@ -154,19 +158,65 @@ class ReleaseSupplyChainTests(unittest.TestCase):
     def test_ci_candidate_tags_use_full_sha_and_exact_base_digest(self):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('echo "SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"', text)
-        self.assertIn("ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}", text)
-        self.assertIn("ghcr.io/sindycate/cage/${{ matrix.image }}:candidate-${{ env.SHA }}", text)
-        # Leaves build from the exact base digest output by candidate-base, never a mutable tag.
+        candidate = text[text.index("  candidate-base-plan:") :]
+        self.assertIn("candidate-${SHA}", candidate)
+        self.assertIn("--tag \"$REF\"", candidate)
+        # Leaves build from the exact assembled base digest, never a mutable tag.
         leaf_base = (
-            "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.base_digest }}"
+            "CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.digest }}"
         )
         self.assertIn(leaf_base, text)
-        # Candidate images retain SBOM + max provenance and per-image attestations.
+        # Candidate architecture images retain SBOM + max provenance and per-image
+        # attestations; their only workflow handoff is a tiny digest artifact.
         self.assertIn("sbom: true", text)
         self.assertIn("provenance: mode=max", text)
         self.assertIn("subject-name: ghcr.io/sindycate/cage/base", text)
         self.assertIn("subject-name: ghcr.io/sindycate/cage/${{ matrix.image }}", text)
-        # Verify exact matrix structure for all four leaf images
+        self.assertIn("push-by-digest=true", text)
+        self.assertIn("name-canonical=true", text)
+        self.assertIn("actions/download-artifact@", text)
+        self.assertIn("actions/upload-artifact@", text)
+        self.assertIn("merge-multiple: true", text)
+        for job in ("candidate-base-arch:", "candidate-leaf-arch:"):
+            start = text.index(f"  {job}")
+            end = text.find("\n  candidate-", start + 1)
+            block = text[start:] if end == -1 else text[start:end]
+            retention = re.search(r"retention-days:\s*(\d+)", block)
+            self.assertIsNotNone(retention, f"{job} has no artifact retention")
+            self.assertGreaterEqual(int(retention.group(1)), 30, job)
+            self.assertNotIn("retention-days: 1", block)
+        for step_name in (
+            "Assemble or verify final base candidate",
+            "Assemble or verify final leaf candidate",
+        ):
+            assembly = _extract_run_block(CI_WORKFLOW, step_name)
+            self.assertLess(
+                assembly.index("verify_architecture_indexes"),
+                assembly.index("docker buildx imagetools create"),
+                step_name,
+            )
+        self.assertIn(
+            'printf \'%s\\n\' "$DIGEST" > "$RUNNER_TEMP/cage-digests/${{ matrix.arch }}"',
+            text,
+        )
+        self.assertNotIn("docker save", candidate)
+        # Verify exact native matrix structure for all four leaf images.
+        self.assertIn("runner: ubuntu-24.04", text)
+        self.assertIn("runner: ubuntu-24.04-arm", text)
+        self.assertIn("platform: linux/amd64", text)
+        self.assertIn("platform: linux/arm64", text)
+        self.assertRegex(
+            text,
+            r"arch: amd64\s+platform: linux/amd64\s+runner: ubuntu-24\.04",
+        )
+        self.assertRegex(
+            text,
+            r"arch: arm64\s+platform: linux/arm64\s+runner: ubuntu-24\.04-arm",
+        )
+        self.assertNotIn("setup-qemu-action@", candidate)
+        self.assertNotIn("setup-qemu-action@", text)
+        self.assertNotIn("platforms: linux/amd64,linux/arm64", candidate)
+        self.assertNotIn("tags:", candidate)
         for image, dockerfile in (
             ("claude-code", "Dockerfile"),
             ("codex", "Dockerfile.codex"),
@@ -174,12 +224,14 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             ("token-monitor", "Dockerfile.monitor"),
         ):
             self.assertIn(f"image: {image}", text)
-            self.assertIn(f"dockerfile: {dockerfile}", text)
+            self.assertIn(f'"{image}": "{dockerfile}"', text)
         # Manifest artifact is SHA-named, schema-typed, and uploaded.
         self.assertIn("name: release-candidate-${{ needs.candidate-base.outputs.sha }}", text)
         self.assertIn('"schema": "cage.release-candidate"', text)
         self.assertIn('"schema_version": 3', text)
         self.assertIn("resolve_candidate()", text)
+        self.assertIn("docker buildx imagetools create", text)
+        self.assertIn("if ! gh attestation verify", text)
         self.assertIn(
             'if [ -n "$expected" ] && [ "$digest" != "$expected" ]; then',
             text,
@@ -194,11 +246,13 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         # A resolve step verifies an existing candidate before reuse and fails
         # closed; it never merely prints a message and then overwrites the tag.
         self.assertIn(
-            "Resolve existing candidates (verify and reuse) or fail closed", text
+            "Resolve final base candidate (verify and reuse) or authorize a build", text
         )
         self.assertIn(
-            "Resolve existing candidate or fail closed", text
+            "Resolve final leaf candidates (verify and reuse) or authorize builds", text
         )
+        self.assertIn("Assemble or verify final base candidate", text)
+        self.assertIn("Assemble or verify final leaf candidate", text)
         # Existing candidates are verified by attestation (OCI reference form),
         # signer workflow, source SHA and ref before reuse.
         self.assertIn(
@@ -206,7 +260,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            'gh attestation verify "oci://ghcr.io/sindycate/cage/${{ matrix.image }}@${digest}"',
+            'gh attestation verify "oci://${IMAGE}@${digest}"',
             text,
         )
         self.assertIn(
@@ -216,31 +270,34 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("--source-ref refs/heads/main", text)
         # An existing candidate missing amd64/arm64 fails closed.
         self.assertIn(
-            'echo "ERROR: existing candidate base missing amd64/arm64 (${arches})"; exit 1',
+            "must contain exactly linux/amd64 and linux/arm64",
             text,
         )
         self.assertIn(
-            'echo "ERROR: existing candidate ${{ matrix.image }} missing amd64/arm64 (${arches})"; exit 1',
-            text,
+            "missing or unsafe architecture digest artifact", text
         )
-        # Build and attest steps are conditionally skipped for reused images, so a
-        # CI rerun can never replace an immutable candidate with freshly resolved
-        # mutable dependencies.
-        self.assertIn("if: steps.resolve.outputs.base_exists != 'true'", text)
-        self.assertIn("if: steps.resolve.outputs.exists != 'true'", text)
-        # The ineffective no-op guard that printed then overwrote is removed.
-        self.assertNotIn(
-            'echo "Candidate $ref already exists; the release workflow will verify it."',
-            text,
-        )
+        # Build and assembly writes are authorized only by an authoritative 404;
+        # existing final candidates skip both and are reverified instead.
+        self.assertIn('echo "base_exists=true"', text)
+        self.assertIn('echo "base_exists=false"', text)
+        self.assertIn('echo "${key}_build=false"', text)
+        self.assertIn('echo "${key}_build=true"', text)
+        self.assertIn("candidate disappeared after a verified existing result", text)
+        self.assertIn("refusing to recreate it", text)
+        self.assertIn("needs_attestation=false", text)
+        self.assertIn("needs_attestation=true", text)
+        self.assertIn("candidate_attestation_state", text)
+        self.assertEqual(text.count(". .github/scripts/candidate-index-verify.sh"), 2)
+        self.assertIn("PLAN_RECOVERY_REQUESTED", text)
+        self.assertIn("verify_index_matches_arch_digests", text)
+        self.assertIn("Reattesting unchanged existing", text)
+        # Recovery is allowed to emit the existing digest for actions/attest;
+        # it must never invoke imagetools create on the 200 path.
+        self.assertIn("existing unattested", text)
         # Effective digests are validated before the manifest is written.
-        self.assertIn("Resolve effective candidate digests", text)
-        self.assertIn("Resolve effective digest", text)
+        self.assertIn("Resolve candidate digests from GHCR and write candidate manifest", text)
         self.assertIn(
-            'if [[ ! "$BASE" =~ ^sha256:[0-9a-f]{64}$ ]]; then', text
-        )
-        self.assertIn(
-            'if [[ ! "$EFFECTIVE" =~ ^sha256:[0-9a-f]{64}$ ]]; then', text
+            'if [[ ! "$BASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then', text
         )
         # Existence is decided by an authoritative registry status code (via the
         # shared ghcr-status helper), never by free-form error text. Only a 404
@@ -250,7 +307,7 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("ambiguous registry status", text)
         # Matrix must NOT use fail-fast so independent sibling builds finish attestations
         self.assertIn("fail-fast: false", text)
-        self.assertNotIn("fail-fast: true", text)
+        self.assertNotIn("setup-qemu-action@", text[text.index("  candidate-base-plan:") :])
         # The unsafe bare-substring not-found matching is gone.
         self.assertNotIn('*"not found"*|*"manifest unknown"*|*"404"*)', text)
         self.assertNotIn("inspect_ok=true", text)
@@ -280,6 +337,37 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         self.assertIn("ghcr_status()", body)
         self.assertIn("ghcr.io/token", body)
         self.assertIn("'%{http_code}'", body)
+        result = subprocess.run(
+            ["bash", "-n", str(helper)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_candidate_attestation_status_helper_is_present_and_valid_bash(self):
+        helper = ROOT / ".github" / "scripts" / "candidate-attestation-status.sh"
+        self.assertTrue(helper.is_file(), "candidate attestation status helper missing")
+        body = helper.read_text(encoding="utf-8")
+        self.assertIn("candidate_attestation_state()", body)
+        self.assertIn("/attestations/", body)
+        self.assertIn("repository access could not be confirmed", body)
+        result = subprocess.run(
+            ["bash", "-n", str(helper)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_candidate_index_verifier_is_present_and_valid_bash(self):
+        helper = ROOT / ".github" / "scripts" / "candidate-index-verify.sh"
+        self.assertTrue(helper.is_file(), "candidate index verifier missing")
+        body = helper.read_text(encoding="utf-8")
+        for fragment in (
+            "candidate_inspect_architecture_descriptor_set",
+            "candidate_reject_duplicate_descriptor_digests",
+            "verify_architecture_indexes",
+            "unknown/unknown",
+            "application/vnd.oci.image.manifest.v1+json",
+            "child descriptor set does not equal the union",
+            "imagetools create",
+        ):
+            self.assertIn(fragment, body)
         result = subprocess.run(
             ["bash", "-n", str(helper)], capture_output=True, text=True
         )
@@ -774,7 +862,8 @@ class SharedBaseImageTests(unittest.TestCase):
     def test_candidate_base_built_in_ci_and_promoted_in_release(self):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("Dockerfile.base", ci)
-        self.assertIn("ghcr.io/sindycate/cage/base:candidate-${{ env.SHA }}", ci)
+        self.assertIn('IMAGE="ghcr.io/sindycate/cage/base"', ci)
+        self.assertIn('REF="${IMAGE}:candidate-${SHA}"', ci)
         release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         # Release promotes the exact base digest; it never rebuilds the base image.
         self.assertNotIn("Dockerfile.base", release)
@@ -799,33 +888,9 @@ class SharedBaseImageTests(unittest.TestCase):
 
     def test_candidate_builds_receive_release_version_for_oci_labels(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("CAGE_VERSION=${{ env.VERSION }}", workflow)
-        self.assertIn("CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.base_digest }}", workflow)
+        self.assertIn("CAGE_VERSION=${{ needs.candidate-base.outputs.version }}", workflow)
+        self.assertIn("CAGE_BASE=ghcr.io/sindycate/cage/base@${{ needs.candidate-base.outputs.digest }}", workflow)
 
-
-
-def _resolve_run_block():
-    """Extract the candidate resolve step's ``run: |`` block as plain bash."""
-    lines = CI_WORKFLOW.read_text(encoding="utf-8").splitlines()
-    name_idx = next(
-        i for i, line in enumerate(lines) if "Resolve existing candidates" in line
-    )
-    run_idx = next(
-        i for i in range(name_idx, len(lines))
-        if re.match(r"^\s*run:\s*\|\s*$", lines[i])
-    )
-    indent = len(lines[run_idx]) - len(lines[run_idx].lstrip())
-    body = []
-    for line in lines[run_idx + 1:]:
-        if line.strip() == "":
-            body.append("")
-            continue
-        if len(line) - len(line.lstrip()) <= indent:
-            break
-        body.append(line)
-    nonempty = [b for b in body if b.strip()]
-    pad = min(len(b) - len(b.lstrip()) for b in nonempty)
-    return "\n".join(b[pad:] if len(b) >= pad else "" for b in body)
 
 
 # Stub curl/docker/gh as bash *functions* prepended to the real workflow run
@@ -848,6 +913,9 @@ curl() {
           return 0 ;;
       esac ;;
     *"/v2/"*"/manifests/"*)
+      if [ -n "${STUB_MISSING_REPO:-}" ] && [[ "$url" == *"/${STUB_MISSING_REPO}/manifests/"* ]]; then
+        printf '404'; return 0
+      fi
       case "${STUB_MODE:-}" in
         absent) printf '404'; return 0 ;;
         present|present_match|present_conflict) printf '200'; return 0 ;;
@@ -869,10 +937,71 @@ docker() {
     for a in "$@"; do
       case "$a" in
         *Manifest.Digest*) printf 'sha256:1111111111111111111111111111111111111111111111111111111111111111'; return 0 ;;
-        *Platform.Architecture*) printf 'amd64 arm64 '; return 0 ;;
+        *Platform.Architecture*) printf '%s ' "${STUB_PLATFORMS:-linux/amd64 linux/arm64}"; return 0 ;;
       esac
     done
     return 1
+  fi
+  return 0
+}
+'''
+
+# The assembly blocks perform an existence check before and after the write.
+# This stub models that transition without making any registry calls.
+CURL_FUNC_ASSEMBLY = '''
+curl() {
+  local url="${@: -1}"
+  case "$url" in
+    *ghcr.io/token*)
+      printf '{"token":"stub-token"}'
+      return 0 ;;
+    *"/v2/"*"/manifests/"*)
+      case "${STUB_MODE:-}" in
+        absent_then_present)
+          if [ ! -e "${STUB_STATE_FILE}" ]; then
+            : > "${STUB_STATE_FILE}"
+            printf '404'
+          else
+            printf '200'
+          fi
+          return 0 ;;
+        absent) printf '404'; return 0 ;;
+        present) printf '200'; return 0 ;;
+        server) printf '503'; return 0 ;;
+        timeout) printf '000'; return 0 ;;
+      esac ;;
+  esac
+  return 0
+}
+'''
+
+DOCKER_FUNC_ASSEMBLY = '''
+docker() {
+  if [ "$1" = "buildx" ] && [ "$2" = "imagetools" ]; then
+    if [ "$3" = "inspect" ]; then
+      local ref="${4:-}"
+      local format="${@: -1}"
+      if [[ "$format" == *json* ]]; then
+        if [[ "$ref" == *@"${STUB_ARCH_AMD64_DIGEST:-}" ]]; then
+          printf '%s' "${STUB_AMD64_DESCRIPTORS:-}"; return 0
+        fi
+        if [[ "$ref" == *@"${STUB_ARCH_ARM64_DIGEST:-}" ]]; then
+          printf '%s' "${STUB_ARM64_DESCRIPTORS:-}"; return 0
+        fi
+        printf '%s' "${STUB_FINAL_DESCRIPTORS:-}"; return 0
+      fi
+      for a in "$@"; do
+        case "$a" in
+          *Manifest.Digest*) printf '%s' "${STUB_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"; return 0 ;;
+          *Platform.Architecture*) printf '%s ' "${STUB_PLATFORMS:-linux/amd64 linux/arm64}"; return 0 ;;
+        esac
+      done
+      return 1
+    fi
+    if [ "$3" = "create" ]; then
+      echo "CREATE_CALLED $*" >> "${CREATE_MARKER}"
+      return 0
+    fi
   fi
   return 0
 }
@@ -898,8 +1027,36 @@ docker() {
 
 GH_FUNC = '''
 gh() {
+  if [ "$1" = "api" ]; then
+    if [[ "$*" == *"/attestations/"* ]]; then
+      case "${STUB_ATTEST_LOOKUP:-absent}" in
+        absent)
+          printf 'HTTP/2.0 404 Not Found\\n\\n'
+          return 1 ;;
+        present)
+          printf 'HTTP/2.0 200 OK\\n\\n1\\n'
+          return 0 ;;
+        empty)
+          printf 'HTTP/2.0 200 OK\\n\\n0\\n'
+          return 0 ;;
+        error)
+          printf 'HTTP/2.0 503 Service Unavailable\\n\\n'
+          return 1 ;;
+        malformed)
+          printf 'HTTP/2.0 200 OK\\n\\nnot-a-count\\n'
+          return 0 ;;
+      esac
+    fi
+    # The helper validates repository access before accepting a 404 from the
+    # subject-digest endpoint as an absent attestation.
+    printf 'HTTP/2.0 200 OK\\n\\n'
+    return 0
+  fi
   if [ "$1" = "attestation" ] && [ "$2" = "verify" ]; then
-    if [ "${STUB_ATTEST:-}" = "fail" ]; then
+    if [ -n "${STUB_ATTEST_LOG:-}" ]; then
+      printf '%s\n' "$*" >> "${STUB_ATTEST_LOG}"
+    fi
+    if [ "${STUB_ATTEST:-}" = "fail" ] || [ "${STUB_ATTEST:-}" = "missing" ]; then
       echo "attestation verification failed" >&2
       return 1
     fi
@@ -1034,11 +1191,15 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.script = _extract_run_block(CI_WORKFLOW, "Resolve existing candidates")
+        cls.script = _extract_run_block(
+            CI_WORKFLOW, "Resolve final base candidate"
+        )
         assert ". .github/scripts/ghcr-status.sh" in cls.script
         assert "ghcr_status" in cls.script
 
-    def _run_resolve(self, mode, attest="ok", sha=None):
+    def _run_resolve(
+        self, mode, attest="ok", sha=None, platforms=None, missing_repo=None
+    ):
         base = Path(tempfile.mkdtemp(prefix="resolve-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         github_output = base / "github_output.txt"
@@ -1056,6 +1217,11 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
         env["GH_TOKEN"] = "dummy-token"
         env["STUB_MODE"] = mode
         env["STUB_ATTEST"] = attest
+        env["STUB_ATTEST_LOOKUP"] = "present" if attest == "fail" else "absent"
+        if platforms is not None:
+            env["STUB_PLATFORMS"] = platforms
+        if missing_repo is not None:
+            env["STUB_MISSING_REPO"] = missing_repo
         result = subprocess.run(
             ["bash", str(script_file)], env=env, capture_output=True, text=True,
             cwd=str(ROOT),
@@ -1077,6 +1243,21 @@ class CandidateResolveFailClosedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(outputs.get("base_exists"), "true", outputs)
         self.assertTrue(outputs.get("base_digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("recovery_requested"), "false", outputs)
+
+    def test_existing_unattested_candidate_authorizes_artifact_recovery(self):
+        result, outputs = self._run_resolve("present", attest="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("base_exists"), "true", outputs)
+        self.assertEqual(outputs.get("needs_build"), "false", outputs)
+        self.assertEqual(outputs.get("recovery_requested"), "true", outputs)
+
+    def test_attestation_descriptors_do_not_count_as_runnable_platforms(self):
+        result, outputs = self._run_resolve(
+            "present", platforms="linux/amd64 linux/arm64 unknown/unknown"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("base_exists"), "true", outputs)
 
     def test_401_unauthorized_fails_closed(self):
         result, outputs = self._run_resolve("unauthorized")
@@ -1127,12 +1308,16 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        raw_script = _extract_run_block(CI_WORKFLOW, "Resolve existing candidate or fail closed")
+        raw_script = _extract_run_block(
+            CI_WORKFLOW, "Resolve final leaf candidates"
+        )
         assert ". .github/scripts/ghcr-status.sh" in raw_script
         assert "ghcr_status" in raw_script
         cls.script = raw_script.replace("${{ matrix.image }}", "claude-code")
 
-    def _run_resolve(self, mode, attest="ok", sha=None):
+    def _run_resolve(
+        self, mode, attest="ok", sha=None, platforms=None, missing_repo=None
+    ):
         base = Path(tempfile.mkdtemp(prefix="resolve-leaf-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         github_output = base / "github_output.txt"
@@ -1150,6 +1335,11 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
         env["GH_TOKEN"] = "dummy-token"
         env["STUB_MODE"] = mode
         env["STUB_ATTEST"] = attest
+        env["STUB_ATTEST_LOOKUP"] = "present" if attest == "fail" else "absent"
+        if platforms is not None:
+            env["STUB_PLATFORMS"] = platforms
+        if missing_repo is not None:
+            env["STUB_MISSING_REPO"] = missing_repo
         result = subprocess.run(
             ["bash", str(script_file)], env=env, capture_output=True, text=True,
             cwd=str(ROOT),
@@ -1164,19 +1354,47 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
     def test_authoritative_404_authorizes_creation(self):
         result, outputs = self._run_resolve("absent")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outputs.get("exists"), "false", outputs)
+        self.assertEqual(outputs.get("claude_build"), "true", outputs)
+        self.assertEqual(outputs.get("needs_build"), "true", outputs)
+
+    def test_missing_images_emit_only_their_native_digest_build_matrix(self):
+        result, outputs = self._run_resolve("present", missing_repo="opencode")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("opencode_build"), "true", outputs)
+        self.assertEqual(outputs.get("claude_build"), "false", outputs)
+        self.assertEqual(outputs.get("needs_build"), "true", outputs)
+        matrix = json.loads(outputs["build_matrix"])
+        self.assertEqual(len(matrix["include"]), 2)
+        self.assertEqual(
+            {(entry["arch"], entry["platform"], entry["runner"]) for entry in matrix["include"]},
+            {
+                ("amd64", "linux/amd64", "ubuntu-24.04"),
+                ("arm64", "linux/arm64", "ubuntu-24.04-arm"),
+            },
+        )
+        self.assertEqual(
+            {entry["image"] for entry in matrix["include"]}, {"opencode"}
+        )
 
     def test_200_verified_candidate_is_reused(self):
         result, outputs = self._run_resolve("present")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outputs.get("exists"), "true", outputs)
-        self.assertTrue(outputs.get("digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("claude_build"), "false", outputs)
+        self.assertEqual(outputs.get("needs_build"), "false", outputs)
+        self.assertTrue(outputs.get("claude_digest", "").startswith("sha256:"))
+        self.assertEqual(outputs.get("claude_recovery_requested"), "false", outputs)
+
+    def test_existing_unattested_candidate_authorizes_artifact_recovery(self):
+        result, outputs = self._run_resolve("present", attest="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs.get("claude_build"), "false", outputs)
+        self.assertEqual(outputs.get("claude_recovery_requested"), "true", outputs)
 
     def test_401_unauthorized_fails_closed(self):
         result, outputs = self._run_resolve("unauthorized")
         self.assertEqual(result.returncode, 1)
         self.assertIn("ambiguous registry status (401)", result.stderr)
-        self.assertNotEqual(outputs.get("exists"), "false")
+        self.assertNotEqual(outputs.get("claude_build"), "false")
 
     def test_403_denied_fails_closed(self):
         result, _ = self._run_resolve("denied")
@@ -1197,6 +1415,668 @@ class CandidateLeafResolveFailClosedTests(unittest.TestCase):
         result, _ = self._run_resolve("present", attest="fail")
         self.assertEqual(result.returncode, 1)
 
+    def test_existing_candidate_with_wrong_platform_set_fails_closed(self):
+        result, _ = self._run_resolve(
+            "present", platforms="linux/amd64 linux/arm64 linux/arm/v7"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must contain exactly linux/amd64 and linux/arm64", result.stderr)
+
+    def test_ambiguous_registry_status_fails_closed_before_planning_builds(self):
+        result, outputs = self._run_resolve("server")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (503)", result.stderr)
+        self.assertNotIn("build_matrix", outputs)
+
+
+class CandidateAssemblyTests(unittest.TestCase):
+    """Execute the native digest handoff and write-once assembly block."""
+
+    IMAGE_NAME = "base"
+    # BuildKit emits these parent architecture indexes. Their runnable child
+    # manifests and unknown/unknown SBOM/provenance descriptors are distinct.
+    # The amd64 values mirror the real benchmark shape: dc11626... contains
+    # bf746c..., while the final 411e972... index contains bf746c....
+    ARCH_INDEX_AMD64 = "sha256:dc11626" + "a" * 57
+    ARCH_INDEX_ARM64 = "sha256:dc11627" + "b" * 57
+    RUNNABLE_AMD64 = "sha256:bf746c" + "c" * 58
+    RUNNABLE_ARM64 = "sha256:bf746d" + "d" * 58
+    ATTESTATION_AMD64 = "sha256:" + "e" * 64
+    ATTESTATION_ARM64 = "sha256:" + "f" * 64
+    INDEX_DIGEST = "sha256:411e972" + "1" * 57
+    OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
+    SOURCE_AMD64_DESCRIPTORS = [
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": RUNNABLE_AMD64,
+            "size": 1001,
+            "platform": {"architecture": "amd64", "os": "linux"},
+        },
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": ATTESTATION_AMD64,
+            "size": 2001,
+            "annotations": {
+                "vnd.docker.reference.digest": RUNNABLE_AMD64,
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            "platform": {"architecture": "unknown", "os": "unknown"},
+        },
+    ]
+    SOURCE_ARM64_DESCRIPTORS = [
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": RUNNABLE_ARM64,
+            "size": 1002,
+            "platform": {"architecture": "arm64", "os": "linux"},
+        },
+        {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": ATTESTATION_ARM64,
+            "size": 2002,
+            "annotations": {
+                "vnd.docker.reference.digest": RUNNABLE_ARM64,
+                "vnd.docker.reference.type": "attestation-manifest",
+            },
+            "platform": {"architecture": "unknown", "os": "unknown"},
+        },
+    ]
+    FINAL_DESCRIPTORS = SOURCE_AMD64_DESCRIPTORS + SOURCE_ARM64_DESCRIPTORS
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(
+            CI_WORKFLOW, "Assemble or verify final base candidate"
+        )
+        assert "push-by-digest" not in cls.script
+        assert "docker buildx imagetools create" in cls.script
+        assert "read_arch_digest" in cls.script
+
+    def _run_assembly(
+        self,
+        mode,
+        *,
+        plan_needs_build="true",
+        plan_digest="",
+        platforms=None,
+        attest="ok",
+        artifacts=(),
+        manifests=None,
+        amd64_descriptors=None,
+        arm64_descriptors=None,
+        plan_recovery_requested="false",
+        attestation_lookup=None,
+    ):
+        base = Path(tempfile.mkdtemp(prefix="candidate-assembly-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        runner_temp = base / "runner-temp"
+        runner_temp.mkdir()
+        digest_dir = runner_temp / "cage-digests"
+        if artifacts:
+            digest_dir.mkdir()
+            for arch, digest in artifacts:
+                (digest_dir / arch).write_text(digest + "\n", encoding="utf-8")
+
+        github_output = base / "github_output.txt"
+        github_output.write_text("", encoding="utf-8")
+        marker = base / "create_marker.txt"
+        marker.write_text("", encoding="utf-8")
+        state_file = base / "registry-state"
+        script_file = base / "assemble.sh"
+        script_file.write_text(
+            CURL_FUNC_ASSEMBLY + DOCKER_FUNC_ASSEMBLY + GH_FUNC + "\n" + self.script,
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env.update(
+            {
+                "RUNNER_TEMP": str(runner_temp),
+                "GITHUB_OUTPUT": str(github_output),
+                "GITHUB_REPOSITORY": "Sindycate/cage",
+                "GITHUB_ACTOR": "stub-actor",
+                "GH_TOKEN": "dummy-token",
+                "SHA": "a" * 40,
+                "PLAN_NEEDS_BUILD": plan_needs_build,
+                "PLAN_DIGEST": plan_digest,
+                "PLAN_RECOVERY_REQUESTED": plan_recovery_requested,
+                "STUB_MODE": mode,
+                "STUB_STATE_FILE": str(state_file),
+                "CREATE_MARKER": str(marker),
+                "STUB_ATTEST": attest,
+                "STUB_ATTEST_LOOKUP": attestation_lookup or (
+                    "present" if attest == "fail" else "absent"
+                ),
+                "STUB_DIGEST": self.INDEX_DIGEST,
+                "STUB_ARCH_AMD64_DIGEST": self.ARCH_INDEX_AMD64,
+                "STUB_ARCH_ARM64_DIGEST": self.ARCH_INDEX_ARM64,
+                "STUB_AMD64_DESCRIPTORS": json.dumps(
+                    amd64_descriptors or self.SOURCE_AMD64_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "STUB_ARM64_DESCRIPTORS": json.dumps(
+                    arm64_descriptors or self.SOURCE_ARM64_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "STUB_FINAL_DESCRIPTORS": json.dumps(
+                    manifests or self.FINAL_DESCRIPTORS,
+                    separators=(",", ":"),
+                ),
+                "IMAGE": f"ghcr.io/sindycate/cage/{self.IMAGE_NAME}",
+                "IMAGE_NAME": self.IMAGE_NAME,
+            }
+        )
+        if platforms is not None:
+            env["STUB_PLATFORMS"] = platforms
+        result = subprocess.run(
+            ["bash", str(script_file)],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        outputs = {}
+        for line in github_output.read_text(encoding="utf-8").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                outputs[key] = value
+        self.last_create_marker = marker.read_text(encoding="utf-8")
+        return result, outputs, "CREATE_CALLED" in self.last_create_marker
+
+    def test_fresh_candidate_is_assembled_from_exact_architecture_digests(self):
+        final_digests = [descriptor["digest"] for descriptor in self.FINAL_DESCRIPTORS]
+        self.assertIn(self.RUNNABLE_AMD64, final_digests)
+        self.assertNotIn(self.ARCH_INDEX_AMD64, final_digests)
+        result, outputs, created = self._run_assembly(
+            "absent_then_present",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(created)
+        self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
+        self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_fresh_assembly_rejects_invalid_source_indexes_before_create(self):
+        malformed_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        malformed_amd64[0]["size"] = "not-an-integer"
+
+        missing_arm64 = [copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS[0])]
+
+        duplicate_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        duplicate_amd64.append(copy.deepcopy(duplicate_amd64[1]))
+
+        mislinked_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        mislinked_arm64[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_AMD64
+
+        runnable_collision_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        runnable_collision_arm64[0]["digest"] = self.RUNNABLE_AMD64
+        runnable_collision_arm64[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_AMD64
+
+        attestation_collision_arm64 = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        attestation_collision_arm64[1]["digest"] = self.ATTESTATION_AMD64
+
+        arbitrary_media_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        arbitrary_media_amd64[0]["mediaType"] = (
+            "application/vnd.docker.distribution.manifest.v2+json"
+        )
+
+        nested_index_media_amd64 = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        nested_index_media_amd64[0]["mediaType"] = (
+            "application/vnd.oci.image.index.v1+json"
+        )
+
+        cases = (
+            ("malformed", {"amd64_descriptors": malformed_amd64}),
+            ("missing attestation", {"arm64_descriptors": missing_arm64}),
+            ("duplicate descriptor", {"amd64_descriptors": duplicate_amd64}),
+            ("mis-linked attestation", {"arm64_descriptors": mislinked_arm64}),
+            (
+                "runnable digest collision",
+                {"arm64_descriptors": runnable_collision_arm64},
+            ),
+            (
+                "attestation digest collision",
+                {"arm64_descriptors": attestation_collision_arm64},
+            ),
+            (
+                "arbitrary runnable media type",
+                {"amd64_descriptors": arbitrary_media_amd64},
+            ),
+            (
+                "nested index runnable media type",
+                {"amd64_descriptors": nested_index_media_amd64},
+            ),
+        )
+        for name, overrides in cases:
+            with self.subTest(name=name):
+                result, _, created = self._run_assembly(
+                    "absent_then_present",
+                    artifacts=(
+                        ("amd64", self.ARCH_INDEX_AMD64),
+                        ("arm64", self.ARCH_INDEX_ARM64),
+                    ),
+                    **overrides,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(
+                    created,
+                    f"invalid source index must fail before CREATE_CALLED: {result.stderr}",
+                )
+
+    def test_partial_rerun_reuses_candidate_that_appeared_after_planning(self):
+        result, outputs, created = self._run_assembly(
+            "present", plan_needs_build="true"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created, "a rerun must not recreate an existing candidate")
+        self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
+        self.assertEqual(outputs.get("needs_attestation"), "false", outputs)
+
+    def test_failed_final_attestation_rerun_recovers_matching_unchanged_index(self):
+        # The original plan authorized the architecture builds and the index
+        # write succeeded, but the final actions/attest step failed. A
+        # gh-run-rerun-failed-equivalent assembly sees the existing tag and may
+        # only request attestation after matching the retained artifacts.
+        result, outputs, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created, "recovery must never recreate the existing tag")
+        self.assertEqual(outputs.get("digest"), self.INDEX_DIGEST)
+        self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_plan_recovery_state_also_reuses_matching_unchanged_index(self):
+        result, outputs, created = self._run_assembly(
+            "present",
+            plan_needs_build="false",
+            plan_recovery_requested="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(created)
+        self.assertEqual(outputs.get("needs_attestation"), "true", outputs)
+
+    def test_recovery_rejects_existing_index_with_wrong_nested_child(self):
+        # Regression for the real shape: the final index must contain the
+        # runnable bf746c... child, never the dc11626... parent index digest.
+        wrong_child = self.ARCH_INDEX_AMD64
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["digest"] = wrong_child
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created, "mismatched recovery must never overwrite the tag")
+
+    def test_recovery_rejects_extra_runnable_platform_in_nested_index(self):
+        extra_runnable = "sha256:" + "9" * 64
+        arm64_descriptors = copy.deepcopy(self.SOURCE_ARM64_DESCRIPTORS)
+        arm64_descriptors.insert(
+            1,
+            {
+                "mediaType": self.OCI_MANIFEST_MEDIA_TYPE,
+                "digest": extra_runnable,
+                "size": 1003,
+                "platform": {"architecture": "ppc64le", "os": "linux"},
+            },
+        )
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            arm64_descriptors=arm64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected runnable platform", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_missing_architecture_attestation(self):
+        amd64_descriptors = [copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS[0])]
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_duplicate_architecture_attestation(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors.append(copy.deepcopy(amd64_descriptors[1]))
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_mislinked_architecture_attestation(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors[1]["annotations"][
+            "vnd.docker.reference.digest"
+        ] = self.RUNNABLE_ARM64
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_wrong_architecture_attestation_reference_type(self):
+        amd64_descriptors = copy.deepcopy(self.SOURCE_AMD64_DESCRIPTORS)
+        amd64_descriptors[1]["annotations"][
+            "vnd.docker.reference.type"
+        ] = "not-attestation-manifest"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            amd64_descriptors=amd64_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("linked OCI BuildKit attestation", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_missing_final_child_descriptor(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.pop()
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_extra_final_child_descriptor(self):
+        extra = "sha256:" + "9" * 64
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.append(
+            {
+                "mediaType": self.OCI_MANIFEST_MEDIA_TYPE,
+                "digest": extra,
+                "size": 3001,
+                "platform": {"architecture": "unknown", "os": "unknown"},
+            }
+        )
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_duplicate_final_descriptor(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors.append(copy.deepcopy(final_descriptors[0]))
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("duplicate child descriptors", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_changed_size(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["size"] += 1
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_changed_media_type(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_extra_platform_field(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["platform"]["variant"] = "v8"
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_final_descriptor_with_extra_annotation(self):
+        final_descriptors = copy.deepcopy(self.FINAL_DESCRIPTORS)
+        final_descriptors[0]["annotations"] = {"unexpected": "value"}
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+            manifests=final_descriptors,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete child descriptor set", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_existing_index_when_plan_digest_differs(self):
+        wrong_index = "sha256:" + "2" * 64
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            plan_digest=wrong_index,
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("changed between plan and assembly", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_requires_both_architecture_artifacts(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(("amd64", self.ARCH_INDEX_AMD64),),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing or unsafe architecture digest artifact", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_extra_architecture_artifact(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+                ("ppc64le", self.ARCH_INDEX_AMD64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unexpected", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_fails_closed_when_attestation_lookup_is_ambiguous(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="missing",
+            attestation_lookup="error",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unable to determine attestation state", result.stderr)
+        self.assertFalse(created)
+
+    def test_recovery_rejects_present_but_invalid_attestation(self):
+        result, _, created = self._run_assembly(
+            "present",
+            plan_needs_build="true",
+            attest="fail",
+            artifacts=(
+                ("amd64", self.ARCH_INDEX_AMD64),
+                ("arm64", self.ARCH_INDEX_ARM64),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed the exact policy", result.stderr)
+        self.assertFalse(created)
+
+    def test_missing_architecture_artifact_fails_before_assembly(self):
+        result, _, created = self._run_assembly(
+            "absent_then_present", artifacts=(("amd64", self.ARCH_INDEX_AMD64),)
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing or unsafe architecture digest artifact", result.stderr)
+        self.assertFalse(created)
+
+    def test_existing_candidate_with_mismatched_platforms_fails_closed(self):
+        result, _, created = self._run_assembly(
+            "present", platforms="linux/amd64 linux/arm64 linux/arm/v7"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must contain exactly linux/amd64 and linux/arm64", result.stderr)
+        self.assertFalse(created)
+
+    def test_existing_candidate_with_failed_attestation_fails_closed(self):
+        result, _, created = self._run_assembly("present", attest="fail")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(created)
+
+    def test_candidate_disappearance_after_verified_plan_is_not_recreated(self):
+        result, _, created = self._run_assembly(
+            "absent", plan_needs_build="false"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to recreate it", result.stderr)
+        self.assertFalse(created)
+
+    def test_ambiguous_registry_status_fails_closed_before_assembly(self):
+        result, _, created = self._run_assembly("server")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous registry status (503)", result.stderr)
+        self.assertFalse(created)
+
+
+class CandidateLeafAssemblyTests(CandidateAssemblyTests):
+    """Run the same recovery contract against the leaf assembly path."""
+
+    IMAGE_NAME = "claude-code"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = _extract_run_block(
+            CI_WORKFLOW, "Assemble or verify final leaf candidate"
+        )
+        assert "push-by-digest" not in cls.script
+        assert "docker buildx imagetools create" in cls.script
+        assert "read_arch_digest" in cls.script
+
 
 class ManifestAssemblerTests(unittest.TestCase):
     """Execute the candidate manifest generator against stubbed GHCR/docker/gh."""
@@ -1207,7 +2087,7 @@ class ManifestAssemblerTests(unittest.TestCase):
         assert ". .github/scripts/ghcr-status.sh" in cls.script
         assert "release-candidate-" in cls.script
 
-    def test_manifest_assembler_resolves_and_creates_valid_schema_v3_manifest(self):
+    def _run_manifest(self, *, mode="present", platforms=None, attest="ok", missing_repo=None):
         base = Path(tempfile.mkdtemp(prefix="manifest-assemble-"))
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         script_file = base / "assemble.sh"
@@ -1215,6 +2095,7 @@ class ManifestAssemblerTests(unittest.TestCase):
             CURL_FUNC + DOCKER_FUNC_CANDIDATE + GH_FUNC + "\n" + self.script,
             encoding="utf-8"
         )
+        attest_log = base / "attestations.log"
         env = dict(os.environ)
         sha = "a" * 40
         env["SHA"] = sha
@@ -1224,16 +2105,27 @@ class ManifestAssemblerTests(unittest.TestCase):
         env["GITHUB_REPOSITORY"] = "Sindycate/cage"
         env["GITHUB_ACTOR"] = "stub-actor"
         env["GH_TOKEN"] = "dummy-token"
-        env["STUB_MODE"] = "present"
+        env["STUB_MODE"] = mode
+        env["STUB_ATTEST"] = attest
+        env["STUB_ATTEST_LOG"] = str(attest_log)
+        if platforms is not None:
+            env["STUB_PLATFORMS"] = platforms
+        if missing_repo is not None:
+            env["STUB_MISSING_REPO"] = missing_repo
         result = subprocess.run(
             ["bash", str(script_file)], env=env, capture_output=True, text=True,
             cwd=str(ROOT),
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
         manifest_file = ROOT / f"release-candidate-{sha}.json"
-        self.assertTrue(manifest_file.is_file())
         self.addCleanup(manifest_file.unlink, missing_ok=True)
+        return result, manifest_file, attest_log
+
+    def test_manifest_assembler_resolves_and_creates_valid_schema_v3_manifest(self):
+        result, manifest_file, attest_log = self._run_manifest()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(manifest_file.is_file())
         manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        sha = "a" * 40
         self.assertEqual(manifest["schema"], "cage.release-candidate")
         self.assertEqual(manifest["schema_version"], 3)
         self.assertEqual(manifest["source_sha"], sha)
@@ -1247,6 +2139,29 @@ class ManifestAssemblerTests(unittest.TestCase):
             self.assertEqual(info["name"], f"ghcr.io/sindycate/cage/{image_name}")
             self.assertEqual(info["tag"], f"candidate-{sha}")
             self.assertTrue(info["digest"].startswith("sha256:"))
+        self.assertEqual(
+            len(attest_log.read_text(encoding="utf-8").splitlines()), 5,
+            "final candidate verification must attest all five image indexes",
+        )
+
+    def test_manifest_verification_fails_if_any_of_the_five_candidates_is_missing(self):
+        result, manifest_file, _ = self._run_manifest(missing_repo="token-monitor")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("candidate token-monitor is not present", result.stderr)
+        self.assertFalse(manifest_file.exists())
+
+    def test_manifest_verification_requires_exact_platform_set_for_all_candidates(self):
+        result, manifest_file, _ = self._run_manifest(
+            platforms="linux/amd64 linux/arm64 linux/arm/v7"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("must contain exactly linux/amd64 and linux/arm64", result.stderr)
+        self.assertFalse(manifest_file.exists())
+
+    def test_manifest_verification_fails_on_any_candidate_attestation_failure(self):
+        result, manifest_file, _ = self._run_manifest(attest="fail")
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(manifest_file.exists())
 
 
 class VersionTagFailClosedTests(unittest.TestCase):
@@ -1442,7 +2357,7 @@ exit 94
     def test_missing_platform_fails_closed_before_pull(self):
         result, calls = self._run_gate("missing-arm64")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("missing linux/arm64", result.stderr)
+        self.assertIn("must contain exactly linux/amd64 and linux/arm64", result.stderr)
         self.assertFalse(any("pull" in call for call in calls))
 
     def test_anonymous_pull_failure_fails_closed(self):

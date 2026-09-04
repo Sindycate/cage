@@ -3,6 +3,108 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-04 — Candidate source digest and media validation tightened
+
+The pre-create native source-index check now rejects a child digest repeated
+across the amd64 and arm64 parent indexes regardless of descriptor metadata,
+covering both runnable and BuildKit attestation collisions. It also requires
+the runnable child to use `application/vnd.oci.image.manifest.v1+json`, so a
+nested OCI index or arbitrary media type cannot be assembled as a runnable
+manifest. The post-create complete descriptor-union check remains unchanged;
+invalid sources fail before `imagetools create` and existing candidates are
+never replaced or retagged.
+
+Focused supply-chain coverage passes (`132 passed`), the complete Python suite
+passes (`710 passed, 15 skipped`), and shell/Python/Node syntax, Compose
+validation, and `git diff --check` pass locally.
+
+## 2026-09-04 — Candidate source validation retained for reruns
+
+Native base and leaf architecture digest artifacts now remain available for at
+least 30 days, matching the supported GitHub Actions rerun window. Both fresh
+assembly paths validate each downloaded parent architecture index before
+`imagetools create`: complete descriptor shape, exactly one expected runnable
+platform, exactly one linked BuildKit attestation, and duplicate rejection.
+The existing post-create complete descriptor-union comparison remains in place,
+and no existing candidate is replaced or retagged.
+
+Focused supply-chain coverage passes (`132 passed`), the complete Python suite
+passes (`710 passed, 15 skipped`), and shell/Python/Node syntax, Compose
+validation, and `git diff --check` pass. PR run `33856610399` passed all
+ordinary gates; its candidate jobs were correctly skipped because the pushed
+branch is not `refs/heads/main`.
+
+## 2026-09-03 — Candidate attestation recovery gap repaired
+
+An interrupted final `actions/attest` step can leave an immutable candidate
+index present but unattested. Base and leaf assembly now distinguish that
+narrow state from a present-but-invalid attestation: they query the repository
+attestation state, load the exact SHA-named amd64 and arm64 digest artifacts,
+inspect each parent architecture index, require exactly one expected runnable
+child and no other runnable platform, and compare the final index's complete
+child-descriptor set with their union, including unknown/unknown
+SBOM/provenance children, before requesting attestation of the unchanged index.
+Existing invalid,
+ambiguous, changed, or artifact-missing states still fail closed, and recovery
+never invokes `imagetools create`.
+
+Focused supply-chain regression coverage exercises failed-attestation reruns,
+artifact-matching recovery, mismatched indexes, changed descriptor identity,
+changed planned digests, missing/extra artifacts, and invalid existing
+attestations for both base and leaf assembly paths. Source architecture indexes
+must have exactly one linked BuildKit attestation; final comparison preserves
+complete descriptor identity and rejects duplicates before union normalization.
+The focused suite passes (`130 passed`) and the complete Python suite passes
+(`708 passed, 15 skipped`). The release manifest remains schema-v3 and
+Iteration 2 caching remains intentionally unimplemented.
+
+## 2026-09-03 — Native ARM candidate pipeline measured
+
+Iteration 1 replaces the QEMU multi-platform candidate builds with native
+architecture jobs: `ubuntu-24.04` for `linux/amd64` and `ubuntu-24.04-arm` for
+`linux/arm64`. The base is assembled first from digest-only architecture
+artifacts; the four leaves then consume its exact assembled digest through an
+image-by-architecture matrix. Final candidate assembly is serialized per image
+and SHA, rechecks the authoritative GHCR status, and verifies all five final
+indexes, exact runnable platforms, and exact-source `ci.yml` attestations before
+writing the unchanged schema-v3 manifest. It ignores only `unknown/unknown`
+attestation descriptors when checking the runnable platform set. QEMU and
+mutable temporary architecture tags are absent. The final verifier explicitly handles Bash command-substitution
+failure semantics so a failed attestation cannot be masked.
+
+Local validation: the complete Python suite passes (`657 passed, 15 skipped`);
+workflow YAML parsing, Python compilation, Bash/Node syntax, Compose rendering,
+focused release-supply-chain tests, and `git diff --check` pass. Iteration 2
+cache work has not started.
+
+The isolated benchmark used only temporary branch refs and SHA candidate tags;
+it did not touch a version tag, `latest`, a GitHub Release, or production
+images. Queue time is from workflow creation to the first started job; runner
+execution is from that first job to the final candidate job. The PR #11 baseline
+was run `33737889348`; the two native runs were `33755195224` and
+`33756043306`.
+
+| run | queue | runner execution | wall (created → final) | candidate path (plan → final) |
+| --- | ---: | ---: | ---: | ---: |
+| PR #11 baseline | 2s | 14m46s | 14m49s | 10m24s |
+| native run 1 | 2s | 8m06s | 8m09s | 5m29s |
+| native run 2 | 2s | 8m05s | 8m08s | 5m33s |
+
+Ordinary branch-validation run `33757065706` lasted about 2m45s and skipped
+all candidate jobs; it is validation evidence only, not candidate-path timing
+evidence. The candidate timings above are specifically from runs
+`33755195224` and `33756043306`.
+
+Native base execution was 1m28s and 1m26s on arm64 (amd64 was 1m06s and
+1m11s); the slowest leaf was 1m22s and 1m11s. Both runs passed every test,
+architecture build, index assembly, final five-image verification, exact-source
+attestation check, and schema-v3 manifest upload. The two native runs average
+8m09s wall time, a 6m40s improvement over the baseline (45.0%). Native
+execution is already below the 9–11 minute acceptance range, so Iteration 2 is
+not recommended: cache policy, refresh epochs, and cache-poisoning controls
+would add complexity without a demonstrated need. The intentional cold-build
+path remains unchanged.
+
 ## 2026-09-03 — Release speedup prepared for v0.36.4
 
 The release-speedup work and its interrupt-safe PID-file regression follow-up
