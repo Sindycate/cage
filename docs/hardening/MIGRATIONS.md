@@ -6,6 +6,8 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.5 — 2026-09-04
+
 ### Native multi-architecture candidate builds
 
 No user configuration migration. This maintainer-only CI change builds each

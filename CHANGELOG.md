@@ -5,6 +5,8 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.5 — 2026-09-04
+
 - build candidate images one architecture at a time on native amd64 and arm64
   runners, hand off only immutable architecture digests, and assemble the
   final multi-architecture indexes without QEMU; retain exact-source
