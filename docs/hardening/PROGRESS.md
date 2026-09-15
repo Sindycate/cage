@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-15 — Token Monitor model accounting prepared for v0.36.8
+
+Preserved the pinned collector's exact session/model components in a bounded
+private sidecar before its session archive normalization. Sidecar attachment
+requires exact model, provider and component equality; richer evidence may
+upgrade equal legacy copies, while conflicting evidence still stops upload.
+A supplemental read-only Codex event reader follows duplicate, regression and
+fork-replay rules and supplies cache-write counts only when they reconcile with
+Tokscale's per-model buckets. Writes are reclassified from input without
+changing token totals. The upstream pin and network/mount boundaries remain
+unchanged, and the private extension is removed at the hub wire boundary.
+
+Provider rates now price models and components independently, accept explicit
+cache-write rates, preserve known partial costs and distinguish missing rates,
+missing components, unreconciled writes and provider attribution per period.
+Old catalog costs cannot establish free usage or cover new cache-write charges.
+The source installer, release archive, Docker context and syntax gates include
+the new adapter; upstream event-rule attribution is included in the notices.
+
+Validation: focused monitor regressions, installer/bootstrap checks and publisher
+checks pass (two process-inspection tests required unsandboxed `ps`). Two real
+Docker monitor smoke tests pass, including a model switch, repeated token event,
+cache writes and source isolation. A private read-only historical mixed-model
+scan recovered exact components and writes without changing the parser's model
+token totals. Private fixtures, provider rates and raw evidence are outside the
+repository. The canonical publisher owns the final full-suite, archive, CI and
+public verification gates.
+
 ## 2026-09-06 — Low-value code audit prepared for v0.36.7
 
 Inspected all tracked major directories: root frontends/build files,

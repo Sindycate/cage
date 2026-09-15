@@ -114,12 +114,14 @@ server.listen(17321, '127.0.0.1', () => {
   try {
     ensureScanDirectory(`${codexHome}/sessions`);
     ensureScanDirectory(`${codexHome}/archived_sessions`);
+    fs.rmSync(`${process.env.TOKEN_MONITOR_SHARED_DIR || '/state'}/model-token-usage.json`, { force: true });
   } catch (error) {
     fail(`scan directory is unsafe: ${error.message}`);
     return;
   }
   const environment = {
     ...process.env,
+    CAGE_MONITOR_ACCOUNTING_PRELOAD: '1',
     TOKEN_MONITOR_HUB_URL: 'http://127.0.0.1:17321',
     TOKEN_MONITOR_SECRET: loopbackSecret,
     TOKEN_MONITOR_CLIENTS: 'codex',
@@ -135,7 +137,7 @@ server.listen(17321, '127.0.0.1', () => {
     CODEX_HOME: codexHome,
     TOKEN_MONITOR_SHARED_DIR: String(process.env.TOKEN_MONITOR_SHARED_DIR || '/state')
   };
-  child = spawn(process.execPath, ['/opt/token-monitor/src/agent/agent.js', '--once'], {
+  child = spawn(process.execPath, ['--require', '/usr/local/lib/cage-token-monitor-accounting.js', '/opt/token-monitor/src/agent/agent.js', '--once'], {
     env: environment,
     stdio: ['ignore', 'ignore', 'pipe']
   });

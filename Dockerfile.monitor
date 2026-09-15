@@ -22,8 +22,11 @@ RUN set -eux; \
     /opt/token-monitor/node_modules/.bin/tokscale --version; \
     node --check /opt/token-monitor/src/agent/agent.js
 
+COPY THIRD_PARTY_NOTICES.md /usr/local/share/cage-third-party-notices.md
+COPY token-monitor-accounting.js /usr/local/lib/cage-token-monitor-accounting.js
 COPY token-monitor-collector.js /usr/local/bin/cage-token-monitor-collector
 RUN chmod 755 /usr/local/bin/cage-token-monitor-collector && \
+    chmod 644 /usr/local/lib/cage-token-monitor-accounting.js /usr/local/share/cage-third-party-notices.md && \
     chmod -R a+rX /opt/token-monitor
 
 ENTRYPOINT ["/usr/local/bin/cage-token-monitor-collector"]

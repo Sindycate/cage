@@ -80,13 +80,23 @@ price schedule. A missing rate remains unpriced and is reported. A legacy
 model-only price may be used only when the provider is unambiguous; otherwise
 it must not create a cost estimate.
 
-For a single-model session, Cage may use sufficient input/output/cache
-components and a matching private rate. For a multi-model session, pricing is
-allowed only when the schema supplies authoritative per-model costs covering
-every model (or equivalent per-model component evidence). Otherwise Cage keeps
-the token counters, leaves that session's cost unpriced, and reports the
-models as missing evidence. It never allocates aggregate input/output/cache
-tokens or one model's rate across another model.
+The collector preserves per-session, per-model input/output/cache components
+in a private bounded sidecar before upstream normalization folds them into
+session totals. Cage joins it to archive periods only when every component,
+model and provider total matches. Supplemental Codex cache-write counts must
+reconcile with the parser's exact per-model input/output/cache-read counters;
+fork replay, duplicate snapshots and cumulative resets do not authorize token
+allocation guesses. Writes are a subset of input and are reclassified, not
+added to total tokens.
+
+Provider-qualified rates apply independently to each model. Missing rates leave
+only the affected components unpriced. Legacy mixed sessions without source
+components remain unpriced. `--cache-write` supplies an explicit write rate;
+Cage does not assume one. Per-period status separates missing rates, missing
+components, unreconciled writes and unattributed providers. Private component
+evidence is stripped at the upload boundary, preserving the hub wire contract.
+The displayed amount remains an estimate under configured rates, not an invoice
+including request-specific service tiers or long-context adjustments.
 
 ## Automatic reconciliation and upload recovery
 

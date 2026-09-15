@@ -5,6 +5,17 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.8 — 2026-09-15
+
+- retain per-model input, output, cache-read and cache-write components through
+  the Token Monitor collector so switching models does not discard calculable
+  provider-specific costs;
+- reconcile Codex cache-write events against the parser's exact model totals,
+  price writes with an explicit `--cache-write` rate, and preserve token totals;
+- keep known portions of a partially priced session, report coverage for today,
+  month and all time, and distinguish missing rates, missing usage components,
+  unreconciled writes and unattributed providers.
+
 ## 0.36.7 — 2026-09-06
 
 - remove unused imports, an uncalled Desktop error helper, an overwritten bridge

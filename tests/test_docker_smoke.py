@@ -74,6 +74,53 @@ class DockerSmokeTests(unittest.TestCase):
                 (managed_home / "sessions" / direct_session.name).exists()
             )
 
+    def test_managed_host_monitor_prices_model_switches_and_cache_writes_from_codex_events(self):
+        image = os.environ.get("CAGE_MONITOR_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_MONITOR_SMOKE_IMAGE to a built collector image")
+        from datetime import datetime, timezone
+        stamp = datetime.now(timezone.utc).isoformat()
+        def usage(input_tokens, output, cache, writes):
+            return {"input_tokens": input_tokens, "output_tokens": output,
+                    "cached_input_tokens": cache, "cache_write_input_tokens": writes,
+                    "reasoning_output_tokens": 0, "total_tokens": input_tokens + output}
+        def event(total, last):
+            return {"type": "event_msg", "timestamp": stamp,
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": total, "last_token_usage": last}}}
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir(); (source / "config.toml").write_text("")
+            record = monitor.register_host_source(root / "state", source, copy_auth=False, allow_replacement=True)
+            home = monitor.host_source_home(root / "state", record)
+            a = usage(100, 10, 40, 50)
+            rows = [
+                {"type": "session_meta", "timestamp": stamp, "payload": {"id": "test-session", "model_provider": "zllm"}},
+                {"type": "turn_context", "timestamp": stamp, "payload": {"model": "model-a"}},
+                event(a, a), event(a, a),
+                {"type": "turn_context", "timestamp": stamp, "payload": {"model": "model-b"}},
+                event(usage(300, 30, 140, 130), usage(200, 20, 100, 80)),
+            ]
+            (home / "sessions" / "test-session.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            payload = monitor._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
+            for period in ("today", "month", "allTime"):
+                self.assertEqual(payload[period]["totalTokens"], 330)
+                session = next(iter(payload[period]["sessions"].values()))
+                parts = session["modelTokenUsage"]
+                self.assertEqual(parts["model-a"]["cacheWriteTokens"], 50)
+                self.assertEqual(parts["model-b"]["cacheWriteTokens"], 80)
+                self.assertEqual(parts["model-a"]["inputTokens"], 10)
+                self.assertTrue(parts["model-b"]["cacheWriteVerified"])
+            monitor.save_pricing(root / "state", {
+                f"zllm:{model}": {"input_per_million": 2, "output_per_million": 10,
+                                  "cache_read_per_million": .2, "cache_write_per_million": 2.5}
+                for model in ("model-a", "model-b")
+            })
+            streams, status = monitor.aggregate_provider_summaries(root / "state", [(record, payload)])
+            self.assertAlmostEqual(streams["zllm"][0]["today"]["costUsd"], .000713)
+            self.assertTrue(status["period_pricing"]["today"]["cost_complete"])
+
     def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)

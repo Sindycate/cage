@@ -8,6 +8,7 @@
 !entrypoint-opencode.sh
 !codex-remote.py
 !token-monitor-collector.js
+!token-monitor-accounting.js
 !cage-user-remap.py
 !cage_core/
 !cage_core/**
@@ -16,3 +17,4 @@ cage_core/**/*.pyc
 cage_core/**/*.pyo
 !mcp-relay
 !host-cmd-relay
+!THIRD_PARTY_NOTICES.md

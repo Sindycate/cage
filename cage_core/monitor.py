@@ -2920,7 +2920,7 @@ def load_pricing(config_root: Path) -> dict[str, dict[str, float]]:
     if not isinstance(models, dict) or len(models) > 1024:
         raise MonitorError("monitor pricing models are invalid")
     result: dict[str, dict[str, float]] = {}
-    allowed = {"input_per_million", "output_per_million", "cache_read_per_million"}
+    allowed = {"input_per_million", "output_per_million", "cache_read_per_million", "cache_write_per_million"}
     for raw_model, raw_rates in models.items():
         model = _validate_pricing_key(raw_model)
         if not isinstance(raw_rates, dict) or set(raw_rates).difference(allowed):
@@ -2942,7 +2942,7 @@ def save_pricing(config_root: Path, models: dict[str, dict[str, float]]) -> None
         model_id = _validate_pricing_key(model)
         if not isinstance(rates, dict):
             raise MonitorError("monitor pricing entry has an invalid shape")
-        allowed = {"input_per_million", "output_per_million", "cache_read_per_million"}
+        allowed = {"input_per_million", "output_per_million", "cache_read_per_million", "cache_write_per_million"}
         if set(rates).difference(allowed) or not ({"input_per_million", "output_per_million"} & set(rates)):
             raise MonitorError("monitor pricing entry has an invalid shape")
         normalized[model_id] = {key: _validate_unit_price(value) for key, value in rates.items()}  # type: ignore[dict-item]
@@ -2959,6 +2959,7 @@ def set_model_pricing(
     input_per_million: float | None,
     output_per_million: float | None,
     cache_read_per_million: float | None,
+    cache_write_per_million: float | None = None,
 ) -> None:
     model_id = _validate_pricing_key(model)
     if input_per_million is None and output_per_million is None:
@@ -2969,6 +2970,7 @@ def set_model_pricing(
             "input_per_million": _validate_unit_price(input_per_million, optional=True),
             "output_per_million": _validate_unit_price(output_per_million, optional=True),
             "cache_read_per_million": _validate_unit_price(cache_read_per_million, optional=True),
+            "cache_write_per_million": _validate_unit_price(cache_write_per_million, optional=True),
         }.items()
         if value is not None
     }
@@ -2995,6 +2997,7 @@ def _write_tokscale_pricing(config_root: Path, state_path: Path) -> None:
         "input_per_million": "input_cost_per_million_tokens",
         "output_per_million": "output_cost_per_million_tokens",
         "cache_read_per_million": "cache_read_input_token_cost_per_million_tokens",
+        "cache_write_per_million": "cache_creation_input_token_cost_per_million_tokens",
     }
     for model, rates in models.items():
         # Tokscale accepts model-only keys.  Provider-qualified prices are
@@ -3283,6 +3286,7 @@ def _outbound_payload(config_root: Path, payload: dict[str, Any]) -> dict[str, A
             pseudonymous_key = f"{client}:{pseudonym}"
             if pseudonymous_key in pseudonymous:
                 raise MonitorError("collector session pseudonym collision")
+            session.pop("modelTokenUsage", None)
             session["sessionId"] = pseudonym
             pseudonymous[pseudonymous_key] = session
         period["sessions"] = pseudonymous
@@ -3349,6 +3353,37 @@ def _archive_sessions_for_payload(state_path: Path, payload: dict[str, Any]) -> 
         if isinstance(period, dict):
             period["sessions"] = values
     payload.pop("sessionDetailsOmitted", None)
+
+
+
+def _restore_model_token_usage(state_path: Path, payload: dict[str, Any]) -> None:
+    sidecar = state_path / "model-token-usage.json"
+    if not sidecar.exists():
+        return  # compatible with existing collector images and retained archives
+    _secure_collector_file(sidecar, max_bytes=MAX_ARCHIVE_BYTES)
+    value = _read_json(sidecar, max_bytes=MAX_ARCHIVE_BYTES)
+    if not isinstance(value, dict) or set(value) != {"version", "observations"} or value["version"] != 1:
+        raise MonitorError("collector model token sidecar is invalid")
+    observations = value["observations"]
+    if not isinstance(observations, list) or len(observations) > 16 or any(not isinstance(o, dict) for o in observations):
+        raise MonitorError("collector model token observations are invalid")
+    for name in ("today", "month", "allTime"):
+        for key, session in payload[name].get("sessions", {}).items():
+            matches = []
+            for observation in observations:
+                candidate = observation.get(key)
+                if not isinstance(candidate, dict):
+                    continue
+                if all(candidate.get(k) == session.get(k) for k in (
+                    "totalTokens", *TOKEN_COMPONENT_FIELDS, "models", "providers"
+                )):
+                    evidence = candidate.get("modelTokenUsage")
+                    if not isinstance(evidence, dict):
+                        raise MonitorError("collector model token evidence is missing")
+                    _model_token_usage({**session, "modelTokenUsage": evidence})
+                    matches.append(evidence)
+            if matches and all(m == matches[0] for m in matches):
+                session["modelTokenUsage"] = matches[0]
 
 
 def _run_collector(
@@ -3464,6 +3499,7 @@ def _run_collector(
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MonitorError(f"Token Monitor collector output is invalid: {exc}") from exc
         _archive_sessions_for_payload(state_path, payload)
+        _restore_model_token_usage(state_path, payload)
         return _validate_summary(payload, record.device_id)
     finally:
         output_path.unlink(missing_ok=True)
@@ -4060,6 +4096,27 @@ def _select_session(candidates: list[tuple[VolumeRegistration, dict[str, Any]]])
         winner_dominates = _session_dominates(winner, candidate)
         if candidate_dominates and not winner_dominates:
             winner = candidate
+        elif candidate_dominates and winner_dominates:
+            old = winner.get("modelTokenUsage")
+            new = candidate.get("modelTokenUsage")
+            if old is not None and new is not None and old != new:
+                old_parts = _model_token_usage(winner)
+                new_parts = _model_token_usage(candidate)
+                merged = dict(old)
+                for model in old_parts:
+                    left, right = old_parts[model], new_parts[model]
+                    same_base = (
+                        left["inputTokens"] + left["cacheWriteTokens"] == right["inputTokens"] + right["cacheWriteTokens"]
+                        and left["outputTokens"] == right["outputTokens"]
+                        and left["cacheReadTokens"] == right["cacheReadTokens"]
+                    )
+                    if not same_base or (left["cacheWriteVerified"] and right["cacheWriteVerified"] and left != right):
+                        raise MonitorError("conflicting model token evidence; hub snapshot was preserved")
+                    if right["cacheWriteVerified"]:
+                        merged[model] = new[model]
+                winner = {**winner, "modelTokenUsage": merged}
+            elif old is None and new is not None:
+                winner = candidate
         elif not candidate_dominates and not winner_dominates:
             raise MonitorError(
                 "conflicting copies of one Codex session; hub snapshot was preserved"
@@ -4114,62 +4171,110 @@ def _project_for_candidates(
     return "cage-project-unattributed", "Cage: Unattributed"
 
 
-def _custom_session_cost(
+TOKEN_COMPONENT_FIELDS = ("inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens")
+
+
+def _model_token_usage(session: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate disjoint per-model buckets against the unchanged source totals."""
+    models = _session_map(session, "models")
+    raw = session.get("modelTokenUsage")
+    if raw is None:
+        if len(models) != 1 or sum(models.values()) != _session_number(session, "totalTokens"):
+            return {}
+        if sum(_session_number(session, k) for k in TOKEN_COMPONENT_FIELDS) != sum(models.values()):
+            return {}
+        return {next(iter(models)): {
+            **{k: _session_number(session, k) for k in TOKEN_COMPONENT_FIELDS},
+            "cacheWriteVerified": True,
+        }}
+    if not isinstance(raw, dict) or set(raw) != set(models):
+        raise MonitorError("collector model token evidence does not cover its models")
+    result = {}
+    for model, parts in raw.items():
+        if not isinstance(parts, dict) or set(parts) != set(TOKEN_COMPONENT_FIELDS) | {"totalTokens", "cacheWriteVerified"}:
+            raise MonitorError("collector model token evidence has an invalid shape")
+        if type(parts["cacheWriteVerified"]) is not bool:
+            raise MonitorError("collector model cache-write evidence is invalid")
+        values = {k: _session_number(parts, k) for k in TOKEN_COMPONENT_FIELDS}
+        if any(not v.is_integer() for v in values.values()):
+            raise MonitorError("collector model token evidence is not integral")
+        if sum(values.values()) != models[model] or _session_number(parts, "totalTokens") != models[model]:
+            raise MonitorError("collector model token components do not reconcile")
+        result[model] = {**values, "cacheWriteVerified": parts["cacheWriteVerified"]}
+    if sum(models.values()) != _session_number(session, "totalTokens"):
+        raise MonitorError("collector model tokens do not reconcile")
+    for keys in (("inputTokens", "cacheWriteTokens"), ("outputTokens",), ("cacheReadTokens",)):
+        if sum(parts[k] for parts in result.values() for k in keys) != sum(_session_number(session, k) for k in keys):
+            raise MonitorError("collector model token evidence disagrees with session components")
+    return result
+
+
+def _price_session(
     session: dict[str, Any],
     pricing: dict[str, dict[str, float]],
     *,
     allowed_provider_ids: frozenset[str] | set[str],
-) -> tuple[str, float, int] | None:
-    """Price an exactly attributable single-model session from its components."""
-
+) -> tuple[dict[str, float], int, dict[str, set[str]]]:
     provider = session_provider(session, allowed_provider_ids=allowed_provider_ids)
-    if provider == UNATTRIBUTED_PROVIDER:
-        return None
     models = _session_map(session, "models")
-    total = round(_session_number(session, "totalTokens"))
-    if len(models) != 1:
-        return None
-    model, model_tokens = next(iter(models.items()))
-    # Provider-qualified prices take precedence.  The old model-only form is
-    # retained only for an unambiguous OpenAI session.  Applying a legacy rate
-    # to a proxy provider could produce a plausible but wrong cost.
-    rates = pricing.get(f"{provider}:{model}")
-    if rates is None and provider == "openai-api":
-        rates = pricing.get(model)
-    if rates is None or round(model_tokens) != total:
-        return None
-    input_tokens = round(_session_number(session, "inputTokens"))
-    output_tokens = round(_session_number(session, "outputTokens"))
-    cache_read = round(_session_number(session, "cacheReadTokens"))
-    cache_write = round(_session_number(session, "cacheWriteTokens"))
-    cost = 0.0
+    components = _model_token_usage(session)
+    costs: dict[str, float] = {}
     covered = 0
-    input_rate = rates.get("input_per_million")
-    output_rate = rates.get("output_per_million")
-    cache_rate = rates.get("cache_read_per_million", input_rate)
-    if input_rate is not None:
-        cost += (input_tokens + cache_write) * input_rate / 1_000_000
-        covered += input_tokens + cache_write
-    if output_rate is not None:
-        cost += output_tokens * output_rate / 1_000_000
-        covered += output_tokens
-    if cache_rate is not None:
-        cost += cache_read * cache_rate / 1_000_000
-        covered += cache_read
-    return model, round(cost, 9), min(total, covered)
-
-
-def _authoritative_model_costs(session: dict[str, Any]) -> bool:
-    """Return whether model costs cover every model without allocation guesses."""
-
-    models = _session_map(session, "models")
-    model_costs = _session_map(session, "modelCosts")
-    if not models or set(models) != set(model_costs):
-        return False
-    session_cost = _session_number(session, "costUsd")
-    model_cost = sum(model_costs.values())
-    tolerance = max(1e-9, abs(session_cost) * 1e-6)
-    return abs(model_cost - session_cost) <= tolerance
+    reasons: dict[str, set[str]] = {
+        "missing_rates": set(), "missing_components": set(),
+        "unverified_cache_writes": set(), "unattributed_models": set(),
+    }
+    upstream_costs = _session_map(session, "modelCosts")
+    if not models and _session_number(session, "totalTokens"):
+        reasons["missing_components"].add(f"{provider}:unknown")
+    for model, tokens in models.items():
+        key = f"{provider}:{model}"
+        if provider == UNATTRIBUTED_PROVIDER:
+            reasons["unattributed_models"].add(key)
+            continue
+        rates = pricing.get(key)
+        if rates is None and provider == "openai-api":
+            rates = pricing.get(model)
+        parts = components.get(model)
+        if parts is not None and not parts["cacheWriteVerified"]:
+            reasons["unverified_cache_writes"].add(key)
+            continue
+        if rates is None:
+            # Only OpenAI may use the collector's model-only catalog. Positive
+            # model costs are evidence; an explicit zero is not a free tariff.
+            if (provider == "openai-api" and upstream_costs.get(model, 0) > 0
+                    and not (parts and parts["cacheWriteTokens"])):
+                costs[model] = upstream_costs[model]
+                covered += round(tokens)
+            else:
+                reasons["missing_rates"].add(key)
+            continue
+        if parts is None:
+            reasons["missing_components"].add(key)
+            continue
+        model_cost = 0.0
+        model_covered = 0
+        for field, rate_name in (
+            ("inputTokens", "input_per_million"),
+            ("outputTokens", "output_per_million"),
+            ("cacheReadTokens", "cache_read_per_million"),
+            ("cacheWriteTokens", "cache_write_per_million"),
+        ):
+            count = round(parts[field])
+            rate = rates.get(rate_name)
+            # Preserve the established cache-read fallback. Cache writes need
+            # their own explicit rate: they may carry a different surcharge.
+            if rate is None and field == "cacheReadTokens":
+                rate = rates.get("input_per_million")
+            if count and rate is None:
+                reasons["missing_rates"].add(key)
+            elif rate is not None:
+                model_cost += count * rate / 1_000_000
+                model_covered += count
+        if model_covered:
+            costs[model] = round(model_cost, 9)
+            covered += model_covered
+    return costs, covered, reasons
 
 
 def _period_from_sessions(
@@ -4187,26 +4292,17 @@ def _period_from_sessions(
         duplicates += max(0, len(candidates) - 1)
         session = dict(winners[key]) if winners is not None and key in winners else _select_session(candidates)
         provider = session_provider(session, allowed_provider_ids=allowed_provider_ids)
-        custom_cost = _custom_session_cost(
+        model_costs, _, _ = _price_session(
             session, pricing, allowed_provider_ids=allowed_provider_ids
         )
-        if custom_cost is not None:
-            custom_model, custom_value, _ = custom_cost
-            session["costUsd"] = custom_value
-            session["modelCosts"] = {custom_model: custom_value}
-        elif provider != "openai-api":
-            # Tokscale's model catalog has no trustworthy account context.  A
-            # proxy may report the same model name while charging a different
-            # rate, so never carry an unqualified upstream cost into a
-            # non-OpenAI stream.
-            session["costUsd"] = 0.0
-            session["modelCosts"] = {}
-        elif len(_session_map(session, "models")) > 1 and not _authoritative_model_costs(session):
-            # An aggregate OpenAI cost cannot be allocated across multiple
-            # models.  Keep the token counts, but do not present an estimated
-            # price or fabricate component/model allocation.
-            session["costUsd"] = 0.0
-            session["modelCosts"] = {}
+        session["modelCosts"] = model_costs
+        session["costUsd"] = round(sum(model_costs.values()), 9)
+        components = _model_token_usage(session)
+        if components and all(parts["cacheWriteVerified"] for parts in components.values()):
+            # Reclassify writes without changing any token total. Raw snapshots
+            # retain the upstream buckets for old/new copy reconciliation.
+            for field in TOKEN_COMPONENT_FIELDS:
+                session[field] = sum(parts[field] for parts in components.values())
         client = str(session.get("client") or "")
         session_id = str(session.get("sessionId") or "")
         if client != "codex" or not session_id:
@@ -4245,7 +4341,17 @@ def _period_from_sessions(
         _add_map(period["clientModels"][client], models)
         _add_map(period["clientModelCosts"][client], model_costs)
         for model, tokens in models.items():
-            period["modelUnclassifiedTokens"][model] = period["modelUnclassifiedTokens"].get(model, 0) + tokens
+            parts = components.get(model, {})
+            known = parts.get("cacheWriteVerified", False)
+            reads = parts.get("cacheReadTokens", 0) if known else 0
+            writes = parts.get("cacheWriteTokens", 0) if known else 0
+            outputs = parts.get("outputTokens", 0) if known else 0
+            for field, count in (
+                ("modelCacheReads", reads), ("modelCacheWrites", writes),
+                ("modelOutputs", outputs),
+                ("modelUnclassifiedTokens", tokens - reads - writes - outputs),
+            ):
+                period[field][model] = period[field].get(model, 0) + count
         project = period["projects"].setdefault(
             project_id,
             {"label": project_label, "tokens": 0, "costUsd": 0.0, "clients": {}},
@@ -4381,60 +4487,37 @@ def _build_device_payload(
     if isinstance(first.get("periodWindows"), dict):
         payload["periodWindows"] = first["periodWindows"]
     pricing = load_pricing(config_root)
-    all_time = periods["allTime"]
-    priced_tokens = 0
-    missing_models: set[str] = set()
-    missing_prices: set[str] = set()
-    for session in all_time["sessions"].values():
-        models = _session_map(session, "models")
-        model_costs = _session_map(session, "modelCosts")
-        session_provider_id = session_provider(
-            session, allowed_provider_ids=allowed_provider_ids
-        )
-        custom_cost = _custom_session_cost(
-            session, pricing, allowed_provider_ids=allowed_provider_ids
-        )
-        if custom_cost is not None:
-            custom_model, _, covered = custom_cost
+    period_pricing = {}
+    for name, period in periods.items():
+        priced_tokens = 0
+        reasons: dict[str, set[str]] = {}
+        for session in period["sessions"].values():
+            _, covered, session_reasons = _price_session(
+                session, pricing, allowed_provider_ids=allowed_provider_ids
+            )
             priced_tokens += covered
-            if covered < round(_session_number(session, "totalTokens")):
-                missing_models.add(custom_model)
-                missing_prices.add(f"{session_provider_id}:{custom_model}")
-            continue
-        if not models:
-            if _session_number(session, "costUsd") > 0:
-                priced_tokens += round(_session_number(session, "totalTokens"))
-            continue
-        if _authoritative_model_costs(session):
-            priced_tokens += round(_session_number(session, "totalTokens"))
-            continue
-        if len(models) > 1:
-            for model in models:
-                missing_models.add(model)
-                missing_prices.add(f"{session_provider_id}:{model}")
-            continue
-        for model, raw_tokens in models.items():
-            tokens = round(raw_tokens)
-            if model_costs.get(model, 0) > 0:
-                priced_tokens += tokens
-            else:
-                missing_models.add(model)
-                missing_prices.add(f"{session_provider_id}:{model}")
-    total_tokens = all_time["totalTokens"]
-    priced_tokens = min(total_tokens, priced_tokens)
+            for reason, keys in session_reasons.items():
+                reasons.setdefault(reason, set()).update(keys)
+        total = period["totalTokens"]
+        missing = sorted(set().union(*reasons.values())) if reasons else []
+        period_pricing[name] = {
+            "cost_usd": period["costUsd"], "total_tokens": total,
+            "priced_tokens": min(total, priced_tokens),
+            "unpriced_tokens": max(0, total - priced_tokens),
+            "price_coverage_percent": round(priced_tokens * 100 / total, 2) if total else 100.0,
+            "cost_complete": priced_tokens == total,
+            "missing_models": sorted({key.split(":", 1)[1] for key in missing}),
+            "missing_prices": missing,  # compatible union; reason fields disambiguate it
+            **{reason: sorted(keys) for reason, keys in reasons.items()},
+        }
     status = {
         "version": STATE_VERSION,
         "device_id": payload["deviceId"],
         "updated_at": now,
         "project_count": summaries_count,
         "duplicate_sessions": duplicate_counts["allTime"],
-        "total_tokens": total_tokens,
-        "cost_usd": all_time["costUsd"],
-        "priced_tokens": priced_tokens,
-        "unpriced_tokens": total_tokens - priced_tokens,
-        "price_coverage_percent": round((priced_tokens * 100 / total_tokens) if total_tokens else 100.0, 2),
-        "missing_models": sorted(missing_models),
-        "missing_prices": sorted(missing_prices),
+        **period_pricing["allTime"],
+        "period_pricing": period_pricing,
     }
     if provider:
         status["provider"] = provider
@@ -4592,6 +4675,22 @@ def _aggregate_provider_summaries_for_allowed(
         "missing_prices": missing_prices,
         "updated_at": _now(),
     }
+    manifest["period_pricing"] = {}
+    for name in ("today", "month", "allTime"):
+        rows = [status["period_pricing"][name] for _, status in result.values()]
+        total = sum(row["total_tokens"] for row in rows)
+        priced = sum(row["priced_tokens"] for row in rows)
+        details = {
+            "total_tokens": total, "priced_tokens": priced,
+            "unpriced_tokens": total - priced,
+            "cost_usd": round(sum(row["cost_usd"] for row in rows), 9),
+            "cost_complete": priced == total,
+            "price_coverage_percent": round(priced * 100 / total, 2) if total else 100.0,
+        }
+        for reason in ("missing_rates", "missing_components", "unverified_cache_writes", "unattributed_models"):
+            details[reason] = sorted({key for row in rows for key in row.get(reason, [])})
+        manifest["period_pricing"][name] = details
+    manifest.update({k: v for k, v in manifest["period_pricing"]["allTime"].items() if k not in manifest})
     return result, manifest
 
 

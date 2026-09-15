@@ -35,6 +35,7 @@ PAYLOAD_FILES = (
     "Dockerfile.opencode",
     "Dockerfile.monitor",
     "token-monitor-collector.js",
+    "token-monitor-accounting.js",
     "entrypoint.sh",
     "entrypoint-codex.sh",
     "entrypoint-opencode.sh",

@@ -124,6 +124,7 @@ jobs:
         run: |
           bash -n cage cage-netgate.sh entrypoint.sh entrypoint-codex.sh entrypoint-opencode.sh install.sh .github/scripts/install-gitleaks.sh .github/scripts/candidate-attestation-status.sh .github/scripts/candidate-index-verify.sh
           node --check token-monitor-collector.js
+          node --check token-monitor-accounting.js
 
       - name: Validate Compose configuration
         run: docker compose config

@@ -288,15 +288,24 @@ host-source opt-in; `monitor disable --auth` reverses only its local routing and
 does not delete its managed history. `monitor discover` is read-only and lists
 all existing `codex-state-*` volumes, including older or unmapped volumes.
 Adopt an unmapped volume with its exact name using `monitor add --volume`; Cage
-labels it as recovered without inventing a host path. Cost is uploaded only when
-the session has sufficient per-model component evidence or an authoritative cost
-record. For a multi-model session, exact model-level costs can be used when the
-schema supplies them; otherwise token counts remain visible but that session
-stays unpriced. Cage never allocates input/output/cache tokens or one model's
-rate across another model. `monitor status` shows the total and each provider
-stream, price coverage, upload-repair state, and provider-qualified model IDs
-that still need a price. Custom rates are USD per million tokens, stored
-privately, and never sent to the hub.
+labels it as recovered without inventing a host path. Cost is calculated from
+per-model input/output/cache components and matching provider rates. Switching
+models within a session preserves that breakdown. Known portions remain priced
+when another model or component lacks a rate. The collector reconciles Codex
+cache-write events with the parser's exact per-model totals and reclassifies
+writes from ordinary input without changing token counts. Legacy summaries
+without sufficient source evidence remain incomplete.
+
+`monitor status` shows today/month/all-time price coverage and distinguishes
+missing rates, missing model components, unreconciled cache writes and unknown
+provider attribution. The compatible `missing_prices` JSON list remains the
+union; the separate reason fields and `period_pricing` explain each gap. The
+hub's existing wire format is unchanged, so detailed coverage is available in
+Cage status. Custom rates are USD per million tokens, stored privately, and
+never sent to the hub. Add `--cache-write N` to `monitor pricing set` when the
+provider charges for cache writes; no write rate is guessed. Rates produce an
+estimate, not an invoice: request-specific tiers, long-context uplifts and
+contract discounts cannot be inferred from session totals.
 
 Versions before 0.34.0 used one `cage-local-…` device for the aggregate. After
 upgrade, normal sync pauses if that unsplit device is still on the hub. Run

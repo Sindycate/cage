@@ -6,6 +6,30 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.8 — 2026-09-15
+
+### Token Monitor model and cache-write accounting
+
+No session or credential migration. The next successful scan with the new
+collector preserves per-model components and can recalculate mixed-model
+sessions while their source journals remain available. Retained legacy
+summaries without source evidence remain explicitly incomplete. Existing
+snapshots keep their raw counters for deduplication across collector versions.
+
+Custom pricing accepts `--cache-write N` (USD per million tokens). Set the
+provider's actual cache-write rate for models that report write usage; Cage
+will not assume it equals ordinary input pricing. Cache-write tokens are
+reclassified from input, never added a second time. A missing component rate
+leaves only that portion unpriced; a model without reconciled write evidence
+remains unpriced. Zero cost is fully covered only with an explicit free rate.
+
+`monitor status` now reports each period's coverage and separates missing rates
+from missing model components, unreconciled cache writes and provider
+attribution. These are estimates under the configured rates, not invoices;
+request-specific service tiers, long-context uplifts, discounts and other
+charges are not inferred from session totals. The existing hub wire format is
+preserved; use Cage status for the detailed coverage reasons.
+
 ## 0.36.5 — 2026-09-04
 
 ### Native multi-architecture candidate builds

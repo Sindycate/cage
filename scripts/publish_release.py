@@ -1308,15 +1308,12 @@ class Orchestrator:
                 raise PreflightError(f"bash -n {name} failed:\n{bounded(result.stderr)}")
         node = shutil.which("node")
         if node:
-            result = self.runner.run(
-                [node, "--check", "token-monitor-collector.js"],
-                cwd=self.repo_root,
-                timeout=timeout,
-            )
-            if not result.ok:
-                raise PreflightError(
-                    f"node --check token-monitor-collector.js failed:\n{bounded(result.stderr)}"
+            for name in ("token-monitor-collector.js", "token-monitor-accounting.js"):
+                result = self.runner.run(
+                    [node, "--check", name], cwd=self.repo_root, timeout=timeout,
                 )
+                if not result.ok:
+                    raise PreflightError(f"node --check {name} failed:\n{bounded(result.stderr)}")
         return "passed"
 
     def _gate_compose(self) -> str:

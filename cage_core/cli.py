@@ -779,9 +779,26 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             f"Price coverage: {aggregate.get('price_coverage_percent', 0):.2f}% "
             f"({aggregate.get('unpriced_tokens', 0):,} unpriced tokens)"
         )
-        missing = aggregate.get("missing_prices") or aggregate.get("missing_models")
-        if isinstance(missing, list) and missing:
-            print("Missing prices: " + ", ".join(str(item) for item in missing))
+        period_pricing = aggregate.get("period_pricing")
+        if isinstance(period_pricing, dict):
+            for name, label in (("today", "Today"), ("month", "Month"), ("allTime", "All time")):
+                detail = period_pricing.get(name, {})
+                state = "complete" if detail.get("cost_complete") else "partial; unknown cost remains"
+                print(f"{label}: ${detail.get('cost_usd', 0):.6f} ({state}; "
+                      f"{detail.get('unpriced_tokens', 0):,} unpriced tokens)")
+            for key, label in (
+                ("missing_rates", "Missing model/component rates"),
+                ("missing_components", "Missing per-model token breakdown"),
+                ("unverified_cache_writes", "Cache-write usage needs reconciliation"),
+                ("unattributed_models", "Provider attribution required"),
+            ):
+                values = aggregate.get(key, [])
+                if values:
+                    print(label + ": " + ", ".join(values))
+        else:
+            missing = aggregate.get("missing_prices") or aggregate.get("missing_models")
+            if isinstance(missing, list) and missing:
+                print("Unpriced models (rate or usage evidence missing): " + ", ".join(str(item) for item in missing))
         print(f"Deduplicated session copies: {aggregate.get('duplicate_sessions', 0)}")
     pending = sum(bool(item.legacy_device_id) for item in registrations)
     if pending:
@@ -832,14 +849,14 @@ def _run_monitor_pricing(arguments: list[str], *, config_root: Path) -> int:
     if action != "set" or not rest:
         raise CliError(
             "Usage: cage monitor pricing set [PROVIDER:]MODEL "
-            "--input N --output N [--cache-read N]"
+            "--input N --output N [--cache-read N] [--cache-write N]"
         )
     model_id = rest.pop(0)
-    values: dict[str, float | None] = {"input": None, "output": None, "cache_read": None}
+    values: dict[str, float | None] = {"input": None, "output": None, "cache_read": None, "cache_write": None}
     index = 0
     while index < len(rest):
         option = rest[index]
-        names = {"--input": "input", "--output": "output", "--cache-read": "cache_read"}
+        names = {"--input": "input", "--output": "output", "--cache-read": "cache_read", "--cache-write": "cache_write"}
         if option not in names or index + 1 >= len(rest):
             raise CliError(f"invalid monitor pricing option: {option}")
         try:
@@ -853,6 +870,7 @@ def _run_monitor_pricing(arguments: list[str], *, config_root: Path) -> int:
         input_per_million=values["input"],
         output_per_million=values["output"],
         cache_read_per_million=values["cache_read"],
+        cache_write_per_million=values["cache_write"],
     )
     print(f"Saved custom price for {model_id}; run cage monitor sync to recalculate cost.")
     return 0
