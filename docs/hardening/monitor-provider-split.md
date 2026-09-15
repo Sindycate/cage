@@ -89,6 +89,11 @@ fork replay, duplicate snapshots and cumulative resets do not authorize token
 allocation guesses. Writes are a subset of input and are reclassified, not
 added to total tokens.
 
+Daily and monthly cache-write buckets follow the pinned parser's request-start
+clock, including turn-context/human-input resets. A request whose completion
+crosses a period boundary keeps the same period assignment as its input/output
+usage. Duplicate, inherited and zero token snapshots do not advance the clock.
+
 Provider-qualified rates apply independently to each model. Missing rates leave
 only the affected components unpriced. Legacy mixed sessions without source
 components remain unpriced. `--cache-write` supplies an explicit write rate;

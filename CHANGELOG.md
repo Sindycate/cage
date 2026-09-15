@@ -5,6 +5,13 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.36.9 — 2026-09-15
+
+- align supplemental cache-write accounting with the pinned parser's request
+  start timestamps so sessions crossing a day or month boundary retain complete
+  price coverage; duplicate and zero snapshots do not advance the clock;
+- preserve existing token totals, provider identities and source journals.
+
 ## 0.36.8 — 2026-09-15
 
 - retain per-model input, output, cache-read and cache-write components through

@@ -9,6 +9,8 @@ const { StringDecoder } = require('node:string_decoder');
 const FIELDS = ['totalTokens', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
 const MAX_BYTES = 32 * 1024 * 1024;
 const integer = value => Number.isSafeInteger(value) && value >= 0;
+const timestampMs = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
+const injectedPrefixes = ['<environment_context>', '<system-reminder>', '<user_instructions>'];
 
 function lines(filename, visit) {
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -45,7 +47,7 @@ const day = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStar
 
 function readWrites(filename, now = new Date()) {
   const periods = { today: new Map(), month: new Map(), allTime: new Map() };
-  let model, previous, unsupported = false, sawWrites = false;
+  let model, previous, unsupported = false, sawWrites = false, tokenStart = null;
   let childId, waiting = false, replayId, inherited, inheritedReported, userFork = false;
   const startedTurns = new Set();
   const v7Time = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
@@ -87,7 +89,14 @@ function readWrites(filename, now = new Date()) {
         userFork = p.thread_source === 'user';
       }
     }
-    if (entry.type === 'turn_context') model = p.model_info?.slug || p.model || p.model_name;
+    if (entry.type === 'turn_context') {
+      model = p.model_info?.slug || p.model || p.model_name;
+      tokenStart = timestampMs(entry.timestamp);
+    }
+    if (entry.type === 'event_msg' && p.type === 'user_message' && typeof p.message === 'string' &&
+        !injectedPrefixes.some(prefix => p.message.trimStart().startsWith(prefix))) {
+      tokenStart = timestampMs(entry.timestamp);
+    }
     if (entry.type !== 'event_msg' || p.type !== 'token_count' || !p.info) return;
     model = p.model || p.info.model || p.info.model_name || model;
     const info = p.info, total = usage(info.total_token_usage), last = usage(info.last_token_usage);
@@ -109,8 +118,13 @@ function readWrites(filename, now = new Date()) {
     } else if (!last) increment = total;
     if (!increment || !sum(increment)) return;
     previous = total || (previous && previous.map((v, i) => v + increment[i]));
-    const timestamp = new Date(entry.timestamp);
-    if (!model || !Number.isFinite(timestamp.getTime())) { unsupported = true; return; }
+    // Tokscale assigns usage to the request's start, not the token_count
+    // completion time. Only accepted positive snapshots advance this cursor;
+    // replayed/zero totals must not move an August request into September.
+    const completed = timestampMs(entry.timestamp);
+    const started = tokenStart ?? completed;
+    if (completed !== null && (tokenStart === null || completed > tokenStart)) tokenStart = completed;
+    if (!model || started === null) { unsupported = true; return; }
     const identity = JSON.stringify([model, total || [entry.timestamp, ...increment]]);
     if (seen.has(identity)) return;
     seen.add(identity);
@@ -120,7 +134,7 @@ function readWrites(filename, now = new Date()) {
     // A total-only record cannot establish writes for this increment.
     const known = last && (rawWrite === undefined || (integer(rawWrite) && rawWrite <= input));
     const writes = known ? (rawWrite || 0) : 0;
-    const date = day(timestamp);
+    const date = day(new Date(started));
     for (const [period, rows] of Object.entries(periods)) {
       if (period === 'today' && date !== today) continue;
       if (period === 'month' && date.slice(0, 7) !== today.slice(0, 7)) continue;

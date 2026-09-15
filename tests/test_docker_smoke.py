@@ -121,6 +121,55 @@ class DockerSmokeTests(unittest.TestCase):
             self.assertAlmostEqual(streams["zllm"][0]["today"]["costUsd"], .000713)
             self.assertTrue(status["period_pricing"]["today"]["cost_complete"])
 
+    def test_managed_host_monitor_reconciles_cache_writes_across_month_boundary(self):
+        image = os.environ.get("CAGE_MONITOR_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_MONITOR_SMOKE_IMAGE to a built collector image")
+        from datetime import datetime, timedelta, timezone
+        month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        before = (month - timedelta(hours=1)).isoformat()
+        after = (month + timedelta(seconds=1)).isoformat()
+        def usage(input_tokens, output, cache, writes):
+            return {"input_tokens": input_tokens, "output_tokens": output,
+                    "cached_input_tokens": cache, "cache_write_input_tokens": writes,
+                    "reasoning_output_tokens": 0, "total_tokens": input_tokens + output}
+        def event(total, last, stamp):
+            return {"type": "event_msg", "timestamp": stamp,
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": total, "last_token_usage": last}}}
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir(); (source / "config.toml").write_text("")
+            record = monitor.register_host_source(root / "state", source, copy_auth=False, allow_replacement=True)
+            home = monitor.host_source_home(root / "state", record)
+            first, resumed = usage(100, 10, 40, 50), usage(300, 30, 40, 230)
+            rows = [
+                {"type": "session_meta", "timestamp": before, "payload": {"id": "month-boundary", "model_provider": "zllm"}},
+                {"type": "turn_context", "timestamp": before, "payload": {"model": "model-a"}},
+                event(first, first, before), event(first, first, after),
+                event(resumed, usage(200, 20, 0, 180), after),
+                event(resumed, usage(0, 0, 0, 0), after),
+                {"type": "turn_context", "timestamp": after, "payload": {"model": "model-a"}},
+                event(usage(330, 33, 40, 258), usage(30, 3, 0, 28), after),
+            ]
+            (home / "sessions" / "month-boundary.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            payload = monitor._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
+            self.assertEqual(payload["allTime"]["totalTokens"], 363)
+            self.assertEqual(payload["month"]["totalTokens"], 33)
+            month_session = next(iter(payload["month"]["sessions"].values()))
+            parts = month_session["modelTokenUsage"]["model-a"]
+            self.assertTrue(parts["cacheWriteVerified"])
+            self.assertEqual(parts["inputTokens"], 2)
+            self.assertEqual(parts["cacheWriteTokens"], 28)
+            monitor.save_pricing(root / "state", {"zllm:model-a": {
+                "input_per_million": 2, "output_per_million": 10,
+                "cache_read_per_million": .2, "cache_write_per_million": 2.5,
+            }})
+            _, status = monitor.aggregate_provider_summaries(root / "state", [(record, payload)])
+            self.assertTrue(status["period_pricing"]["month"]["cost_complete"])
+            self.assertAlmostEqual(status["period_pricing"]["month"]["cost_usd"], .000104)
+
     def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)

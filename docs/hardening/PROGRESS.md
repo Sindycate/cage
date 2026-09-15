@@ -3,6 +3,23 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-15 — Token Monitor period alignment prepared for v0.36.9
+
+Reproduced incomplete monthly cache-write coverage in a synthetic session
+spanning a month boundary. The pinned parser assigns positive usage to the
+request-start cursor, while the supplemental reader used completion time.
+Aligned cursor resets and advancement with the pinned parser, including human
+input, system-injected messages, replayed totals and zero snapshots. Counts,
+provider identities, source state and existing period attribution are preserved.
+
+Validation: 107 focused monitor tests passed. Three new Node regression groups
+fail on the old helper and pass after the change. The Docker boundary test
+fails on the published 0.36.8 collector and passes on the candidate; the two
+existing monitor smoke tests also pass. A private read-only scan of the affected
+source now reconciles all monthly components and keeps all-time totals intact.
+Private evidence stays outside the repository. The canonical publisher owns
+the full release gates and public verification.
+
 ## 2026-09-15 — Token Monitor model accounting prepared for v0.36.8
 
 Preserved the pinned collector's exact session/model components in a bounded

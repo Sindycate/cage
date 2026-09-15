@@ -6,6 +6,18 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.36.9 — 2026-09-15
+
+### Token Monitor cache-write period alignment
+
+No configuration or session migration. The next scan with the new collector
+uses the pinned parser's request-start clock for supplemental cache writes.
+Previously the supplemental reader used completion timestamps, which could
+leave a day or month unpriced despite matching all-time usage. Turn context
+and human input reset the clock; replayed and zero snapshots do not advance it.
+Existing token totals and the parser's period attribution remain unchanged.
+Run `cage monitor sync` to refresh all retained sources immediately.
+
 ## 0.36.8 — 2026-09-15
 
 ### Token Monitor model and cache-write accounting
