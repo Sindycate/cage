@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -45,6 +46,22 @@ class PlanError(ValueError):
 class PreparedLaunch:
     request: LaunchRequest
     plan: LaunchPlan
+
+
+def agent_process_environment(
+    plan: LaunchPlan, environment: Mapping[str, str]
+) -> dict[str, str]:
+    """Add Herdr's identity hint only to the terminal agent's host process.
+
+    Herdr inspects the foreground job's process environments. The Docker client
+    must carry this hint at exec/spawn time; a container environment variable or
+    a late mutation of the supervising launcher's environment is insufficient.
+    Preserve explicit hints, including an empty value used to opt out.
+    """
+    result = dict(environment)
+    if plan.target in {"container", "host"} and result.get("HERDR_ENV") == "1":
+        result.setdefault("HERDR_AGENT", plan.tool)
+    return result
 
 
 def path_within(path: Path, root: Path) -> bool:

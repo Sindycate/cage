@@ -5,6 +5,13 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.2 — 2026-09-22
+
+- automatically identify terminal Codex, Claude Code and OpenCode launches in
+  Herdr using the resolved agent, including preset and menu selections;
+- keep the hint on the host launch process, preserve explicit overrides and
+  exclude Desktop and management commands from automatic hinting.
+
 ## 0.37.1 — 2026-09-22
 
 - give Token Monitor multi-device hub responses a separate 16 MiB limit while

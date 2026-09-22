@@ -146,6 +146,7 @@ def write_fake_codex(path: Path) -> None:
         'PY\n'
         'fi\n'
         'echo "CODEX_HOME=$CODEX_HOME"\n'
+        'echo "HERDR_AGENT=${HERDR_AGENT-unset}"\n'
         'echo "CWD=$(pwd)"\n'
         'echo "ARGS=$*"\n'
         'i=0\n'
@@ -176,6 +177,7 @@ def make_env(tmp_path: Path, bin_dir: Path, home: Path, xdg: Path) -> dict:
     # Remove ambient tokens that could leak into tests
     env.pop("GH_TOKEN", None)
     env.pop("GITHUB_TOKEN", None)
+    env.pop("HERDR_AGENT", None)
     # Dynamic Git configuration is inherited by child processes. Tests that
     # exercise inherited configuration add it explicitly, so the ordinary
     # isolated launch fixtures must not retain the runner's identity values.
@@ -265,6 +267,18 @@ HOST_CONFIG = '\n'.join([
 
 class TestHostModeLaunches(unittest.TestCase):
     """Host mode invokes pinned Codex without Docker."""
+
+    def test_herdr_hint_reaches_direct_and_monitored_host_codex(self):
+        for monitored in (False, True):
+            with self.subTest(monitored=monitored):
+                result, _, _, tmp = setup_host_test(
+                    HOST_CONFIG,
+                    env_overrides={"HERDR_ENV": "1"},
+                    monitor_auth=monitored,
+                )
+                self.addCleanup(tmp.cleanup)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("HERDR_AGENT=codex\n", result.stdout)
 
     def test_host_mode_invokes_codex_without_docker(self):
         result, repo, _, tmp = self._launch(HOST_CONFIG)

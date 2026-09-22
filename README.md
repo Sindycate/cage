@@ -127,6 +127,14 @@ cage ~/repo-b   # terminal 2
 cage ~/repo-a   # terminal 3; reuses repo-a's persistent state volume
 ```
 
+Inside a [Herdr](https://herdr.dev/) terminal pane, Cage automatically supplies
+`HERDR_AGENT` for the selected Codex, Claude Code or OpenCode CLI. Direct
+commands, presets and interactive selections work without an environment
+prefix. The hint is attached to the host Docker client or host-native Codex
+process; Herdr uses its existing terminal detection rules. An explicit
+`HERDR_AGENT` takes precedence; `HERDR_AGENT= cage ...` disables the automatic
+hint for that launch. Desktop and management commands do not add a hint.
+
 Same-project parallel sessions use distinct container names and share the
 project's persistent tool-state volume. The collision menu remains available
 when a terminal provides an interactive stdin but restricts direct access to

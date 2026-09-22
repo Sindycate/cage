@@ -32,7 +32,7 @@ from ..lifecycle import (
     terminate_process,
     wait_for_line,
 )
-from ..planning import PreparedLaunch
+from ..planning import PreparedLaunch, agent_process_environment
 from ..state import (
     ClaudeSessionSync,
     OpenCodeStateReconciler,
@@ -1166,13 +1166,14 @@ def _run_ordinary(
         *tool_arguments,
         *runtime.prepared.request.tool_arguments,
     ]
+    environment = agent_process_environment(runtime.plan, os.environ)
     if not runtime.lifecycle.requires_supervision:
-        os.execvp(runtime.docker, command)
+        os.execvpe(runtime.docker, command, environment)
         return 127
     if runtime.oauth_connection is None:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, env=environment, check=False)
         return result.returncode
-    child = subprocess.Popen(command)
+    child = subprocess.Popen(command, env=environment)
     try:
         while True:
             try:

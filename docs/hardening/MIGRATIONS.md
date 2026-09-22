@@ -6,6 +6,18 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.2 — 2026-09-22
+
+### Automatic Herdr terminal recognition
+
+No configuration migration. Inside Herdr (`HERDR_ENV=1`), ordinary container
+and host-native agent launches now supply `HERDR_AGENT` from the selected tool.
+Existing prefix aliases can be removed; an explicit hint still takes
+precedence, including an empty value to disable the automatic hint.
+The hint stays in the host launch environment and grants no socket or mount
+access. Desktop and management commands do not add it. Status classification
+still depends on Herdr's terminal detection; this does not add session restore.
+
 ## 0.37.1 — 2026-09-22
 
 ### Token Monitor response sizing and interactive warnings

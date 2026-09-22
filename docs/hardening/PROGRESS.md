@@ -3,6 +3,23 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-22 — Automatic Herdr hints prepared for v0.37.2
+
+Terminal launches inside Herdr now derive the agent identity from the resolved
+launch plan and supply it in the host Docker client or native Codex process
+environment. Exec, cleanup-supervised and OAuth-supervised paths retain their
+existing lifecycle behavior. Explicit hints, including empty values, take
+precedence. No automatic hint is added to Desktop, management or preflight
+processes, and no Herdr socket or new container mount is introduced.
+
+Validation: 130 focused launcher, host and process-environment tests and eight
+public-content/secret-policy regressions passed. An isolated Herdr 0.9.1 server
+recognized all three agents through real Cage preset launches with disposable
+Docker fixtures; identity cleared on exit and an empty hint prevented automatic
+recognition. The smoke used no live agent credentials or existing user panes.
+The canonical publisher owns the final full-suite, syntax, Compose, archive,
+CI and public verification gates.
+
 ## 2026-09-22 — Token Monitor response repair prepared for v0.37.1
 
 Reproduced an upload-repair loop caused by applying the single-device 1 MiB

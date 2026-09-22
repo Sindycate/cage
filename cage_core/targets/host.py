@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from .. import config, monitor, oauth_broker
-from ..planning import PreparedLaunch
+from ..planning import PreparedLaunch, agent_process_environment
 from ..state import SyncError
 
 
@@ -293,7 +293,7 @@ def run_host_target(
                 ) from exc
 
     codex_home = managed_session.codex_home if managed_session else source_home
-    environment = os.environ.copy()
+    environment = agent_process_environment(plan, os.environ)
     environment["CODEX_HOME"] = str(codex_home)
     for name in resolved.extra_env:
         value = os.environ.get(name)
