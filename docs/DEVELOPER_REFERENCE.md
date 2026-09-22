@@ -155,6 +155,12 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 ## Architecture
 
+The [monitor and configuration component ADR](adr-003-monitor-config-boundaries.md)
+maps implementation ownership and dependency rules. `cage_core.monitor` and
+`cage_core.config` remain public compatibility facades; new behavior belongs in
+their `monitoring` and `configuration` packages. Tests patch effect owners,
+and accounting receives immutable inputs rather than reading private state.
+
 
 **`cage`** (host-side bootstrap, symlinked to `~/.local/bin/`):
 - Is a Bash 3.2-compatible bootstrap only: resolves its real installation

@@ -36,6 +36,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cage_core import monitor
+from cage_core.configuration import codex as codex_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1105,7 +1106,7 @@ class TestConfigSchema(unittest.TestCase):
             layer = Path(temporary) / "config.toml"
             layer.write_text("[mcp_servers.x]\nurl='x'\n")
             with (
-                patch.object(cage_config, "MAX_CODEX_CONFIG_BYTES", 8),
+                patch.object(codex_config, "MAX_CODEX_CONFIG_BYTES", 8),
                 self.assertRaisesRegex(cage_config.ConfigError, "exceeds 8 bytes"),
             ):
                 cage_config.selected_mcp_names_in_file(layer, {"x"})

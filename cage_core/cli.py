@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import config, monitor, opencode_policy, storage
+from .monitoring import hub as monitor_hub, state as monitor_state
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
 from .targets.host import HostTargetError, run_host_target
@@ -650,7 +651,7 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     hub_device_ids: set[str] = set()
     if connection is not None and connection.enabled:
         try:
-            raw = monitor._hub_request(connection, "GET", "/api/stats")
+            raw = monitor_hub._hub_request(connection, "GET", "/api/stats")
             if isinstance(raw, dict):
                 raw_devices = raw.get("devices")
                 if isinstance(raw_devices, list):
@@ -1136,7 +1137,7 @@ def _run_monitor(
                             {
                                 **split_state,
                                 "device_ids": remaining,
-                                "updated_at": monitor._now(),
+                                "updated_at": monitor_state._now(),
                             },
                         )
                     else:

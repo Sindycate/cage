@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from cage_core import monitor, storage
+from cage_core.monitoring import collector
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +59,7 @@ class DockerSmokeTests(unittest.TestCase):
             )
             managed_home = monitor.host_source_home(temp_path / "cage-state", record)
 
-            summary = monitor._run_collector(
+            summary = collector._run_collector(
                 "docker",
                 image,
                 record,
@@ -103,7 +104,7 @@ class DockerSmokeTests(unittest.TestCase):
                 event(usage(300, 30, 140, 130), usage(200, 20, 100, 80)),
             ]
             (home / "sessions" / "test-session.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-            payload = monitor._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
+            payload = collector._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
             for period in ("today", "month", "allTime"):
                 self.assertEqual(payload[period]["totalTokens"], 330)
                 session = next(iter(payload[period]["sessions"].values()))
@@ -154,7 +155,7 @@ class DockerSmokeTests(unittest.TestCase):
                 event(usage(330, 33, 40, 258), usage(30, 3, 0, 28), after),
             ]
             (home / "sessions" / "month-boundary.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-            payload = monitor._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
+            payload = collector._run_collector("docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid())
             self.assertEqual(payload["allTime"]["totalTokens"], 363)
             self.assertEqual(payload["month"]["totalTokens"], 33)
             month_session = next(iter(payload["month"]["sessions"].values()))

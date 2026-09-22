@@ -6,6 +6,26 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.3 — 2026-09-22
+
+### Monitor and configuration component boundaries
+
+No configuration or data migration is required. Existing registry entries,
+provider approvals, prices, upload recovery journals, snapshots and credentials
+retain their formats and locations. The `cage_core.monitor` and
+`cage_core.config` entry points remain available; their implementations now live
+in `cage_core.monitoring` and `cage_core.configuration` respectively.
+
+Monitor status now retains errors from peer-cache validation before aggregation.
+Interactive background scans remain quiet, and the final scan still reports
+failures after the agent exits. Each aggregate uses one consistent pricing and
+identity snapshot across its providers and reporting periods.
+
+Installers reject an archive missing any required component before replacing
+an existing installation. Local test extensions that patched implementation
+details should patch their new owning component; the compatibility frontends
+do not redirect attribute assignments into implementation modules.
+
 ## 0.37.2 — 2026-09-22
 
 ### Automatic Herdr terminal recognition

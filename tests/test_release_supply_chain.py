@@ -697,6 +697,11 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             self.assertIn("cage-9.9.9/cage-main.py", names)
             self.assertIn("cage-9.9.9/cage_core/models.py", names)
             self.assertIn("cage-9.9.9/cage_core/storage.py", names)
+            for package in ("configuration", "monitoring"):
+                self.assertIn(f"cage-9.9.9/cage_core/{package}/__init__.py", names)
+                for module in (ROOT / "cage_core" / package).rglob("*.py"):
+                    relative = module.relative_to(ROOT).as_posix()
+                    self.assertIn(f"cage-9.9.9/{relative}", names)
             self.assertIn(
                 "cage-9.9.9/cage_core/targets/desktop.py", names
             )

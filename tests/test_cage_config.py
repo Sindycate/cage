@@ -5,6 +5,7 @@ import os
 import pty
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,8 @@ cage_config = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = cage_config
 SPEC.loader.exec_module(cage_config)
+
+from cage_core.configuration import cli, codex, diagnostics, interaction, oauth
 
 
 class CageConfigTests(unittest.TestCase):
@@ -93,6 +96,39 @@ class CageConfigTests(unittest.TestCase):
 
     def resolve(self, data, repo="/tmp/project-a"):
         return cage_config.resolve_config(data, Path("/tmp/config.toml"), repo)
+
+    def test_invalid_capabilities_fail_before_host_inventory(self):
+        data = self.base_config()
+        data["presets"]["codex-main"].update(
+            target="host", extra_mounts=[{"path": "/tmp/example", "mode": "unsafe"}]
+        )
+        with patch.object(codex, "codex_mcp_inventory_enabled") as inventory:
+            with self.assertRaisesRegex(cage_config.ConfigError, "mode must be ro or rw"):
+                cage_config.resolve_config(
+                    data, Path("/tmp/config.toml"), "/tmp/project-a",
+                    mcp_inventory=True,
+                )
+        inventory.assert_not_called()
+
+    def test_inventory_receives_complete_selected_pack_resolution(self):
+        data = self.base_config()
+        data["presets"]["codex-main"]["target"] = "host"
+
+        def inventory(resolved):
+            self.assertEqual(resolved.mcp_pack_names, ["linear", "local"])
+            self.assertEqual([item["name"] for item in resolved.stdio_mcp], ["jira"])
+            self.assertEqual([item["name"] for item in resolved.remote_mcp], ["linear"])
+            return {"jira", "linear", "unselected"}, {"unselected"}, {}
+
+        with patch.object(codex, "codex_mcp_inventory_enabled", side_effect=inventory):
+            resolved = cage_config.resolve_config(
+                data, Path("/tmp/config.toml"), "/tmp/project-a",
+                mcp_inventory=True,
+            )
+        self.assertEqual(resolved.mcp_suppressed, ["unselected"])
+        self.assertEqual(
+            resolved.mcp_disable_overrides, ["mcp_servers.unselected.enabled=false"]
+        )
 
     def test_resolves_project_preset_and_mcp_packs(self):
         resolved = self.resolve(self.base_config(), "/tmp/project-a/src")
@@ -486,7 +522,7 @@ class CageConfigTests(unittest.TestCase):
             out = io.StringIO()
             with (
                 patch("sys.stdout", out),
-                patch.object(cage_config.shutil, "which", return_value="/usr/bin/docker"),
+                patch.object(diagnostics.shutil, "which", return_value="/usr/bin/docker"),
             ):
                 result = cage_config.explain(resolved, doctor=True)
 
@@ -504,7 +540,7 @@ class CageConfigTests(unittest.TestCase):
         out = io.StringIO()
         with (
             patch("sys.stdout", out),
-            patch.object(cage_config.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(diagnostics.shutil, "which", return_value="/usr/bin/tool"),
         ):
             result = cage_config.explain(resolved, doctor=True)
 
@@ -661,7 +697,7 @@ class CageConfigTests(unittest.TestCase):
             )
             with (
                 patch.dict(os.environ, {"DASH0_OAUTH_CLIENT_ID": "client-public-id"}),
-                patch.object(cage_config.subprocess, "call", return_value=0) as call,
+                patch.object(oauth.subprocess, "call", return_value=0) as call,
             ):
                 result = cage_config.command_mcp_login(
                     SimpleNamespace(
@@ -724,7 +760,7 @@ class CageConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.object(cage_config.subprocess, "call", return_value=0) as call:
+            with patch.object(oauth.subprocess, "call", return_value=0) as call:
                 result = cage_config.command_mcp_login(
                     SimpleNamespace(
                         config=config,
@@ -884,7 +920,7 @@ class CageConfigTests(unittest.TestCase):
         )
 
         updated = cage_config.replace_projects_section(text, {"/new": "b"})
-        parsed = cage_config.tomllib.loads(updated)
+        parsed = tomllib.loads(updated)
 
         self.assertIn("[projects] # project routing", updated)
         self.assertIn("# This comment should survive.", updated)
@@ -1005,7 +1041,7 @@ class CageConfigTests(unittest.TestCase):
         write_fd = os.dup(slave_fd)
 
         try:
-            with patch.object(cage_config.os, "open", side_effect=[read_fd, write_fd]):
+            with patch.object(interaction.os, "open", side_effect=[read_fd, write_fd]):
                 with cage_config.open_tty() as tty:
                     tty.write("hello")
                     tty.flush()
@@ -1023,7 +1059,7 @@ class CageConfigTests(unittest.TestCase):
             config.write_text("version = 1\n", encoding="utf-8")
             with (
                 patch.dict(os.environ, {"EDITOR": "code -w"}),
-                patch.object(cage_config.subprocess, "call", return_value=0) as call,
+                patch.object(cli.subprocess, "call", return_value=0) as call,
             ):
                 result = cage_config.command_edit(SimpleNamespace(config=config))
 
@@ -1036,7 +1072,7 @@ class CageConfigTests(unittest.TestCase):
             config.write_text("version = 1\n", encoding="utf-8")
             with (
                 patch.dict(os.environ, {"EDITOR": "'code -w"}),
-                patch.object(cage_config.subprocess, "call") as call,
+                patch.object(cli.subprocess, "call") as call,
             ):
                 with self.assertRaisesRegex(cage_config.ConfigError, "invalid EDITOR value"):
                     cage_config.command_edit(SimpleNamespace(config=config))
@@ -1121,7 +1157,7 @@ git_user_name = "Somebody"
 tool = "codex"
 auth = "work"
 """
-        before = cage_config.tomllib.loads(original)
+        before = tomllib.loads(original)
         after = cage_config.apply_ui_operations(before, [{
             "action": "upsert",
             "collection": "auth",
@@ -1134,7 +1170,7 @@ auth = "work"
         untouched = "[identities.personal]\n# this exact block must remain untouched\ngit_user_name = \"Somebody\""
         self.assertIn("# top comment", rendered)
         self.assertIn(untouched, rendered)
-        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+        self.assertEqual(tomllib.loads(rendered), after)
 
     def test_ui_storage_update_is_validated_and_rendered_transactionally(self):
         original = """# policy comment
@@ -1151,7 +1187,7 @@ dangling_min_age_hours = 24
 [presets.main]
 tool = "codex"
 """
-        before = cage_config.tomllib.loads(original)
+        before = tomllib.loads(original)
         after = cage_config.apply_ui_operations(before, [{
             "action": "update_storage",
             "value": {
@@ -1166,7 +1202,7 @@ tool = "codex"
         rendered = cage_config.render_config_changes(original, before, after)
 
         self.assertIn("# policy comment", rendered)
-        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+        self.assertEqual(tomllib.loads(rendered), after)
         with self.assertRaisesRegex(cage_config.ConfigError, "greater than critical"):
             cage_config.apply_ui_operations(before, [{
                 "action": "update_storage",
@@ -1190,7 +1226,7 @@ command = "old-command"
 tool = "codex"
 mcp_packs = ["local"]
 """
-        before = cage_config.tomllib.loads(original)
+        before = tomllib.loads(original)
         after = cage_config.apply_ui_operations(before, [{
             "action": "upsert", "collection": "mcp_packs", "name": "local",
             "value": {"servers": [{"name": "local", "type": "stdio", "command": "new-command"}]},
@@ -1199,7 +1235,7 @@ mcp_packs = ["local"]
         rendered = cage_config.render_config_changes(original, before, after)
 
         self.assertNotIn("[[mcp_packs.local.servers]]", rendered)
-        self.assertEqual(cage_config.tomllib.loads(rendered), after)
+        self.assertEqual(tomllib.loads(rendered), after)
 
     def test_ui_commit_detects_concurrent_change_and_creates_no_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1251,7 +1287,7 @@ mcp_packs = ["local"]
             backups = list((root / "backups").glob("config-*.toml"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
-            self.assertEqual(cage_config.tomllib.loads(config.read_text())["presets"]["main"]["net"], "gate")
+            self.assertEqual(tomllib.loads(config.read_text())["presets"]["main"]["net"], "gate")
 
     def test_hidden_project_preset_name_is_stable_and_path_specific(self):
         first = cage_config.hidden_project_preset_name("/tmp/example")
@@ -1302,7 +1338,7 @@ mcp_packs = ["local"]
             self.assertTrue(config.is_symlink())
             self.assertEqual(config.resolve(), target.resolve())
             self.assertEqual(target.stat().st_mode & 0o777, 0o640)
-            self.assertTrue(cage_config.tomllib.loads(target.read_text())["presets"]["main"]["yolo"])
+            self.assertTrue(tomllib.loads(target.read_text())["presets"]["main"]["yolo"])
 
     def test_ui_request_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

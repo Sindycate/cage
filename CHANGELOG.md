@@ -5,6 +5,17 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.3 — 2026-09-22
+
+- separate Token Monitor and configuration into cohesive components while
+  preserving their public APIs, configuration, private state and hub formats;
+- calculate all provider and period costs from one immutable pricing, identity
+  and timestamp snapshot, with accounting independent of file and network IO;
+- persist cached-peer validation failures so `cage monitor status` explains
+  interrupted uploads without writing over an interactive agent prompt;
+- validate every new runtime module during installation and retain isolated
+  source/archive installation, recovery and accounting regression coverage.
+
 ## 0.37.2 — 2026-09-22
 
 - automatically identify terminal Codex, Claude Code and OpenCode launches in

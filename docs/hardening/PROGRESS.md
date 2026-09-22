@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-22 — Monitor and configuration boundaries prepared for v0.37.3
+
+Replaced the 6,472-line monitor and 3,410-line configuration implementations
+with explicit public facades and cohesive, acyclic component packages. The
+configuration resolver now coordinates named validation and selection helpers;
+its order still rejects invalid capabilities before inventory effects.
+
+Accounting receives immutable pricing, project IDs and time from one input
+snapshot shared across providers and periods. File/network/process operations
+belong to adapters; upload transaction ordering, state formats, host credential
+ownership and recovery remain compatible. Expanded scan error recording to
+cover peer-cache prechecks before suppressing interactive warnings.
+
+Moved monitor tests to their owning components and installed guards against
+unmocked HTTP/process execution. Added pure-accounting, one-snapshot,
+dependency-direction and corrupt-peer status regressions. Installers now
+require all new modules before replacing an installation, with missing-file,
+nested-symlink and isolated source/archive import coverage.
+
+Validation: focused monitor tests pass; 238 affected configuration/MCP/TUI/
+host/OpenCode checks pass; 1,001 resolver comparisons and 24 independently
+reviewed aggregate comparisons match the baseline. All three real Docker
+monitor smoke tests pass. The 145 installer/release tests pass, including
+every missing-component upgrade case. Independent extraction review preserves
+all 219 original monitor definitions and its public callable surface. The
+canonical publisher owns the final full-suite, syntax, Compose, archive, CI
+and public verification gates. See ADR-003 for ownership and dependency rules.
+
 ## 2026-09-22 — Automatic Herdr hints prepared for v0.37.2
 
 Terminal launches inside Herdr now derive the agent identity from the resolved

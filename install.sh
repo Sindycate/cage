@@ -277,6 +277,14 @@ unsafe_entry="$(find "$STAGE_DIR/cage_core" ! -type f ! -type d -print -quit)"
 [ -z "$unsafe_entry" ] || error "Release archive contains a non-regular package entry: $unsafe_entry"
 for required in \
     __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py monitor.py opencode.py opencode_policy.py planning.py storage.py \
+    configuration/__init__.py configuration/schema.py configuration/selection.py configuration/storage.py \
+    configuration/rendering.py configuration/editing.py configuration/interaction.py configuration/codex.py \
+    configuration/resolution.py configuration/packs.py configuration/diagnostics.py configuration/oauth.py configuration/ui.py configuration/cli.py \
+    monitoring/__init__.py monitoring/accounting.py monitoring/aggregation.py monitoring/cleanup.py monitoring/collector.py \
+    monitoring/connection.py monitoring/constants.py monitoring/errors.py monitoring/host_sources.py monitoring/hub.py \
+    monitoring/identity.py monitoring/lifecycle.py monitoring/locks.py monitoring/migrations.py monitoring/models.py \
+    monitoring/pricing.py monitoring/providers.py monitoring/publication.py monitoring/registry.py monitoring/scheduler.py \
+    monitoring/service.py monitoring/snapshots.py monitoring/split_state.py monitoring/state.py monitoring/validation.py monitoring/volumes.py \
     state/__init__.py state/oauth.py state/opencode.py state/sessions.py \
     targets/__init__.py targets/container.py targets/desktop.py targets/host.py; do
     [ -f "$STAGE_DIR/cage_core/$required" ] && [ ! -L "$STAGE_DIR/cage_core/$required" ] || \

@@ -58,7 +58,7 @@ read older entries only to resolve a concrete dependency or uncertainty.
 | Desktop lifecycle or SSH | [Desktop guide](docs/CODEX_DESKTOP.md) |
 | Images or base/leaf changes | [shared-base ADR](docs/adr-001-shared-base-image.md); `Dockerfile*`, `docker-compose.yml` |
 | Netgate or host bridges | [security model](SECURITY.md); [architecture](docs/DEVELOPER_REFERENCE.md#architecture); [Netgate rules](docs/DEVELOPER_REFERENCE.md#netgate-management) |
-| Storage or Token Monitor | `cage_core/storage.py`, `cage_core/monitor.py`; [monitor provider split](docs/hardening/monitor-provider-split.md); related tests |
+| Storage or Token Monitor | `cage_core/storage.py`, `cage_core/monitoring/`; [component boundaries](docs/adr-003-monitor-config-boundaries.md); [monitor provider split](docs/hardening/monitor-provider-split.md); related tests |
 | July hardening packets | [workflow](docs/hardening/WORKFLOW.md), relevant [progress](docs/hardening/PROGRESS.md) and [migration](docs/hardening/MIGRATIONS.md) entries before editing |
 | Releases, CI or installer | [maintainer release process](README.md#maintainer-release-process), `scripts/publish_release.py`, `.github/workflows/` |
 

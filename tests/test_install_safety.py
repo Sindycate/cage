@@ -2,6 +2,7 @@ import hashlib
 import os
 import pathlib
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -11,6 +12,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
 CAGE = ROOT / "cage"
 SYSTEM_BASH = "/bin/bash"
+REFACTORED_CORE_MODULES = tuple(
+    path.relative_to(ROOT / "cage_core").as_posix()
+    for package in ("configuration", "monitoring")
+    for path in sorted((ROOT / "cage_core" / package).rglob("*.py"))
+)
 
 
 class InstallerSafetyTests(unittest.TestCase):
@@ -80,7 +86,8 @@ class InstallerSafetyTests(unittest.TestCase):
         version: str,
         reported_version: str,
         *,
-        unsafe_core_symlink: bool = False,
+        unsafe_core_symlink: str | None = None,
+        missing_core_module: str | None = None,
     ):
         release_root = root / f"cage-{version}"
         release_root.mkdir()
@@ -138,11 +145,14 @@ class InstallerSafetyTests(unittest.TestCase):
             "targets/container.py",
             "targets/desktop.py",
             "targets/host.py",
+            *REFACTORED_CORE_MODULES,
         ]
         for name in core_files:
+            if name == missing_core_module:
+                continue
             path = release_root / "cage_core" / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            if unsafe_core_symlink and name == "models.py":
+            if name == unsafe_core_symlink:
                 path.symlink_to("__init__.py")
             else:
                 path.write_text("placeholder = True\n", encoding="utf-8")
@@ -245,6 +255,39 @@ class InstallerSafetyTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
+    def assert_refactored_core_imports(self, install_dir: pathlib.Path):
+        modules = {
+            "cage_core.config",
+            "cage_core.monitor",
+            "cage_core.configuration",
+            "cage_core.monitoring",
+            *(
+                "cage_core."
+                + name.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
+                for name in REFACTORED_CORE_MODULES
+            ),
+        }
+        code = (
+            "import importlib, pathlib, sys\n"
+            "root = pathlib.Path(sys.argv[1]).resolve()\n"
+            "sys.path.insert(0, str(root))\n"
+            "for name in sys.argv[2:]:\n"
+            "    module = importlib.import_module(name)\n"
+            "    assert pathlib.Path(module.__file__).resolve().is_relative_to(root / 'cage_core'), name\n"
+            "from cage_core import config, monitor\n"
+            "assert config.parse_config_text('version = 1') == {'version': 1}\n"
+            "assert monitor.normalize_hub_url('https://monitor.example/') == 'https://monitor.example'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(install_dir), *sorted(modules)],
+            cwd=install_dir.parent,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_refuses_home_as_install_directory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -410,27 +453,60 @@ class InstallerSafetyTests(unittest.TestCase):
                 ).strip(),
                 subprocess.check_output([str(CAGE), "--version"], text=True).strip(),
             )
+            self.assert_refactored_core_imports(install_dir)
 
     def test_release_install_rejects_core_package_symlink(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = pathlib.Path(temp)
-            home = root / "home"
-            install_dir = root / "install"
-            home.mkdir()
-            archive, checksum = self.make_release(
-                root,
-                "9.9.9",
-                "9.9.9",
-                unsafe_core_symlink=True,
-            )
+        for module in ("models.py", "configuration/schema.py", "monitoring/state.py"):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                home = root / "home"
+                install_dir = root / "install"
+                home.mkdir()
+                archive, checksum = self.make_release(
+                    root,
+                    "9.9.9",
+                    "9.9.9",
+                    unsafe_core_symlink=module,
+                )
 
-            result = self.run_install(
-                home, install_dir, archive, checksum, "9.9.9"
-            )
+                result = self.run_install(
+                    home, install_dir, archive, checksum, "9.9.9"
+                )
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("package symlink", result.stderr)
-            self.assertFalse(install_dir.exists())
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("package symlink", result.stderr)
+                self.assertFalse(install_dir.exists())
+
+    def test_incomplete_refactored_package_preserves_previous_install(self):
+        self.assertIn("configuration/__init__.py", REFACTORED_CORE_MODULES)
+        self.assertIn("monitoring/__init__.py", REFACTORED_CORE_MODULES)
+        for module in REFACTORED_CORE_MODULES:
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                home = root / "home"
+                install_dir = root / "install"
+                bin_dir = home / ".local" / "bin"
+                bin_dir.mkdir(parents=True)
+                install_dir.mkdir()
+                (install_dir / ".cage-install").write_text("1.2.3\n", encoding="utf-8")
+                old_launcher = install_dir / "cage"
+                old_launcher.write_text("#!/bin/sh\nprintf 'cage 1.2.3\\n'\n", encoding="utf-8")
+                old_launcher.chmod(0o755)
+                (install_dir / "old-state").write_text("preserve", encoding="utf-8")
+                (bin_dir / "cage").symlink_to(old_launcher)
+                archive, checksum = self.make_release(
+                    root, "9.9.9", "9.9.9", missing_core_module=module
+                )
+
+                result = self.run_install(home, install_dir, archive, checksum, "9.9.9")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"missing a safe core module: cage_core/{module}", result.stderr)
+                self.assertEqual((install_dir / "old-state").read_text(), "preserve")
+                self.assertEqual(
+                    subprocess.check_output([str(bin_dir / "cage")], text=True).strip(),
+                    "cage 1.2.3",
+                )
 
     def test_generated_release_install_matches_source_launcher(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -482,6 +558,7 @@ class InstallerSafetyTests(unittest.TestCase):
             self.assertTrue(
                 (install_dir / "cage_core" / "targets" / "desktop.py").is_file()
             )
+            self.assert_refactored_core_imports(install_dir)
 
     def test_unauthenticated_latest_release_lookup_installs_cleanly(self):
         with tempfile.TemporaryDirectory() as temp:

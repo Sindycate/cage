@@ -1,13 +1,21 @@
 """Accounting regressions across collector evidence, provider rates and periods."""
+from contextlib import ExitStack
 import copy
-import json
 from pathlib import Path
 import shutil
 import subprocess
+from unittest.mock import patch
 
 import pytest
 
 from cage_core import monitor
+from cage_core.monitoring import (
+    accounting as accounting_api,
+    collector as collector_api,
+    constants as constants_api,
+    hub as hub_api,
+    state as state_api,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +45,7 @@ def rates():
 
 
 def price(s, r):
-    return monitor._price_session(s, r, allowed_provider_ids=monitor.PUBLIC_PROVIDER_IDS)
+    return accounting_api._price_session(s, r, allowed_provider_ids=constants_api.PUBLIC_PROVIDER_IDS)
 
 
 def test_switching_models_prices_each_component_without_changing_tokens():
@@ -109,19 +117,19 @@ def test_explicit_free_rates_are_priced():
 def test_equal_copies_prefer_components_but_conflicts_stop_upload():
     old = session(); del old["modelTokenUsage"]
     rich = session()
-    assert "modelTokenUsage" in monitor._select_session([(None, old), (None, rich)])
+    assert "modelTokenUsage" in accounting_api._select_session([(None, old), (None, rich)])
     conflict = copy.deepcopy(rich)
     conflict["modelTokenUsage"]["model-a"].update(inputTokens=40, cacheWriteTokens=10)
     with pytest.raises(monitor.MonitorError, match="conflicting model"):
-        monitor._select_session([(None, rich), (None, conflict)])
+        accounting_api._select_session([(None, rich), (None, conflict)])
 
 
 def test_sidecar_joins_exact_window_evidence_only(tmp_path):
     s = session(); evidence = copy.deepcopy(s); s.pop("modelTokenUsage")
     payload = {name: {"sessions": {"codex:example": copy.deepcopy(s)}} for name in ("today", "month", "allTime")}
     payload["today"]["sessions"]["codex:example"]["totalTokens"] = 99
-    monitor._write_json(tmp_path / "model-token-usage.json", {"version": 1, "observations": [{"codex:example": evidence}]})
-    monitor._restore_model_token_usage(tmp_path, payload)
+    state_api._write_json(tmp_path / "model-token-usage.json", {"version": 1, "observations": [{"codex:example": evidence}]})
+    collector_api._restore_model_token_usage(tmp_path, payload)
     assert "modelTokenUsage" not in payload["today"]["sessions"]["codex:example"]
     assert payload["allTime"]["sessions"]["codex:example"]["modelTokenUsage"] == evidence["modelTokenUsage"]
 
@@ -139,7 +147,7 @@ def test_full_aggregation_preserves_model_charts_and_period_coverage(tmp_path):
     assert payload["today"]["modelCacheWrites"] == {"model-a": 20, "model-b": 0}
     assert status["period_pricing"]["today"]["cost_complete"] is True
     # Supplemental private schema never enters the hub upload.
-    wire = monitor._outbound_payload(tmp_path, payload)
+    wire = hub_api._outbound_payload(tmp_path, payload)
     assert all("modelTokenUsage" not in row for row in wire["today"]["sessions"].values())
 
 
@@ -155,9 +163,9 @@ def test_equal_copies_can_upgrade_unverified_writes():
     unknown = session()
     unknown["modelTokenUsage"]["model-a"].update(inputTokens=50, cacheWriteTokens=0, cacheWriteVerified=False)
     rich = session()
-    selected = monitor._select_session([(None, unknown), (None, rich)])
+    selected = accounting_api._select_session([(None, unknown), (None, rich)])
     assert selected["modelTokenUsage"] == rich["modelTokenUsage"]
-    assert monitor._select_session([(None, rich), (None, unknown)])["modelTokenUsage"] == rich["modelTokenUsage"]
+    assert accounting_api._select_session([(None, rich), (None, unknown)])["modelTokenUsage"] == rich["modelTokenUsage"]
 
 
 def test_old_catalog_cost_cannot_cover_new_cache_write_charges():
@@ -166,3 +174,56 @@ def test_old_catalog_cost_cannot_cover_new_cache_write_charges():
     costs, covered, reasons = price(s, {})
     assert costs == {"model-b": .0013} and covered == 200
     assert reasons["missing_rates"] == {"openai-api:model-a"}
+
+
+def test_full_accounting_is_repeatable_without_io_and_uses_one_input_snapshot():
+    record = monitor.VolumeRegistration(
+        "a" * 32, "cage-device-test", "codex-state-test", "container",
+        "/work/test", "Cage: test", {},
+    )
+    summary = {
+        "deviceId": record.device_id, "trackedClients": ["codex"],
+        "limits": {"providers": []},
+        **{name: {"totalTokens": 300, "sessions": {"codex:example": session()}}
+           for name in ("today", "month", "allTime")},
+    }
+    original_summary = copy.deepcopy(summary)
+    mutable_rates = rates()
+    mutable_ids = {record.logical_id: "cage-project-test"}
+    timestamp = "2026-09-22T12:34:56Z"
+    inputs = accounting_api.AccountingInputs(mutable_rates, mutable_ids, timestamp)
+    # Changing the caller's dictionaries during a scan cannot mix tariffs or
+    # project identities between providers and reporting periods.
+    mutable_rates["zllm:model-a"]["input_per_million"] = 999
+    mutable_ids[record.logical_id] = "cage-project-changed"
+
+    with ExitStack() as blocked:
+        for boundary in (
+            "builtins.open", "io.open", "os.open", "subprocess.run",
+            "urllib.request.OpenerDirector.open", "time.time", "time.monotonic",
+        ):
+            blocked.enter_context(patch(
+                boundary, side_effect=AssertionError(f"accounting attempted {boundary}")
+            ))
+        first, occurrences = accounting_api._collect_occurrences([
+            (record, summary), (record, copy.deepcopy(summary)),
+        ])
+        results = [accounting_api._build_device_payload(
+            inputs, first, 2, occurrences, record.device_id, provider="zllm",
+            allowed_provider_ids=constants_api.PUBLIC_PROVIDER_IDS,
+        ) for _ in range(2)]
+
+    assert results[0] == results[1]
+    assert summary == original_summary
+    payload, status = results[0]
+    assert payload["updatedAt"] == status["updated_at"] == timestamp
+    assert status["duplicate_sessions"] == 1
+    for period in ("today", "month", "allTime"):
+        assert payload[period]["totalTokens"] == 300
+        assert payload[period]["costUsd"] == .001514
+        assert status["period_pricing"][period]["cost_complete"] is True
+    assert payload["today"]["sessions"]["codex:example"]["projectId"] == "cage-project-test"
+    with pytest.raises(TypeError):
+        inputs.pricing["zllm:model-a"]["input_per_million"] = 999
+    with pytest.raises(TypeError):
+        inputs.project_ids[record.logical_id] = "cage-project-changed"
