@@ -62,6 +62,9 @@ MAX_CONNECTION_BYTES = 16 * 1024
 MAX_SECRET_BYTES = 8192
 MAX_REGISTRY_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_BYTES = 1024 * 1024
+# The hub returns all devices plus aggregate periods, including after ingest.
+# Its response is not a single-device upload and needs a separate bounded cap.
+MAX_HUB_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 SCAN_TIMEOUT_SECONDS = 180
 FULL_RECONCILIATION_INTERVAL_SECONDS = 60 * 60
@@ -3520,7 +3523,7 @@ def _hub_request(connection: MonitorConnection, method: str, path: str, body: by
     opener = build_opener(_NoRedirect())
     try:
         with opener.open(request, timeout=30) as response:
-            raw = response.read(MAX_OUTPUT_BYTES + 1)
+            raw = response.read(MAX_HUB_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         # Do not persist or display an attacker-controlled response body.  A
         # hub can reflect credentials or other request material in an error,
@@ -3529,7 +3532,7 @@ def _hub_request(connection: MonitorConnection, method: str, path: str, body: by
         raise MonitorError(f"Token Monitor hub returned HTTP {exc.code}") from exc
     except (URLError, OSError) as exc:
         raise MonitorError(f"Token Monitor hub request failed: {exc.reason if isinstance(exc, URLError) else exc}") from exc
-    if len(raw) > MAX_OUTPUT_BYTES:
+    if len(raw) > MAX_HUB_RESPONSE_BYTES:
         raise MonitorError("Token Monitor hub response is too large")
     try:
         return json.loads(raw.decode("utf-8")) if raw else {}
@@ -6328,6 +6331,7 @@ class ActiveMonitor:
         self._scan = scan
         self._final_scan = final_scan or scan
         self._interval = validate_interval(interval_seconds)
+        self._interactive = sys.stderr.isatty()
         self._stop = threading.Event()
         self._final_scan_done = False
         self._thread = threading.Thread(target=self._run, name="cage-token-monitor", daemon=True)
@@ -6337,21 +6341,25 @@ class ActiveMonitor:
         # Compute the first wall-clock boundary before collection starts so a
         # slow collector cannot shift every later tick by one full interval.
         next_due = (math.floor(time.time() / self._interval) + 1) * self._interval
-        try:
-            self._scan(False)
-        except Exception as exc:  # optional observability must not stop Cage
-            print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
+        self._background_scan()
         while not self._stop.is_set():
             wait_seconds = max(0.0, next_due - time.time())
             if self._stop.wait(wait_seconds):
                 return
-            try:
-                self._scan(False)
-            except Exception as exc:  # optional observability must not stop Cage
-                print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
+            self._background_scan()
             now = time.time()
             missed = max(1, math.floor((now - next_due) / self._interval) + 1)
             next_due += missed * self._interval
+
+    def _background_scan(self) -> None:
+        try:
+            self._scan(False)
+        except Exception as exc:  # optional observability must not stop Cage
+            # scan_registration persists failures for `cage monitor status`.
+            # An interactive child owns the terminal until stop(); writing
+            # here corrupts its prompt. Redirected logs still get warnings.
+            if not self._interactive:
+                print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
 
     def stop(self) -> None:
         self._stop.set()
@@ -6366,7 +6374,11 @@ class ActiveMonitor:
             final_scan = getattr(self, "_final_scan", self._scan)
             final_scan(True)
         except Exception as exc:
-            print(f"WARNING: final Token Monitor scan skipped: {exc}", file=sys.stderr)
+            print(
+                f"WARNING: final Token Monitor scan skipped: {exc}; "
+                "run cage monitor status for details",
+                file=sys.stderr,
+            )
 
 
 __all__ = [

@@ -6,6 +6,21 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.1 — 2026-09-22
+
+### Token Monitor response sizing and interactive warnings
+
+No configuration or state migration is needed. The hub's multi-device replies
+now have a separate bounded 16 MiB budget; per-device uploads retain their
+1 MiB limit. Existing upload-repair markers and last-good generations remain
+intact and are retried by the next ordinary scan. Do not delete the repair
+journal to recover from the old response-size error.
+
+Background failures remain available through `cage monitor status` instead of
+printing into the running Codex prompt. Redirected stderr still receives scan
+warnings; a failed final scan prints after the interactive session exits.
+Status now includes the underlying upload error and each project's scan error.
+
 ## 0.37.0 — 2026-09-22
 
 ### Shared Codex MCP OAuth authentication

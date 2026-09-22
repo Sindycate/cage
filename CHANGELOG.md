@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.1 — 2026-09-22
+
+- give Token Monitor multi-device hub responses a separate 16 MiB limit while
+  retaining the 1 MiB per-device upload limit, so successful uploads and repair
+  retries do not fail as retained usage grows;
+- keep background monitor warnings off an interactive Codex prompt; redirected
+  logs retain warnings and final scan failures appear after Codex exits;
+- show the recorded scan and upload-repair causes in `cage monitor status`.
+
 ## 0.37.0 — 2026-09-22
 
 - allow parallel Codex containers, Desktop targets, and unmonitored host sessions

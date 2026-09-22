@@ -124,6 +124,13 @@ publishing a complete new one. Unrelated provider devices are never deleted or
 zeroed. If a provider has no remaining sessions, only its previously-known
 exact device receives the intentional zero summary.
 
+The hub includes all devices and aggregate periods in successful ingest
+responses. Cage bounds those replies separately at 16 MiB; the per-device
+upload and collector-output limit remains 1 MiB. Interactive background scans
+keep failures in `cage monitor status` instead of writing into Codex's prompt.
+Redirected logs retain scan warnings, and final failures print after exit.
+Status includes the underlying upload-repair and per-project scan errors.
+
 ## Safe migration
 
 1. Produce a dry-run report with provider, project, session, token, and

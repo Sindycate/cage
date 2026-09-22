@@ -100,6 +100,27 @@ class MonitorStateTests(unittest.TestCase):
             self.assertEqual(len(status["projects"]), 1)
             self.assertTrue(status["projects"][0]["project_id"].startswith("cage-project-"))
 
+    def test_status_shows_scan_and_upload_repair_causes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = monitor.register_volume(
+                root, "docker", volume_name="codex-state-demo",
+                repository="/work/demo", target="container", preset="main",
+                display_name="Cage: demo (Container)", fingerprint=FINGERPRINT,
+            )
+            monitor._record_scan_error(root, record, "provider upload repair failed")
+            monitor.save_upload_state(root, monitor._upload_state_for_generation(
+                generation="a" * 32, previous_generation="b" * 32,
+                provider_ids={"openai-api": monitor.provider_device_id(root, "openai-api")},
+                attempted=["openai-api"], state="repair_pending",
+                last_error="Token Monitor hub response is too large",
+            ))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                cli._monitor_status(root)
+            self.assertIn("Last scan error: provider upload repair failed", output.getvalue())
+            self.assertIn("Last upload error: Token Monitor hub response is too large", output.getvalue())
+
     def test_pricing_cli_set_status_and_remove(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -228,6 +249,42 @@ class MonitorStateTests(unittest.TestCase):
             monitor._NoRedirect().redirect_request(
                 None, None, 302, "Found", {}, "https://other.example"
             )
+
+    def test_hub_multi_device_responses_have_a_separate_bounded_budget(self):
+        connection = monitor.MonitorConnection("https://monitor.example.test", "secret")
+        # Both endpoints return the complete multi-device stats, even when
+        # the uploaded single-device payload is much smaller than 1 MiB.
+        raw = json.dumps({"ok": True, "stats": {"padding": "x" * monitor.MAX_OUTPUT_BYTES}}).encode()
+        for method, path in (("GET", "/api/stats"), ("POST", "/api/ingest")):
+            with self.subTest(method=method):
+                with patch.object(monitor, "build_opener") as build:
+                    build.return_value.open.return_value = io.BytesIO(raw)
+                    result = monitor._hub_request(connection, method, path)
+                self.assertTrue(result["ok"])
+
+        # A small patched cap proves that reads stop at the bound, rather
+        # than trusting Content-Length or buffering an unlimited response.
+        with patch.object(monitor, "MAX_HUB_RESPONSE_BYTES", 32):
+            with patch.object(monitor, "build_opener") as build:
+                response = io.BytesIO(b" " * 100)
+                build.return_value.open.return_value = response
+                with patch.object(response, "read", wraps=response.read) as read:
+                    with self.assertRaisesRegex(monitor.MonitorError, "response is too large"):
+                        monitor._hub_request(connection, "GET", "/api/stats")
+                    read.assert_called_once_with(33)
+
+    def test_hub_response_budget_does_not_relax_upload_size_or_json_validation(self):
+        connection = monitor.MonitorConnection("https://monitor.example.test", "secret")
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(monitor, "_outbound_payload", return_value={"padding": "x" * monitor.MAX_OUTPUT_BYTES}):
+                with patch.object(monitor, "_hub_request") as request:
+                    with self.assertRaisesRegex(monitor.MonitorError, "ingest payload is too large"):
+                        monitor.upload_summary(connection, {}, config_root=Path(temporary))
+                    request.assert_not_called()
+        with patch.object(monitor, "build_opener") as build:
+            build.return_value.open.return_value = io.BytesIO(b"not json")
+            with self.assertRaisesRegex(monitor.MonitorError, "invalid JSON"):
+                monitor._hub_request(connection, "POST", "/api/ingest")
 
     def test_hub_http_errors_do_not_persist_response_body(self):
         secret = "reflected-hub-secret"
@@ -2912,6 +2969,39 @@ class MonitorStateTests(unittest.TestCase):
         self.assertEqual(stop.waits[0], 0.0)
         self.assertEqual(stop.waits[1], 30.0)
 
+    def test_interactive_background_failure_stays_off_the_prompt(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        error = monitor.MonitorError("provider upload repair failed")
+        terminal = Terminal()
+        def scan(_force):
+            raise error
+        with contextlib.redirect_stderr(terminal):
+            with patch.object(monitor.threading.Thread, "start"):
+                worker = monitor.ActiveMonitor(scan, 30)
+            worker._stop.set()
+            worker._run()  # startup scan fails while Codex owns the terminal
+            self.assertEqual(terminal.getvalue(), "")
+            with patch.object(worker._thread, "join"):
+                worker.stop()
+                worker.stop()
+        self.assertEqual(terminal.getvalue().count("WARNING:"), 1)
+        self.assertIn("final Token Monitor scan skipped", terminal.getvalue())
+        self.assertIn("cage monitor status", terminal.getvalue())
+
+    def test_redirected_background_failures_are_still_logged(self):
+        output = io.StringIO()
+        def scan(_force):
+            raise monitor.MonitorError("hub unavailable")
+        with contextlib.redirect_stderr(output):
+            with patch.object(monitor.threading.Thread, "start"):
+                worker = monitor.ActiveMonitor(scan, 30)
+            worker._stop.set()
+            worker._run()
+        self.assertIn("WARNING: Token Monitor scan skipped: hub unavailable", output.getvalue())
+
     def test_failed_full_reconciliation_waits_for_next_wall_clock_slot(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3086,13 +3176,15 @@ class MonitorStateTests(unittest.TestCase):
                 },
             )
 
-            with patch.object(monitor, "upload_summary") as repaired:
+            large_reply = json.dumps({"ok": True, "stats": {"padding": "x" * monitor.MAX_OUTPUT_BYTES}}).encode()
+            with patch.object(monitor, "build_opener") as build:
+                build.return_value.open.side_effect = lambda *_args, **_kwargs: io.BytesIO(large_reply)
                 repaired_status = monitor._publish_provider_payloads(
                     root, connection, second_payloads, second_status, old_status
                 )
             self.assertNotEqual(repaired_status["generation"], old_generation)
             self.assertIsNone(monitor.load_upload_state(root))
-            self.assertEqual(repaired.call_count, 4)
+            self.assertEqual(build.return_value.open.call_count, 4)
 
     def test_empty_account_limits_may_have_probe_timestamp(self):
         payload = {

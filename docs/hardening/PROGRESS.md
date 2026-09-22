@@ -3,6 +3,26 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-22 — Token Monitor response repair prepared for v0.37.1
+
+Reproduced an upload-repair loop caused by applying the single-device 1 MiB
+limit to multi-device hub responses. The pinned hub includes its full stats
+in successful ingest replies. Introduced a separate bounded 16 MiB response
+budget without enlarging uploads, collector output or stored generations.
+Existing exact-device rollback and pending-generation recovery stay intact.
+
+Interactive background scans no longer write over Codex's terminal. Failures
+remain in status, including the underlying upload error; redirected logs and
+post-session final failures remain visible.
+
+Validation: regressions fail on the old response reader and terminal behavior,
+then pass with the fix. Tests cover oversized reply recovery, bounded reads,
+unchanged upload limits, malformed JSON, terminal/log output and status causes.
+A real pinned hub with six synthetic devices returned a 2.9 MB reply from
+uploads under 241 kB: the old cap failed, the new reader passed, and aggregate
+token totals matched. The canonical publisher owns the full suite and public
+release verification.
+
 ## 2026-09-22 — Shared Codex MCP OAuth broker prepared for v0.37.0
 
 Replaced the per-session OAuth exclusion with one host credential owner per

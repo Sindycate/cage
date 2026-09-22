@@ -770,6 +770,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
                 f"  {row['project_id']}  {row['status']}  {row['display_name']}"
                 f"  last={row['last_success_at'] or 'never'}"
             )
+            if row["last_error"]:
+                print(f"    Last scan error: {row['last_error']}")
     if aggregate:
         print(
             f"Estimated cost: ${aggregate.get('cost_usd', 0):.6f} for "
@@ -816,6 +818,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
             f"{len(pending_upload['attempted'])} attempted stream(s); "
             "the next successful sync will repair the prepared generation"
         )
+        if pending_upload["last_error"]:
+            print(f"  Last upload error: {pending_upload['last_error']}")
     if scheduler["last_error"]:
         print(f"Automatic full reconciliation: retry pending ({scheduler['last_error']})")
     return 0

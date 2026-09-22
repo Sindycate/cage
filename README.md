@@ -296,6 +296,11 @@ cache-write events with the parser's exact per-model totals and reclassifies
 writes from ordinary input without changing token counts. Legacy summaries
 without sufficient source evidence remain incomplete.
 
+During an interactive session, background monitor failures stay in
+`cage monitor status` so they cannot overwrite Codex's prompt. The status shows
+recorded scan errors and the underlying upload-repair cause. Redirected logs
+still receive warnings; final scan failures print after the session exits.
+
 `monitor status` shows today/month/all-time price coverage and distinguishes
 missing rates, missing model components, unreconciled cache writes and unknown
 provider attribution. The compatible `missing_prices` JSON list remains the
