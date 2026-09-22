@@ -3,6 +3,32 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-22 — Shared Codex MCP OAuth broker prepared for v0.37.0
+
+Replaced the per-session OAuth exclusion with one host credential owner per
+Codex auth directory. Container, Desktop and unmonitored host launches attach
+concurrently through independent local capabilities and MCP sessions. Refresh,
+login and logout coordinate under the owner; durable pending markers prevent
+replay after an uncertain refresh. Existing legacy leases remain authoritative.
+The broker owns only MCP OAuth; primary provider authentication is unchanged.
+
+Removed normal-launch OAuth volume reconciliation and broad Codex home mounts.
+Private static snapshots exclude refresh credentials and runtime state; old
+volume credential copies are discarded at entrypoint startup. Broker routes
+retain each preset's selected servers and each gated session's Netgate proxy.
+Control disconnect revokes a single client, idle shutdown preserves live peers,
+and broker loss stops supervised targets. The adopted monitor host store keeps
+its separate existing state-ownership lease.
+
+Validation: real rotating-provider regressions cover concurrent refresh, session
+and capability separation, revocation, restart, uncertain refresh, old-session
+exclusion, scoped credentials, unsafe files, and proxy-bypass resistance. Two
+real Codex containers passed the candidate entrypoints with one login/refresh;
+the Desktop SSH smoke verifies the private OAuth capability handoff. CI now
+requires the same real-container broker proof. Legacy reconciler adversarial
+tests remain direct adapter coverage. The canonical publisher owns the final
+full-suite, syntax, Compose, archive, CI and public verification gates.
+
 ## 2026-09-15 — Token Monitor period alignment prepared for v0.36.9
 
 Reproduced incomplete monthly cache-write coverage in a synthetic session

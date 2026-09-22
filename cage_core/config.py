@@ -30,7 +30,7 @@ if str(_INSTALL_ROOT) not in sys.path:
 
 from cage_core.models import ContractError, ResolvedConfig, StoragePolicy
 from cage_core import bridge as bridge_policy, codex_policy, codex_runtime
-from cage_core.state import OAuthSessionLease, SyncError
+from cage_core.state import SyncError
 
 try:
     import tomllib
@@ -2408,7 +2408,8 @@ def _run_codex_mcp_auth(
     cmd.append(str(server["name"]))
 
     try:
-        with OAuthSessionLease.acquire(codex_home, create=True):
+        from cage_core.oauth_broker import connect
+        with connect(Path(codex_home), Path(__file__).resolve().parents[1]):
             if auth_name:
                 print(f"Codex auth: {auth_name}", flush=True)
             print(f"Codex dir: {codex_home}", flush=True)

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .. import bridge as bridge_policy, config, monitor, opencode_policy, storage
+from .. import bridge as bridge_policy, config, monitor, opencode_policy, storage, oauth_broker
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -35,8 +35,6 @@ from ..lifecycle import (
 from ..planning import PreparedLaunch
 from ..state import (
     ClaudeSessionSync,
-    OAuthReconciler,
-    OAuthSessionLease,
     OpenCodeStateReconciler,
     SyncError,
 )
@@ -80,6 +78,9 @@ class ContainerRuntime:
     opencode_environment: dict[str, str] = field(default_factory=dict)
     monitor_record: monitor.VolumeRegistration | None = None
     monitor_worker: monitor.ActiveMonitor | None = None
+    oauth_connection: oauth_broker.BrokerConnection | None = None
+    oauth_proxy: str = ""
+    codex_snapshot: Path | None = None
 
     @property
     def plan(self):
@@ -605,7 +606,11 @@ def _start_netgate(runtime: ContainerRuntime) -> list[str]:
             break
     if not port.isdigit():
         raise ContainerTargetError("netgate proxy returned an invalid port")
+    no_proxy = "localhost,127.0.0.1"
+    if runtime.plan.tool == "codex" and _has_selected_oauth_mcp(runtime):
+        no_proxy += ",cage-oauth.internal"
     runtime.proxy_label = f" [NET:GATED :{port}]"
+    runtime.oauth_proxy = f"http://cage:{token}@127.0.0.1:{port}"
     proxy_url = (
         f"http://cage:{token}@host.docker.internal:{port}"
     )
@@ -618,8 +623,8 @@ def _start_netgate(runtime: ContainerRuntime) -> list[str]:
         ("HTTPS_PROXY", proxy_url),
         ("http_proxy", proxy_url),
         ("https_proxy", proxy_url),
-        ("NO_PROXY", "localhost,127.0.0.1"),
-        ("no_proxy", "localhost,127.0.0.1"),
+        ("NO_PROXY", no_proxy),
+        ("no_proxy", no_proxy),
     ):
         _append_environment_argument(runtime, arguments, name, value)
     return arguments
@@ -899,7 +904,15 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
             resolved.host_codex_dir or (Path.home() / ".codex")
         ).expanduser()
         if codex_home.is_dir():
-            arguments.extend(("-v", f"{codex_home}:/host-codex:ro"))
+            snapshot = runtime.codex_snapshot or _codex_host_snapshot(runtime, codex_home)
+            arguments.extend(("-v", f"{snapshot}:/host-codex:ro"))
+        arguments.extend(("-e", "CAGE_OAUTH_BROKER=1"))
+        if runtime.oauth_connection is not None:
+            arguments.extend(("--add-host", "cage-oauth.internal:host-gateway"))
+            # Only this per-launch local capability reaches the container.
+            token_file = _temporary_path(runtime, prefix=".cage-oauth-capability-", directory=runtime.config_root)
+            token_file.write_text(runtime.oauth_connection.result["token"], encoding="utf-8")
+            arguments.extend(("-v", f"{token_file}:/run/cage-oauth-token:ro"))
         if resolved.skill_mounts:
             skill_names: list[str] = []
             for item in resolved.skill_mounts:
@@ -1030,7 +1043,8 @@ def _base_docker_arguments(runtime: ContainerRuntime) -> list[str]:
                 "-e",
                 "CAGE_REMOTE_MCP_SERVERS="
                 + json.dumps(
-                    resolved.remote_mcp,
+                    oauth_broker.routed_servers(resolved.remote_mcp, runtime.oauth_connection, "cage-oauth.internal")
+                    if runtime.oauth_connection else resolved.remote_mcp,
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ),
@@ -1155,8 +1169,22 @@ def _run_ordinary(
     if not runtime.lifecycle.requires_supervision:
         os.execvp(runtime.docker, command)
         return 127
-    result = subprocess.run(command, check=False)
-    return result.returncode
+    if runtime.oauth_connection is None:
+        result = subprocess.run(command, check=False)
+        return result.returncode
+    child = subprocess.Popen(command)
+    try:
+        while True:
+            try:
+                return child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                if runtime.oauth_connection.poll() is not None:
+                    runtime.run(["stop", "--time", "2", runtime.container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    raise ContainerTargetError("OAuth broker exited; stopped target fail-closed")
+    finally:
+        if child.poll() is None:
+            terminate_process(child, grace_seconds=2.0, process_group=False)
+
 
 
 def _prepare_codex_monitor(runtime: ContainerRuntime) -> None:
@@ -1272,6 +1300,29 @@ def _restore_signal_handlers(previous) -> None:
         signal.signal(signum, handler)
 
 
+def _codex_host_snapshot(runtime: ContainerRuntime, home: Path) -> Path:
+    from ..state.oauth import _read_regular
+    snapshot = Path(tempfile.mkdtemp(prefix=".cage-codex-config-", dir=runtime.config_root))
+    runtime.lifecycle.register("Codex static configuration snapshot", lambda: (shutil.rmtree(snapshot), 0)[1])
+    names = {"config.toml", "AGENTS.md", "AGENTS.override.md", "hooks.json"}
+    if runtime.resolved.codex_copy_auth != "0":
+        names.add("auth.json")
+    names.update(path.name for path in home.glob("*.config.toml"))
+    for name in names:
+        blob = _read_regular(str(home / name), 16 * 1024 * 1024, "host Codex configuration")
+        if blob:
+            target = snapshot / name
+            target.write_bytes(blob["raw"])
+            target.chmod(0o600)
+    rules = home / "rules"
+    if rules.exists():
+        if rules.is_symlink() or not rules.is_dir():
+            raise ContainerTargetError("host Codex rules must be a real directory")
+        shutil.copytree(rules, snapshot / "rules", symlinks=True)
+    runtime.codex_snapshot = snapshot
+    return snapshot
+
+
 def _has_selected_oauth_mcp(runtime: ContainerRuntime) -> bool:
     return any(
         server.get("auth") == "oauth"
@@ -1319,14 +1370,6 @@ def run_container_target(
                 runtime.resolved.host_codex_dir
                 or (Path.home() / ".codex")
             ).expanduser()
-            if _has_selected_oauth_mcp(runtime):
-                lease = OAuthSessionLease.acquire(codex_home, create=True)
-                # Register this before post-run reconciliation, so the latter
-                # writes the rotated credential while the lease is still held.
-                runtime.lifecycle.register(
-                    "Codex OAuth session lease",
-                    lease.close,
-                )
         if prepared.plan.tool == "opencode":
             volume = runtime.run(
                 ["volume", "create", prepared.plan.volume_name],
@@ -1362,6 +1405,13 @@ def run_container_target(
                 lambda: _cleanup_opencode_state(opencode_state),
             )
         proxy_arguments = _start_netgate(runtime)
+        if prepared.plan.tool == "codex" and _has_selected_oauth_mcp(runtime) and prepared.plan.network != "off":
+            runtime.oauth_connection = oauth_broker.connect(
+                codex_home, install_root,
+                servers=oauth_broker.selected_servers(runtime.resolved.remote_mcp),
+                proxy=runtime.oauth_proxy,
+            )
+            runtime.lifecycle.register("shared MCP OAuth session", runtime.oauth_connection.close)
         mcp = _start_bridge(
             runtime,
             kind="mcp",
@@ -1402,22 +1452,6 @@ def run_container_target(
                     session_sync.sync_out,
                 )
 
-        oauth: OAuthReconciler | None = None
-        if prepared.plan.tool == "codex":
-            assert codex_home is not None
-            if codex_home.is_dir():
-                oauth = OAuthReconciler(
-                    volume_name=prepared.plan.volume_name,
-                    image=prepared.plan.image,
-                    host_directory=codex_home,
-                    config_directory=config_root.resolve(),
-                    docker=docker,
-                )
-                oauth.reconcile()
-                runtime.lifecycle.register(
-                    "Codex OAuth reconciliation",
-                    lambda: _cleanup_oauth(oauth),
-                )
         yolo_label = " [YOLO]" if prepared.plan.yolo else ""
         network_label = runtime.proxy_label
         if prepared.plan.network == "off":
@@ -1503,18 +1537,6 @@ def run_container_target(
         primary_status = runtime.lifecycle.cleanup(primary_status)
         _restore_signal_handlers(previous_handlers)
     return primary_status
-
-
-def _cleanup_oauth(oauth: OAuthReconciler) -> int:
-    try:
-        oauth.reconcile()
-        return 0
-    except (SyncError, OSError, ValueError) as exc:
-        print(
-            f"ERROR: Codex OAuth credential sync failed: {exc}",
-            file=sys.stderr,
-        )
-        return 1
 
 
 def _cleanup_opencode_state(state: OpenCodeStateReconciler) -> int:

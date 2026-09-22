@@ -318,6 +318,9 @@ def build_launch_plan(
     if target == "host":
         capabilities = ["host-native", "unrestricted-network"]
 
+    if resolved.tool == "codex" and network != "off" and any(server.get("auth") == "oauth" for server in resolved.remote_mcp):
+        capabilities.append("mcp-oauth-broker")
+
     warnings = tuple(resolved.warnings) + mount_warnings
     plan = LaunchPlan(
         cage_version=cage_version,

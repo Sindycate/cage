@@ -37,12 +37,13 @@ class SyncError(Exception):
 
 @dataclass
 class OAuthSessionLease:
-    """An exclusive, lifetime lease for mutable OAuth state in one CODEX_HOME.
+    """Exclusive credential ownership shared with pre-broker Cage launchers.
 
     OAuth providers may rotate refresh tokens.  Synchronizing the file before
     and after a container run cannot make two independently running Codex
     processes safe: either can retain and later spend the same old refresh
-    token.  The lease is deliberately rooted in the selected host Codex
+    token. The shared broker holds this lease once for all its clients.
+    The lease is deliberately rooted in the selected host Codex
     directory, rather than Cage's config directory or a project volume, so all
     Cage targets which use one ``CODEX_HOME`` coordinate with each other.
     """
@@ -620,6 +621,58 @@ os.close(directory)
 '''
 
 
+
+def _ensure_host_unchanged(
+    path: str, observed: dict[str, Any] | None
+) -> None:
+    current = _credential_blob(
+        path,
+        "host OAuth credentials",
+        missing_ok=observed is None,
+    )
+    if (current is None) != (observed is None):
+        raise SyncError("host OAuth credentials changed during reconciliation")
+    if current is not None and observed is not None and (
+        current["raw_hash"] != observed["raw_hash"]
+        or current["fingerprint"] != observed["fingerprint"]
+    ):
+        raise SyncError("host OAuth credentials changed during reconciliation")
+
+def atomic_credential_write(
+    path: str, data: bytes, observed: dict[str, Any] | None
+) -> None:
+    _ensure_host_unchanged(path, observed)
+    directory = os.path.dirname(path)
+    descriptor: int | None = None
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".credentials.json.cage-", dir=directory
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _ensure_host_unchanged(path, observed)
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+
 @dataclass(frozen=True)
 class OAuthReconciler:
     volume_name: str
@@ -852,55 +905,8 @@ class OAuthReconciler:
                 blob["source_mode"] = manifest[key]["mode"]
         return credential, state
 
-    @staticmethod
-    def _ensure_host_unchanged(
-        path: str, observed: dict[str, Any] | None
-    ) -> None:
-        current = _credential_blob(
-            path,
-            "host OAuth credentials",
-            missing_ok=observed is None,
-        )
-        if (current is None) != (observed is None):
-            raise SyncError("host OAuth credentials changed during reconciliation")
-        if current is not None and observed is not None and (
-            current["raw_hash"] != observed["raw_hash"]
-            or current["fingerprint"] != observed["fingerprint"]
-        ):
-            raise SyncError("host OAuth credentials changed during reconciliation")
-
-    def _atomic_host_write(
-        self, path: str, data: bytes, observed: dict[str, Any] | None
-    ) -> None:
-        self._ensure_host_unchanged(path, observed)
-        directory = os.path.dirname(path)
-        descriptor: int | None = None
-        temporary: str | None = None
-        try:
-            descriptor, temporary = tempfile.mkstemp(
-                prefix=".credentials.json.cage-", dir=directory
-            )
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb", closefd=False) as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._ensure_host_unchanged(path, observed)
-            os.replace(temporary, path)
-            temporary = None
-            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            if temporary is not None:
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
+    def _atomic_host_write(self, path, data, observed) -> None:
+        atomic_credential_write(path, data, observed)
 
     @staticmethod
     def _write_stage(path: str, data: bytes) -> None:

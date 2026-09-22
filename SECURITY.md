@@ -121,6 +121,34 @@ External systems also have a separate side-effect boundary: containing local
 filesystem writes does not undo a pushed Git commit, changed ticket, sent
 message, or modified cloud resource.
 
+## Shared Codex MCP OAuth broker
+
+Selecting an OAuth MCP enables the `mcp-oauth-broker` capability. One host
+process per auth directory owns its OAuth file and legacy lease; cages receive
+revocable local bearer capabilities restricted to their selected server names
+and fixed upstream URLs. The data listener is reachable from Docker and binds
+all host interfaces; requests require the random per-launch capability and
+reject browser origins. Its separate control listener is loopback-only and
+requires a private host-owned manifest credential. This is a trusted local
+host service, not containment against other processes running as the host user.
+
+Refresh tokens are excluded from container mounts and volume synchronization.
+Supported static configuration and optional Codex `auth.json` are snapshotted;
+this does not change the confidentiality limits of those remaining inputs.
+Streaming responses and upstream MCP session IDs stay scoped to each client.
+The broker serializes credential mutations, rejects redirects and checks OAuth
+resource, issuer, client and requested scopes. Refresh is journaled before the
+request: an uncertain outcome requires login instead of reusing a rotating token.
+Login/logout run under that same credential owner; old Cage session leases are
+never bypassed. Direct Codex processes do not participate in Cage's ownership
+protocol and must not concurrently use this MCP OAuth store.
+
+Gated sessions route broker resource, discovery and refresh traffic through
+that session's authenticated Netgate proxy. Only the local broker hostname is
+added to proxy exclusions. Network-off launches start no broker. A closed
+control connection revokes that client's routes, and broker failure stops
+supervised targets. Already-dispatched external operations cannot be undone.
+
 ## Host-native execution (target = "host")
 
 Cage supports running Codex directly on the host without a Docker container.
@@ -171,7 +199,7 @@ adoption remain outside monitoring. The managed home is shared by aliases for
 the same canonical auth directory, so one monitored host session at a time is
 allowed for that source. Separate auth directories remain independent. Run
 `cage monitor disable --auth AUTH` to restore direct routing without deleting
-the managed history. Copied `auth.json` and selected MCP OAuth credentials use
+the managed history. Copied `auth.json` uses
 source-wins write-back after a managed session; managed deletions never delete
 the original source credential automatically.
 

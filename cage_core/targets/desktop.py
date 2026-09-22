@@ -60,6 +60,8 @@ def _write_runtime_environment(
                 continue
         filtered.append(argument)
         index += 1
+    if runtime.oauth_connection is not None:
+        secrets_by_name["CAGE_OAUTH_BROKER_TOKEN"] = runtime.oauth_connection.result["token"]
     state_dir = Path(os.environ["CAGE_DESKTOP_STATE_DIR"])
     path = _temporary_path(
         runtime,
@@ -222,6 +224,9 @@ def run_desktop(
         ).strip()
         if running != "true":
             break
+        if runtime.oauth_connection is not None and runtime.oauth_connection.poll() is not None:
+            print("ERROR: desktop OAuth broker exited; stopping target fail-closed", file=sys.stderr)
+            return 70
         for name, process in runtime.dependency_processes:
             if process.poll() is not None:
                 print(

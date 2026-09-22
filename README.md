@@ -588,19 +588,25 @@ cage mcp logout --preset NAME SERVER /path/to/repo
 The preset form remains required for OpenCode OAuth flows. Do not add a
 repository path to the Codex `--auth` form.
 
-For Codex, cage synchronizes `.credentials.json` between the resolved host
-Codex directory and the per-repo Docker volume before launch and after exit.
-This keeps providers that rotate MCP OAuth refresh tokens, such as Dash0, from
-leaving stale token copies in either place. For a preset with a selected OAuth
-MCP, Cage also holds one non-waiting session lease per resolved host Codex
-directory. A second Cage Codex launch using that directory stops before it can
-reuse an in-memory pre-rotation token; wait for the first session to exit or
-use a distinct `host_codex_dir` with its own OAuth login. `cage mcp login` and
-`cage mcp logout` use the same lease.
+Codex cages can share the same auth directory and MCP OAuth login concurrently.
+Cage starts one local OAuth broker per `host_codex_dir`. The broker owns the
+host `.credentials.json`, refreshes tokens, and forwards selected MCP traffic.
+Each cage receives a separate temporary local capability, with its own MCP
+sessions and selected-server allowlist. Refresh, login, and logout operations
+are serialized; ordinary requests run concurrently. Closing one cage leaves
+other cages connected. The broker exits shortly after its last client leaves.
 
-If an OAuth provider has already rejected a refresh token, stop every Codex
-session that uses the affected `CODEX_HOME`, then log out and log in once with
-the affected auth block:
+`cage mcp login` and `cage mcp logout` coordinate with that same broker. Gated
+sessions retain their own Netgate route, including token-refresh requests.
+No extra profile or configuration switch is needed. On upgrade, finish sessions
+started by an older Cage version before starting the first shared broker. Do
+not remove the lease file. Direct Codex processes outside Cage must not use the
+same MCP OAuth store while the broker owns it. Token Monitor's adopted host
+store retains its independent single-session state-ownership restriction.
+
+If an OAuth provider has already rejected a refresh token, log out and log in once
+with the affected auth block (older Cage or direct Codex sessions must finish
+first):
 
 ```bash
 cage mcp logout --auth AUTH SERVER
@@ -937,7 +943,8 @@ central preset. Mounts vary by tool:
 | Mount | Path in container | Access |
 |-------|-------------------|--------|
 | Your repo | same absolute path as on host | **read-write** |
-| Codex host directory from preset auth | `/host-codex` | read-only |
+| Private snapshot of supported Codex host configuration and optional `auth.json` | `/host-codex` | read-only |
+| Per-launch MCP OAuth capability (when selected) | `/run/cage-oauth-token` | read-only |
 | Selected Codex skills from `skill_packs` | `/host-agent-skills/<name>` | read-only |
 | Legacy Codex agents directory *(only when no `skill_packs` are selected)* | `/host-agents` | read-only |
 | Docker volume (per-repo) | `/home/codex/.codex` | read-write |
@@ -963,7 +970,7 @@ credential environment variables are mounted for that relay; the host CLI uses
 its own browser/SSO and credential state. This is a deliberate host-integrated
 escape from the container's Netgate path, not an AWS read-only sandbox.
 
-On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials in `.credentials.json` are synchronized by the host launcher before and after the run so refresh-token rotation persists outside the container volume. OAuth-enabled Cage sessions sharing one host Codex directory are serialized for their full lifetime, including this post-run sync.
+On each start, the entrypoint copies host settings into the container's writable volume. For Claude Code, this includes `settings.json`, `CLAUDE.md`, and `agents/`. For Codex, auth/config files from `~/.codex/` are copied in; selected skill-pack skills are copied into `$HOME/.agents/skills`, or the whole host agents directory is copied when no `skill_packs` are selected. Codex MCP OAuth credentials remain on the host and are owned by the shared broker. The container receives a private configuration snapshot without `.credentials.json`; stale volume copies are removed on launch and never synchronized back. Parallel cages share authentication while retaining independent MCP sessions.
 
 The OpenCode entrypoint resolves the private snapshot under tmpfs-backed
 `/run`, expands selected MCP credentials there, sanitizes plugins according to

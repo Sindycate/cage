@@ -1611,6 +1611,9 @@ def main(
             / "cage",
         )
     ).expanduser()
+    if len(arguments) == 2 and arguments[0] == "_oauth-broker":
+        from .oauth_broker import serve
+        return serve(Path(arguments[1]))
     if arguments and arguments[0] in {"--version", "-V"}:
         print(f"cage {version}")
         return 0

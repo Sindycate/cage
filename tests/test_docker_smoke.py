@@ -576,6 +576,7 @@ class DockerSmokeTests(unittest.TestCase):
                         "MCP_BRIDGE_HOST": "host.docker.internal",
                         "MCP_BRIDGE_PORT_PROBE": "4321",
                         "MCP_BRIDGE_TOKEN": "mcp-bridge-secret",
+                        "CAGE_OAUTH_BROKER_TOKEN": "oauth-session-fixture",
                         "HOST_CMD_BRIDGE_HOST": "host.docker.internal",
                         "HOST_CMD_BRIDGE_PORT_HOSTPROBE": "5432",
                         "HOST_CMD_BRIDGE_TOKEN": "host-bridge-secret",
@@ -594,6 +595,7 @@ class DockerSmokeTests(unittest.TestCase):
                 "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
                 "[ \"$TEST_DESKTOP_PROVIDER\" = provider-secret ] || exit 41\n"
                 "[ \"$MCP_BRIDGE_TOKEN\" = mcp-bridge-secret ] || exit 42\n"
+                "[ \"$CAGE_OAUTH_BROKER_TOKEN\" = oauth-session-fixture ] || exit 49\n"
                 "[ \"$MCP_BRIDGE_PORT_PROBE\" = 4321 ] || exit 43\n"
                 "[ \"$HOST_CMD_BRIDGE_TOKEN\" = host-bridge-secret ] || exit 44\n"
                 "[ \"$HOST_CMD_BRIDGE_PORT_HOSTPROBE\" = 5432 ] || exit 45\n"

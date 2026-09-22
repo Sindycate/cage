@@ -111,3 +111,14 @@ external connector actions retain the authority documented in `SECURITY.md`.
 - [Automatic approval review](https://learn.chatgpt.com/docs/sandboxing/auto-review)
 - [`codex app` and app-server commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli#cli-codex-app)
 - [Connect ChatGPT to an SSH host](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host)
+
+
+### Parallel MCP OAuth sessions
+
+Desktop targets and ordinary Codex cages sharing one auth directory attach to
+one host OAuth broker. Each target has its own local capability and MCP protocol
+sessions. The capability is handed to every SSH app-server process through the
+private runtime environment and is not written into generated TOML or Docker
+metadata. Stopping one target leaves the other clients connected. Broker loss
+stops its targets fail-closed. Finish older-version targets before upgrading;
+their existing credential leases remain authoritative until they exit.

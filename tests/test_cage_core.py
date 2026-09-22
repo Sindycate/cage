@@ -249,6 +249,7 @@ class LifecycleCoordinatorTests(unittest.TestCase):
         from cage_core.targets.desktop import run_desktop
 
         class Runtime:
+            oauth_connection = None
             plan = SimpleNamespace(
                 image="codex:test",
                 volume_name="desktop-volume",
@@ -375,7 +376,7 @@ class IsolatedBootstrapTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "cage 0.36.9")
+        self.assertEqual(result.stdout.strip(), "cage 0.37.0")
         self.assertFalse(sentinel.exists())
 
     def test_symlinked_core_package_is_rejected(self):

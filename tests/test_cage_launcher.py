@@ -481,7 +481,7 @@ class CageLauncherTests(unittest.TestCase):
                             blocked.stderr,
                         )
                         self.assertIn(
-                            "another Cage Codex session is already using OAuth credentials",
+                            "finish older Cage sessions sharing this auth directory first",
                             blocked.stderr,
                         )
                         self.assertNotIn("fake codex", blocked.stdout)

@@ -10,9 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .. import config, monitor
+from .. import config, monitor, oauth_broker
 from ..planning import PreparedLaunch
-from ..state import OAuthSessionLease, SyncError
+from ..state import SyncError
 
 
 class HostTargetError(RuntimeError):
@@ -122,6 +122,7 @@ def _run_supervised_host_codex(
     arguments: list[str],
     environment: dict[str, str],
     repository: Path,
+    oauth_connection: oauth_broker.BrokerConnection | None = None,
 ) -> int:
     """Run Codex without losing its terminal or skipping monitor cleanup."""
 
@@ -147,7 +148,18 @@ def _run_supervised_host_codex(
         signal.signal(signal.SIGINT, forward)
         signal.signal(signal.SIGTERM, forward)
         try:
-            return _return_code(child.wait())
+            while True:
+                try:
+                    return _return_code(child.wait(timeout=0.5))
+                except subprocess.TimeoutExpired:
+                    if oauth_connection is not None and oauth_connection.poll() is not None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait()
+                        raise HostTargetError("OAuth broker exited; stopped target fail-closed")
         except _HostSignalExit as exc:
             try:
                 return _return_code(child.wait(timeout=10))
@@ -222,8 +234,9 @@ def run_host_target(
 ) -> int:
     """Run pinned host Codex, optionally through an adopted Cage-only store.
 
-    Unadopted host launches retain the historical ``execve`` path exactly:
-    they neither require Docker nor create monitor state.  An explicit
+    Unadopted host launches without OAuth retain the ``execve`` path. OAuth
+    launches are supervised to retain the broker connection. Neither requires
+    Docker or creates monitor state.  An explicit
     auth-source adoption changes only matching Cage launches to a private
     managed home, which gives the collector a reliable Cage-only session
     boundary.
@@ -237,7 +250,7 @@ def run_host_target(
     ).expanduser()
     managed_session: monitor.HostSourceSession | None = None
     source_lease: monitor.HostSourceLease | None = None
-    oauth_lease: OAuthSessionLease | None = None
+    oauth_connection: oauth_broker.BrokerConnection | None = None
     worker: monitor.ActiveMonitor | None = None
 
     if config_root is not None:
@@ -261,28 +274,14 @@ def run_host_target(
                     source_lease.close()
                     source_lease = None
                 else:
-                    has_oauth = any(
-                        server.get("auth") == "oauth"
-                        for server in resolved.remote_mcp
-                    )
-                    if has_oauth:
-                        oauth_lease = OAuthSessionLease.acquire(
-                            source_home, create=True
-                        )
                     managed_session = monitor.prepare_host_source(
                         config_root,
                         record,
                         source_home,
                         copy_auth=resolved.codex_copy_auth != "0",
-                        copy_oauth_credentials=has_oauth,
+                        copy_oauth_credentials=False,
                     )
             except (monitor.MonitorError, SyncError) as exc:
-                if oauth_lease is not None:
-                    try:
-                        oauth_lease.close()
-                    except SyncError:
-                        pass
-                    oauth_lease = None
                 if source_lease is not None:
                     try:
                         source_lease.close()
@@ -354,16 +353,20 @@ def run_host_target(
             f"<{resolved.git_user_email}>",
             file=sys.stderr,
         )
-    if oauth_lease is not None:
-        print("  OAuth:      exclusive source CODEX_HOME lease", file=sys.stderr)
     print("", file=sys.stderr)
 
     try:
-        if managed_session is None:
-            if any(server.get("auth") == "oauth" for server in resolved.remote_mcp):
-                oauth_lease = OAuthSessionLease.acquire(codex_home, create=True)
-                print("  OAuth:      exclusive CODEX_HOME lease", file=sys.stderr)
-                oauth_lease.preserve_across_exec()
+        selected = oauth_broker.selected_servers(resolved.remote_mcp)
+        if selected:
+            oauth_connection = oauth_broker.connect(source_home, install_root or Path(__file__).resolve().parents[2], servers=selected)
+            payload["remote"] = oauth_broker.routed_servers(resolved.remote_mcp, oauth_connection, "127.0.0.1")
+            tool_arguments = config.host_codex_arg_lines(payload, repository, codex_home)
+            if plan.yolo:
+                tool_arguments.append("--yolo")
+            tool_arguments.extend(prepared.request.tool_arguments)
+            environment[oauth_broker.TOKEN_ENV] = oauth_connection.result["token"]
+            print("  OAuth:      shared host broker", file=sys.stderr)
+        if managed_session is None and oauth_connection is None:
             os.chdir(repository)
             os.execve(
                 executable,
@@ -372,6 +375,8 @@ def run_host_target(
             )
             return 127
 
+        if managed_session is None:
+            return _run_supervised_host_codex(executable, tool_arguments, environment, repository, oauth_connection)
         assert config_root is not None
         worker = _start_host_monitor(
             config_root=config_root,
@@ -384,6 +389,7 @@ def run_host_target(
             tool_arguments,
             environment,
             repository,
+            oauth_connection,
         )
     except SyncError as exc:
         raise HostTargetError(f"cannot start Codex OAuth session: {exc}") from exc
@@ -399,11 +405,8 @@ def run_host_target(
                 # tells the user that changed managed credentials were
                 # deliberately not written over an independent source update.
                 print(f"WARNING: Codex credential sync skipped: {exc}", file=sys.stderr)
-        if oauth_lease is not None:
-            try:
-                oauth_lease.close()
-            except SyncError:
-                pass
+        if oauth_connection is not None:
+            oauth_connection.close()
         if source_lease is not None:
             try:
                 source_lease.close()

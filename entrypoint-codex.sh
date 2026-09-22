@@ -84,9 +84,8 @@ fi
 # logs, memories, caches, and similar entries) must remain volume-local: copying
 # or replacing it from a shared host Codex directory can hide or destroy the
 # repository's resumable history. When copy_auth is disabled, auth.json is
-# explicitly removed. Codex MCP OAuth's .credentials.json is also reconciled by
-# the host launcher before/after the container runs so rotated refresh tokens do
-# not diverge between the host Codex dir and this volume.
+# explicitly removed. Broker-enabled launches exclude MCP OAuth credentials
+# from the snapshot and discard legacy volume copies; refresh stays host-owned.
 reconcile_codex_auth() {
     local host_dir="$1"
     local codex_dir="$2"
@@ -162,12 +161,22 @@ import_host_codex_state() {
         "$host_dir"/.credentials.json; do
         [ -e "$source" ] || continue
         name="${source##*/}"
+        if [ "$name" = ".credentials.json" ] && [ "${CAGE_OAUTH_BROKER:-0}" = "1" ]; then
+            continue
+        fi
         copy_host_codex_entry "$source" "$name"
     done
     if [ -e "$host_dir/rules" ]; then
         copy_host_codex_directory "$host_dir/rules" rules
     fi
 }
+
+if [ "${CAGE_OAUTH_BROKER:-0}" = "1" ]; then
+    rm -f -- "$CODEX_DIR/.credentials.json" "$CODEX_DIR/.cage-oauth-sync-state.json"
+    if [ -f /run/cage-oauth-token ]; then
+        export CAGE_OAUTH_BROKER_TOKEN="$(cat /run/cage-oauth-token)"
+    fi
+fi
 
 if [ -d /host-codex ]; then
     import_host_codex_state /host-codex
@@ -682,6 +691,7 @@ fixed = {
     "HTTPS_PROXY",
     "NO_PROXY",
     "OPENAI_API_KEY",
+    "CAGE_OAUTH_BROKER_TOKEN",
     "http_proxy",
     "https_proxy",
     "no_proxy",

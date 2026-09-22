@@ -6,6 +6,36 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.0 — 2026-09-22
+
+### Shared Codex MCP OAuth authentication
+
+Existing auth blocks and `cage mcp login --auth AUTH SERVER` commands keep their
+meaning. New cages sharing one `host_codex_dir` attach to a shared local broker;
+no repeated login or per-project auth directory is required. Finish cages
+started by an older version before the first broker starts. Never delete a live
+lease file or copy refresh tokens into another auth profile.
+
+The broker owns host `.credentials.json`. Container mounts now contain only
+supported static configuration and optional `auth.json`; old volume OAuth files
+are removed at startup and never copied back. Finish older sessions first so
+their existing post-run synchronization can complete. Runtime history remains
+volume-owned. Direct Codex outside Cage must not concurrently use this OAuth
+store. An adopted Token Monitor host store retains its separate lifetime lease.
+
+Refresh/login/logout operations serialize, while MCP requests and separate
+protocol sessions can run in parallel. Each launcher owns a separate local
+capability. Closing it revokes that capability; other clients continue. The
+broker stops after five seconds without clients. Gated sessions retain their
+own Netgate policy and network-off sessions start no broker.
+
+If refresh was interrupted after sending a rotating token, Cage cannot know
+whether the provider consumed it. The broker records that uncertainty and asks
+for `cage mcp login` instead of retrying the old token. A server rejecting an
+access token triggers refresh but does not automatically replay the original
+MCP operation; retry the operation after the refresh response. Changed OAuth
+client/scopes or ambiguous credentials also require a matching login.
+
 ## 0.36.9 — 2026-09-15
 
 ### Token Monitor cache-write period alignment

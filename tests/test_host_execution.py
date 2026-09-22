@@ -751,13 +751,13 @@ class TestHostCapabilities(unittest.TestCase):
         )
         self.addCleanup(temporary.cleanup)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('mcp_servers.dash0.oauth_resource="https://example.test"', result.stdout)
-        self.assertIn('mcp_servers.dash0.scopes=["read"]', result.stdout)
-        self.assertIn('mcp_servers.dash0.oauth.client_id="public-client-id"', result.stdout)
-        self.assertIn('mcp_oauth_credentials_store="file"', result.stdout)
+        self.assertIn('mcp_servers.dash0.url="http://127.0.0.1:', result.stdout)
+        self.assertIn('mcp_servers.dash0.bearer_token_env_var="CAGE_OAUTH_BROKER_TOKEN"', result.stdout)
+        self.assertNotIn('public-client-id', result.stdout)
+        self.assertNotIn('oauth_resource', result.stdout)
         self.assertNotIn("mcp_servers.dash0.auth", result.stdout)
 
-    def test_oauth_lease_survives_host_exec(self):
+    def test_broker_holds_legacy_lease_during_host_session(self):
         config = '\n'.join([
             "version = 1", 'default_preset = "main"',
             "[mcp_packs.google]",
@@ -772,7 +772,7 @@ class TestHostCapabilities(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("OAUTH_LEASE=blocked", result.stdout)
-        self.assertIn("exclusive CODEX_HOME lease", result.stderr)
+        self.assertIn("shared host broker", result.stderr)
 
     def test_host_commands_rejected(self):
         config = '\n'.join([

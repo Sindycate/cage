@@ -238,8 +238,25 @@ class OAuthSyncHardeningTests(unittest.TestCase):
         environment = self.launch_environment(
             codex_home, volume=volume, **extra_env
         )
+        # Legacy reconciliation remains independently covered, but ordinary Cage
+        # launches now use the broker and must never run this copy-back adapter.
+        program = """
+from pathlib import Path
+import subprocess, sys
+from cage_core.state.oauth import OAuthReconciler, SyncError
+home, config, docker, volume = sys.argv[1:]
+sync = OAuthReconciler(volume_name='fixture', image='codex:fixture', host_directory=Path(home), config_directory=Path(config), docker=docker)
+try:
+    sync.reconcile()
+    status = subprocess.call([docker, 'run', '-v', home + ':/host-codex:ro', 'fixture'])
+    sync.reconcile()
+except (SyncError, OSError, ValueError) as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+sys.exit(status)
+"""
         return subprocess.run(
-            [str(CAGE), str(self.repo)],
+            [sys.executable, '-c', program, str(codex_home), str(self.xdg / 'cage'), str(self.bin / 'docker'), str(volume or self.volume)],
             cwd=ROOT,
             env=environment,
             text=True,
@@ -444,6 +461,30 @@ class OAuthSyncHardeningTests(unittest.TestCase):
             stat.S_IMODE((codex_home / ".cage-oauth-session.lock").stat().st_mode),
             0o600,
         )
+
+    def test_parallel_launchers_use_broker_without_mounting_host_credentials(self):
+        codex_home = self.make_codex_home("shared-auth", {"token": "host-fixture"})
+        ready, release = self.base / "ready", self.base / "release"
+        first = self.launch_process(codex_home, oauth=True, FAKE_MAIN_ACTION="hold",
+                                    FAKE_HOLD_READY=ready, FAKE_HOLD_RELEASE=release)
+        try:
+            self.wait_for(ready)
+            second = subprocess.run([str(CAGE), str(self.repo)], cwd=ROOT,
+                                    env=self.launch_environment(codex_home), text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIsNone(first.poll())
+            entries = [json.loads(line) for line in self.log.read_text().splitlines()]
+            self.assertFalse(any(entry["helper"] for entry in entries))
+            mounts = [mount for entry in entries for mount in entry["legacy_mounts"]]
+            self.assertNotIn(f"{codex_home}:/host-codex:ro", mounts)
+            self.assertTrue(any(":/host-codex:ro" in mount for mount in mounts))
+            self.assertEqual(self.read_json(codex_home / ".credentials.json"), {"token": "host-fixture"})
+            self.assertFalse((self.volume / ".credentials.json").exists())
+        finally:
+            release.touch()
+            _, stderr = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, stderr)
 
     def test_oauth_session_lease_rejects_a_second_process_then_releases(self):
         codex_home = self.make_codex_home("codex-lease-contention")

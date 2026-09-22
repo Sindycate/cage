@@ -5,6 +5,20 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.0 — 2026-09-22
+
+- allow parallel Codex containers, Desktop targets, and unmonitored host sessions
+  to share one MCP OAuth login through a local credential-owning broker;
+- keep refresh tokens on the host, serialize refresh/login/logout, and retain
+  independent MCP sessions and per-launch server permissions;
+- revoke a session's local capability when its launcher disconnects, preserve
+  other sessions, and stop supervised targets if the broker fails;
+- route gated broker traffic through the requesting session's Netgate proxy;
+  replace broad Codex home mounts with private static configuration snapshots;
+- preserve old-session leases during upgrades and require reauthorization after
+  an interrupted refresh whose outcome cannot be established. See the
+  [migration guide](docs/hardening/MIGRATIONS.md#0370--2026-09-22).
+
 ## 0.36.9 — 2026-09-15
 
 - align supplemental cache-write accounting with the pinned parser's request
