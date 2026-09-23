@@ -83,10 +83,73 @@ class CodexEntrypointTests(unittest.TestCase):
             generated = config_path.read_text()
 
         self.assertIn('mcp_oauth_credentials_store = "file"', generated)
+        self.assertIn('rmcp_client = true', generated)
+        self.assertNotIn('experimental_use_rmcp_client', generated)
         self.assertIn('[mcp_servers."dash0"]', generated)
         self.assertIn('url = "https://api.eu-central-1.aws.dash0.com/mcp"', generated)
         self.assertIn('oauth_resource = "https://api.eu-central-1.aws.dash0.com"', generated)
         self.assertIn('scopes = ["*"]', generated)
+
+    def test_legacy_rmcp_feature_is_migrated_without_selected_servers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "[features]\n"
+                "experimental_use_rmcp_client = true\n"
+                "web_search_request = true\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["CODEX_CONFIG_PATH"] = str(config_path)
+            env.pop("CAGE_MCP_SERVERS", None)
+            env.pop("CAGE_REMOTE_MCP_SERVERS", None)
+
+            result = subprocess.run(
+                ["python3", "-c", self.entrypoint_python()],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = config_path.read_text(encoding="utf-8")
+
+        self.assertIn("rmcp_client = true", generated)
+        self.assertIn("web_search_request = true", generated)
+        self.assertNotIn("experimental_use_rmcp_client", generated)
+
+    def test_explicit_rmcp_feature_override_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                "[features]\nrmcp_client = false\n", encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "CODEX_CONFIG_PATH": str(config_path),
+                    "CAGE_REMOTE_MCP_SERVERS": (
+                        '[{"name":"docs","type":"http",'
+                        '"url":"https://docs.example/mcp","auth":"none"}]'
+                    ),
+                }
+            )
+
+            result = subprocess.run(
+                ["python3", "-c", self.entrypoint_python()],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = config_path.read_text(encoding="utf-8")
+
+        self.assertIn("rmcp_client = false", generated)
+        self.assertNotIn("rmcp_client = true", generated)
+        self.assertNotIn("experimental_use_rmcp_client", generated)
 
 
 if __name__ == "__main__":

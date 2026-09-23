@@ -5,6 +5,11 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.4 — 2026-09-23
+
+- migrate the legacy Codex RMCP feature key to `[features].rmcp_client`,
+  preserving explicit settings and clearing the deprecated-key warning;
+
 ## 0.37.3 — 2026-09-22
 
 - separate Token Monitor and configuration into cohesive components while

@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-23 — Codex RMCP feature-key migration prepared for v0.37.4
+
+Codex now expects `rmcp_client` under `[features]`; Cage had continued adding
+the deprecated `experimental_use_rmcp_client` key. Because host Codex config is
+imported on startup and the container config persists, that key could keep
+producing a warning even after Cage's source changed. Reconcile the feature on
+every Codex startup: rename a legacy entry while preserving its value, remove
+duplicate legacy entries if the canonical key exists, and add the canonical
+flag only when selected MCP servers need it and no explicit key is present.
+
+Regression coverage checks fresh HTTP MCP config, migration with no selected
+servers, and preservation of an explicit canonical override. The focused test
+file passes (4 tests); `bash -n entrypoint-codex.sh` and `git diff --check` pass.
+The canonical publisher owns full release validation and public verification.
+
 ## 2026-09-22 — Monitor and configuration boundaries prepared for v0.37.3
 
 Replaced the 6,472-line monitor and 3,410-line configuration implementations

@@ -377,15 +377,63 @@ def write_text_atomic(destination, value):
             pass
 
 
-def ensure_rmcp_feature(src):
-    if 'experimental_use_rmcp_client' in src:
-        return src
-    feature_match = re.search(r'(?m)^\s*\[features\]\s*$', src)
+def ensure_rmcp_feature(src, required=False):
+    # Codex renamed this feature; reconcile every launch because host config is
+    # imported into persistent container state before this block runs.
+    feature_match = re.search(r'(?m)^[ \t]*\[features\][ \t]*(?:#.*)?\r?$', src)
     if not feature_match:
-        suffix = '' if not src or src.endswith('\n') else '\n'
-        return src + suffix + '\n[features]\nexperimental_use_rmcp_client = true\n'
-    insert_at = feature_match.end()
-    return src[:insert_at] + '\nexperimental_use_rmcp_client = true' + src[insert_at:]
+        if not required:
+            return src
+        separator = '' if not src else ('\n' if src.endswith('\n') else '\n\n')
+        return src + separator + '[features]\nrmcp_client = true\n'
+
+    section_start = feature_match.end()
+    next_table = re.search(r'(?m)^[ \t]*\[', src[section_start:])
+    section_end = (
+        section_start + next_table.start() if next_table else len(src)
+    )
+    section = src[section_start:section_end]
+    legacy = re.compile(
+        r'(?m)^([ \t]*)experimental_use_rmcp_client([ \t]*=[ \t]*)([^\r\n]*)(\r?\n|$)'
+    )
+    current = re.compile(r'(?m)^[ \t]*rmcp_client[ \t]*=.*(?:\r?\n|$)')
+
+    if current.search(section):
+        section = legacy.sub('', section)
+    elif legacy.search(section):
+        migrated = False
+
+        def migrate_legacy(match):
+            nonlocal migrated
+            if migrated:
+                return ''
+            migrated = True
+            return '%srmcp_client%s%s%s' % (
+                match.group(1), match.group(2), match.group(3), match.group(4)
+            )
+
+        section = legacy.sub(migrate_legacy, section)
+    elif required:
+        after_header = src[section_start:]
+        newline = re.match(r'\r?\n', after_header)
+        if newline:
+            insert_at = section_start + newline.end()
+            return (
+                src[:insert_at]
+                + 'rmcp_client = true'
+                + newline.group(0)
+                + src[insert_at:]
+            )
+        line_ending = '\r\n' if '\r\n' in src else '\n'
+        return (
+            src[:section_start]
+            + line_ending
+            + 'rmcp_client = true'
+            + line_ending
+            + src[section_start:]
+        )
+
+    return src[:section_start] + section + src[section_end:]
 
 def set_top_level_key(src, key, value):
     first_table = re.search(r'(?m)^\s*\[', src)
@@ -480,10 +528,10 @@ for srv in new_servers:
         sys.stderr.write('cage: Codex config already defines MCP server %r; remove it or choose a preset without that server\n' % name)
         sys.exit(1)
 
+text = ensure_rmcp_feature(text, required=bool(new_servers))
 if new_servers:
     if any(srv.get('auth') == 'oauth' for srv in new_servers):
         text = set_top_level_key(text, 'mcp_oauth_credentials_store', 'file')
-    text = ensure_rmcp_feature(text)
     if text and not text.endswith('\n'):
         text += '\n'
     text += '\n' + managed_start + '\n'

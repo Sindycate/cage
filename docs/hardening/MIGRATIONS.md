@@ -6,6 +6,21 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.4 — 2026-09-23
+
+### Codex RMCP feature key
+
+No manual configuration or credential migration is required. On startup,
+Cage renames the old `[features].experimental_use_rmcp_client` setting in the
+container Codex config to `[features].rmcp_client`, preserving its value and
+other feature settings. Cage adds `rmcp_client = true` when selected MCP
+servers need it and no explicit setting exists. Existing explicit
+`rmcp_client` values remain authoritative.
+
+Update Cage to 0.37.4 and restart the Codex container. Startup performs this
+config migration before Codex reads the file; OAuth credentials and login
+state are unchanged.
+
 ## 0.37.3 — 2026-09-22
 
 ### Monitor and configuration component boundaries
