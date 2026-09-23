@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.6 — 2026-09-23
+
+- retry exact successful-CI-run discovery briefly when GitHub's run list has
+  not propagated the completed run yet;
+- report when the canonical publisher lacks permission to rerun a failed job.
+
 ## 0.37.5 — 2026-09-23
 
 - verify and resume source-release assets through the release ID when GitHub's

@@ -1602,7 +1602,7 @@ class Orchestrator:
                     self.progress(
                         f"{purpose}: failed; rerunning failed jobs once (run {run_id})"
                     )
-                    self.gh(
+                    rerun = self.gh(
                         "run",
                         "rerun",
                         str(run_id),
@@ -1611,6 +1611,13 @@ class Orchestrator:
                         REPOSITORY,
                         check=False,
                     )
+                    if not rerun.ok:
+                        diagnostic = bounded(rerun.stderr or rerun.stdout)
+                        self._save_run_diagnostics(run)
+                        raise MutationError(
+                            f"{purpose} run {run_id} failed and the automatic "
+                            f"failed-job rerun was rejected: {diagnostic}"
+                        )
                     self.sleeper.sleep(self.options.poll_interval_seconds)
                     continue
                 self._save_run_diagnostics(run)

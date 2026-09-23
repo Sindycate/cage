@@ -447,6 +447,10 @@ class ReleaseSupplyChainTests(unittest.TestCase):
             'if [ -z "$TAG_OBJECT" ] || [ -z "$TAG_COMMIT" ]; then',
         ):
             self.assertIn(fragment, text)
+        gate = text[text.index("  gate:") : text.index("  package:")]
+        self.assertIn('while [ "$attempt" -lt 12 ]; do', gate)
+        self.assertIn('echo "CI run for ${GITHUB_SHA} is not visible yet', gate)
+        self.assertIn("sleep 5", gate)
         self.assertIn('manifest.get("schema_version") != 3', text)
         self.assertIn('manifest.get("ci_run_id") != int(run_id)', text)
         self.assertIn('manifest.get("platforms") != ["linux/amd64", "linux/arm64"]', text)

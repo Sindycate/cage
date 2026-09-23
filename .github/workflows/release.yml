@@ -82,10 +82,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event push \
-            --branch main --json databaseId,headSha,conclusion --limit 50 \
-            --jq ".[] | select(.headSha==\"${GITHUB_SHA}\") | select(.conclusion==\"success\") | .databaseId" \
-            | head -1)"
+          RUN_ID=""
+          attempt=0
+          while [ "$attempt" -lt 12 ]; do
+            attempt=$((attempt + 1))
+            RUN_ID="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event push \
+              --branch main --json databaseId,headSha,conclusion --limit 50 \
+              --jq ".[] | select(.headSha==\"${GITHUB_SHA}\") | select(.conclusion==\"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+            if [ "$attempt" -lt 12 ]; then
+              echo "CI run for ${GITHUB_SHA} is not visible yet (attempt ${attempt}/12); waiting 5s." >&2
+              sleep 5
+            fi
+          done
           if [ -z "$RUN_ID" ]; then
             echo "ERROR: no successful ci.yml push run for ${GITHUB_SHA} on main"; exit 1
           fi

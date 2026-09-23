@@ -1519,6 +1519,29 @@ class WorkflowFailureTests(PublishReleaseTestCase):
         # A transient failure is rerun exactly once before giving up.
         self.assertTrue(scenario.runner.has_argv("gh", "run", "rerun"))
 
+    def test_rerun_permission_error_is_reported(self):
+        scenario = Scenario(
+            pushed=True,
+            ci_runs=[make_run("a" * 40, conclusion="failure", databaseId=5)],
+        )
+        scenario.runner.handlers.insert(
+            0,
+            (
+                starts("gh", "run", "rerun"),
+                R("", "Must have admin rights to Repository", code=1),
+            ),
+        )
+        orch, *_ = make_orch(scenario, answer=self._answer(scenario))
+
+        with self.assertRaises(pr.MutationError) as ctx:
+            orch.run()
+
+        self.assertIn("automatic failed-job rerun was rejected", str(ctx.exception))
+        self.assertIn("admin rights", str(ctx.exception))
+        self.assertEqual(
+            len([call for call in scenario.runner.calls if "rerun" in call]), 1
+        )
+
     def test_post_tag_release_failure_never_moves_or_deletes_tag(self):
         scenario = Scenario(
             pushed=True,

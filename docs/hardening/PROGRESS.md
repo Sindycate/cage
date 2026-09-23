@@ -3,6 +3,19 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-23 — Retry exact CI-run discovery for v0.37.6
+
+The v0.37.5 release workflow started immediately after exact-SHA CI passed, but
+its run-list query initially returned no matching run. A later identical query
+returned the successful run. Retry the read up to 12 times at five-second
+intervals before failing the release gate. The publisher now reports a rejected
+failed-job rerun instead of silently treating it as attempted.
+
+Regression coverage checks the bounded workflow retry and publisher permission
+failure. The publisher, supply-chain, and Codex entrypoint checks pass (223
+tests). `bash -n` and `git diff --check` pass. The canonical publisher owns
+release validation and public checks.
+
 ## 2026-09-23 — Release asset verification follows release ID for v0.37.5
 
 GitHub's tag-based release lookup intermittently returned an empty asset list
