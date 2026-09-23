@@ -1737,18 +1737,18 @@ class Orchestrator:
         )
 
     def _release_json(self) -> dict:
-        return self._retry_idempotent_operation(
-            "public release metadata",
-            lambda: self.gh_json(
-                "release",
-                "view",
-                self.context.tag,
-                "--repo",
-                REPOSITORY,
-                "--json",
-                "tagName,isDraft,isPrerelease,assets,targetCommitish,url",
-            ),
-        )
+        def load_by_id() -> dict:
+            tag_release = self.gh_json(
+                "api", f"repos/{REPOSITORY}/releases/tags/{self.context.tag}"
+            )
+            release_id = tag_release.get("id")
+            if not isinstance(release_id, int) or isinstance(release_id, bool) or release_id <= 0:
+                raise VerificationError("release tag lookup returned no valid release id")
+            return self.gh_json(
+                "api", f"repos/{REPOSITORY}/releases/{release_id}"
+            )
+
+        return self._retry_idempotent_operation("public release metadata", load_by_id)
 
     def _run_verification_check(self, name: str, fn: Callable[[], object]) -> CheckResult:
         start = self.clock.now()
@@ -1828,13 +1828,13 @@ class Orchestrator:
 
     def _verify_release_public(self) -> str:
         data = self._release_json()
-        if data.get("isDraft"):
+        if data.get("draft"):
             raise VerificationError("release is a draft")
-        if data.get("isPrerelease"):
+        if data.get("prerelease"):
             raise VerificationError("release is a prerelease")
-        if data.get("tagName") != self.context.tag:
+        if data.get("tag_name") != self.context.tag:
             raise VerificationError("release tag mismatch")
-        return str(data.get("url") or "")
+        return str(data.get("html_url") or "")
 
     def _verify_release_assets(self) -> str:
         data = self._release_json()

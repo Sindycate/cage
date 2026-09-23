@@ -5,6 +5,11 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.5 — 2026-09-23
+
+- verify and resume source-release assets through the release ID when GitHub's
+  tag-based asset view is temporarily stale;
+
 ## 0.37.4 — 2026-09-23
 
 - migrate the legacy Codex RMCP feature key to `[features].rmcp_client`,

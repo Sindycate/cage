@@ -342,7 +342,9 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         )
         # The ambiguous "any failed inspect means absent" pattern is gone: the
         # version-tag checks no longer swallow inspect errors to infer absence.
-        self.assertNotIn('2>/dev/null)"; then', text)
+        gate = text[text.index("  gate:") : text.index("  package:")]
+        promote = text[text.index("  promote:") : text.index("  latest:")]
+        self.assertNotIn('2>/dev/null)"; then', gate + promote)
 
     def test_ghcr_status_helper_is_present_and_valid_bash(self):
         helper = ROOT / ".github" / "scripts" / "ghcr-status.sh"
@@ -393,12 +395,17 @@ class ReleaseSupplyChainTests(unittest.TestCase):
         # resumes only on an exact match; any difference fails closed instead of
         # failing on "release already exists" or silently overwriting.
         self.assertIn(
-            'if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then',
+            'if release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq \'.id\' 2>/dev/null)"; then',
             text,
         )
+        self.assertIn(
+            'release_api="repos/${GITHUB_REPOSITORY}/releases/${release_id}"', text
+        )
         # Release metadata is validated (not draft/prerelease, tag matches).
-        self.assertIn("--json isDraft --jq '.isDraft'", text)
-        self.assertIn("--json isPrerelease --jq '.isPrerelease'", text)
+        self.assertIn('gh api "$release_api" --jq \'.draft\'', text)
+        self.assertIn('gh api "$release_api" --jq \'.prerelease\'', text)
+        self.assertIn('gh api "$release_api" --jq \'.tag_name\'', text)
+        self.assertIn('gh api "$release_api" --jq \'.assets[].name\' | sort', text)
         self.assertIn("unexpected metadata", text)
         # Asset contents (not just names) are downloaded and digested; empty,
         # truncated, or different files under the right names are rejected.

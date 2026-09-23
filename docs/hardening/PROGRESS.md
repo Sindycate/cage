@@ -3,6 +3,21 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-23 — Release asset verification follows release ID for v0.37.5
+
+GitHub's tag-based release lookup intermittently returned an empty asset list
+while the same release ID returned the three uploaded, checksum-verified
+assets. The canonical publisher therefore stopped at `release-assets` despite
+the successful release workflow. Resolve the ID from the tag, then read the
+release and asset records by ID in both the publisher and the workflow's
+existing-release recovery path.
+
+Regression coverage simulates the stale tag response and verifies the release
+ID fallback. The publisher, release supply-chain, and Codex entrypoint checks
+pass (222 tests). `bash -n` passes for the Codex entrypoint and the workflow's
+release script; `git diff --check` passes. The canonical publisher owns the
+full validation and public verification gates.
+
 ## 2026-09-23 — Codex RMCP feature-key migration prepared for v0.37.4
 
 Codex now expects `rmcp_client` under `[features]`; Cage had continued adding

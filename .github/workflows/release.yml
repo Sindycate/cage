@@ -511,16 +511,20 @@ jobs:
           # contents — and treats an exact match as resumed success instead of
           # failing on "release already exists". Any difference (metadata, asset
           # set, size, or SHA-256) fails closed; never silently overwritten.
-          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
-            is_draft="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
-            is_pre="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')"
-            tag_name="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName')"
+          if release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.id' 2>/dev/null)"; then
+            if [ -z "$release_id" ]; then
+              echo "ERROR: release lookup returned no release id; refusing to resume." >&2
+              exit 1
+            fi
+            release_api="repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+            is_draft="$(gh api "$release_api" --jq '.draft')"
+            is_pre="$(gh api "$release_api" --jq '.prerelease')"
+            tag_name="$(gh api "$release_api" --jq '.tag_name')"
             if [ "$is_draft" != "false" ] || [ "$is_pre" != "false" ] || [ "$tag_name" != "v${VERSION}" ]; then
               echo "ERROR: existing release v${VERSION} has unexpected metadata (draft=${is_draft} prerelease=${is_pre} tag=${tag_name}); refusing." >&2
               exit 1
             fi
-            existing="$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
-              --json assets --jq '.assets[].name' | sort)"
+            existing="$(gh api "$release_api" --jq '.assets[].name' | sort)"
             expected="$(printf '%s\n' "${ASSETS[@]}" | sort)"
             if [ "$existing" != "$expected" ]; then
               echo "ERROR: release v${VERSION} exists but its asset set differs; refusing to overwrite." >&2

@@ -464,6 +464,32 @@ class Scenario:
                 code=0 if self.release_exists else 1,
             ),
         )
+        release_asset_records = [
+            {"name": f"cage-{self.version}.tar.gz", "size": len(self.archive_bytes)},
+            {"name": f"cage-{self.version}.tar.gz.sha256", "size": 100},
+            {"name": f"cage-{self.version}.spdx.json", "size": 100},
+        ]
+        release_id = 394498913
+        r.add(
+            eq("gh", "api", f"repos/{pr.REPOSITORY}/releases/tags/{tag}"),
+            R(json.dumps({"id": release_id, "tag_name": tag, "assets": []}) + "\n"),
+        )
+        r.add(
+            eq("gh", "api", f"repos/{pr.REPOSITORY}/releases/{release_id}"),
+            R(
+                json.dumps(
+                    {
+                        "id": release_id,
+                        "tag_name": tag,
+                        "draft": self.release_draft,
+                        "prerelease": self.release_prerelease,
+                        "html_url": f"https://github.com/Sindycate/cage/releases/tag/{tag}",
+                        "assets": release_asset_records,
+                    }
+                )
+                + "\n"
+            ),
+        )
 
         def ci_run_list(argv):
             return R(json.dumps(self.ci_runs) + "\n")
@@ -1633,6 +1659,24 @@ class PublicVerificationResilienceTests(PublishReleaseTestCase):
         orch._preflight()
         orch.state.images = dict(scenario.digests)
         return orch, clock, sleeper
+
+    def test_release_assets_are_read_by_id_when_tag_lookup_is_stale(self):
+        scenario = Scenario(pushed=True, release_exists=True)
+        orch, _, _ = self._prepared(scenario)
+
+        detail = orch._verify_release_assets()
+
+        self.assertIn(f"cage-{scenario.version}.tar.gz", detail)
+        self.assertTrue(
+            scenario.runner.has_argv(
+                "gh", "api", f"repos/{pr.REPOSITORY}/releases/tags/{scenario.tag}"
+            )
+        )
+        self.assertTrue(
+            scenario.runner.has_argv(
+                "gh", "api", f"repos/{pr.REPOSITORY}/releases/394498913"
+            )
+        )
 
     def test_registry_reads_retry_transient_failures_then_succeed(self):
         scenario = Scenario(pushed=True)
