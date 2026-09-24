@@ -157,9 +157,16 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 The optional Codex CLI container accounting exporter lives in
 `cage_core/poketoken.py`; its bounded standalone collector and record allowlist
-live in `cage_core/poketoken_records.py`. The `poketoken = true` preset setting
-adds `poketoken-local-export` to the immutable launch plan. Only container
-launches start its lifecycle worker, independently of Token Monitor. See
+live in `cage_core/poketoken_records.py`. `[defaults].poketoken` supplies the
+default-off opt-in for all Codex CLI container presets; a preset's explicit
+boolean overrides it. `ResolvedConfig.poketoken_for_target` resolves the
+effective value against the final target before `poketoken-local-export` is
+added to the immutable launch plan. Inherited opt-ins never apply outside Codex
+CLI containers; explicit incompatible opt-ins fail closed.
+The TUI edits the global value under Launch defaults and preserves the
+tri-state Use default/On/Off choice in temporary and saved presets without
+flattening inheritance. Only container launches start the lifecycle worker,
+independently of Token Monitor. See
 [PokeTokenBar setup and retention](../README.md#optional-poketokenbar-export-codex-cli-containers-only)
 and the [metadata trust boundary](../SECURITY.md#optional-poketokenbar-export).
 

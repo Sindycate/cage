@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cage_core import bridge as bridge_policy
-from cage_core.models import ResolvedConfig
+from cage_core.models import ContractError, ResolvedConfig
 
 from . import codex
 from .packs import resolve_mcp_packs, resolve_skill_packs
@@ -208,9 +208,15 @@ def _resolve_launch_settings(
             f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
         )
     resolved.target = target
-    resolved.poketoken = preset.get("poketoken", False)
-    if resolved.poketoken and (tool != "codex" or target != "container"):
-        raise ConfigError("poketoken is supported only for Codex CLI container presets")
+    for table, label in ((defaults, "defaults"), (preset, f"presets.{preset_name}")):
+        if "poketoken" in table and type(table["poketoken"]) is not bool:
+            raise ConfigError(f"{label}.poketoken must be true or false")
+    resolved.poketoken_default = defaults.get("poketoken", False)
+    resolved.poketoken_override = preset.get("poketoken")
+    try:
+        resolved.poketoken_for_target(target)
+    except ContractError as exc:
+        raise ConfigError(str(exc)) from exc
     if target in {"host", "desktop"} and tool != "codex":
         raise ConfigError(
             f"preset {preset_name!r}: {target} execution is only supported for Codex, not {tool!r}"

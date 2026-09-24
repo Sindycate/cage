@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .models import (
+    ContractError,
     LaunchPlan,
     LaunchRequest,
     MountSpec,
@@ -257,8 +258,10 @@ def build_launch_plan(
         target=target,
         network=network,
     )
-    if resolved.poketoken and (resolved.tool != "codex" or target != "container"):
-        raise PlanError("poketoken requires Codex CLI container execution")
+    try:
+        poketoken_enabled = resolved.poketoken_for_target(target)
+    except ContractError as exc:
+        raise PlanError(str(exc)) from exc
 
     mounts, mount_warnings = normalize_extra_mounts(
         replace(request, target=target),
@@ -318,7 +321,7 @@ def build_launch_plan(
                     "invalid internal desktop configuration fingerprint"
                 )
     capabilities = ["repo-write", "persistent-tool-state"]
-    if resolved.poketoken:
+    if poketoken_enabled:
         capabilities.append("poketoken-local-export")
     if network == "gate":
         capabilities.append("netgate")

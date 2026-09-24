@@ -310,8 +310,14 @@ and external connector actions retain their documented authority.
 
 ## Optional PokeTokenBar export
 
-`poketoken = true` is an explicit Codex CLI container-preset capability, off by
-default and visible in launch planning and configuration diagnostics. It
+PokeTokenBar export is a Codex CLI container capability, off by default and
+visible in launch planning, configuration diagnostics, and TUI review.
+An explicit opt-in through `[defaults].poketoken = true` applies only to Codex
+CLI container launches, including temporary presets; it never enables export
+for host, Desktop, Claude, or OpenCode targets. A preset's boolean `poketoken`
+override wins over that default. Missing preset settings remain inherited,
+not frozen copies of the default. The final launch target is checked after
+command overrides, and explicit incompatible preset opt-ins fail closed. It
 exports accounting metadata to a private host directory, independently of
 Token Monitor; it neither connects to a hub nor uploads anything.
 
@@ -338,9 +344,10 @@ This adds a deliberate container-to-host metadata channel and parser exposure.
 Container-generated counters are not attested billing data and can be falsified
 by a process that can modify its own session logs. PokeTokenBar runs on the host
 and remains separately trusted; Cage does not control its networking or data
-handling. The export is not a sandbox for hostile code. Disabling the preset
-setting takes effect for subsequent launches; finish existing sessions to stop
-their collectors. Retained exports are not deleted automatically.
+handling. The export is not a sandbox for hostile code. Disabling the applicable
+default or preset setting takes effect for subsequent launches; explicit preset
+opt-ins remain enabled when the global default is off. Finish existing sessions
+to stop their collectors. Retained exports are not deleted automatically.
 
 ## Writable repository state
 

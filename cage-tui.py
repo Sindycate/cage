@@ -77,6 +77,23 @@ def execution_target_label(target: str) -> str:
     return "Container"
 
 
+def poketoken_state(
+    data: dict[str, Any], preset: dict[str, Any], *,
+    tool_override: str = "", target_override: str = "",
+) -> tuple[bool, str]:
+    auth = data.get("auth", {}).get(preset.get("auth", ""), {})
+    auth = auth if isinstance(auth, dict) else {}
+    tool = tool_override or preset.get("tool") or auth.get("tool")
+    target = target_override or preset.get("target", "container")
+    if tool != "codex" or target != "container":
+        label = "On (requires Codex container)" if preset.get("poketoken") is True else "Not available (Codex containers only)"
+        return False, label
+    default = data.get("defaults", {}).get("poketoken", False) is True
+    enabled = preset.get("poketoken", default) is True
+    state = "On" if enabled else "Off"
+    return enabled, state if "poketoken" in preset else f"Use default ({state})"
+
+
 class UiError(Exception):
     pass
 
@@ -477,7 +494,10 @@ class Controller:
             )
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
-        if preset.get("poketoken") is True:
+        export_enabled, _ = poketoken_state(
+            self.data, preset, tool_override=self.tool_override, target_override=self.target_override,
+        )
+        if export_enabled:
             risks.append("Codex accounting metadata is exported privately to the host for PokeTokenBar.")
         if preset.get("tool") == "opencode" and preset.get("opencode_plugins") is True:
             risks.append(
@@ -1062,6 +1082,8 @@ class CursesView:
     def edit_preset(self, preset: dict[str, Any]) -> dict[str, Any] | None:
         value = dict(preset)
         value["tool"] = self.controller.tool_override or value.get("tool", "codex")
+        if value["tool"] != "codex":
+            value.pop("poketoken", None)
         if value["tool"] == "claude":
             value.pop("skill_packs", None)
             value.pop("codex_profile", None)
@@ -1083,6 +1105,9 @@ class CursesView:
                 else "off"
             )
             target_value = self.controller.target_override or value.get("target", "container")
+            _, poketoken_label = poketoken_state(
+                self.controller.data, value, target_override=self.controller.target_override,
+            )
             target_label = execution_target_label(str(target_value))
             if self.controller.target_override:
                 target_label += " (command override)"
@@ -1113,6 +1138,7 @@ class CursesView:
                 ("net", f"Network: {net_value}"),
                 ("yolo", f"Yolo: {yolo_value}"),
                 ("sync", f"Claude history sync: {sync_value}"),
+                ("poketoken", f"PokeTokenBar: {poketoken_label}"),
                 ("mounts", f"Extra mounts: {len(value.get('extra_mounts', []))}"),
                 ("done", "Done"),
             ]
@@ -1152,6 +1178,8 @@ class CursesView:
                 )
                 if selected:
                     value["tool"] = selected
+                    if selected != "codex":
+                        value.pop("poketoken", None)
                     if selected == "claude":
                         value.pop("skill_packs", None)
                         value.pop("codex_profile", None)
@@ -1200,6 +1228,7 @@ class CursesView:
                         value.pop("target", None)
                     else:
                         value["target"] = selected
+                        value.pop("poketoken", None)
             elif choice in ("auth", "identity"):
                 collection = "auth" if choice == "auth" else "identities"
                 names = sorted(self.controller.data.get(collection, {}))
@@ -1244,6 +1273,29 @@ class CursesView:
                         value[key] = selected
                     else:
                         value.pop(key, None)
+            elif choice == "poketoken":
+                default_label = "On" if self.controller.data.get("defaults", {}).get("poketoken") is True else "Off"
+                options = [
+                    ("default", f"Use default ({default_label})"),
+                    ("on", "On"),
+                    ("off", "Off"),
+                ]
+                if value.get("tool") != "codex" or target_value != "container":
+                    options = options[:1] + options[2:]
+                current = "default" if "poketoken" not in value else "on" if value["poketoken"] else "off"
+                selected = self.menu(
+                    "PokeTokenBar local export", options,
+                    details=[
+                        "Only Codex CLI containers export usage. No conversations or credentials.",
+                        "Use default follows Manage saved configuration > Launch defaults.",
+                        "Launch once does not save this choice.",
+                    ],
+                    initial_key=current,
+                )
+                if selected == "default":
+                    value.pop("poketoken", None)
+                elif selected in ("on", "off"):
+                    value["poketoken"] = selected == "on"
             elif choice == "plugins":
                 if value.get("tool") != "opencode":
                     self.message = "Plugin isolation is an OpenCode-only setting."
@@ -1475,8 +1527,12 @@ class CursesView:
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
-        if preset.get("poketoken") is True:
-            lines.append("PokeTokenBar: local accounting export enabled")
+        _, poketoken_label = poketoken_state(
+            self.controller.data, preset,
+            tool_override=self.controller.tool_override,
+            target_override=self.controller.target_override,
+        )
+        lines.append(f"PokeTokenBar: {poketoken_label}")
         aws_access, _ = self._aws_setting(preset, "aws_access")
         aws_profile, _ = self._aws_setting(preset, "aws_profile")
         if aws_access == "host-cli":
@@ -1843,6 +1899,7 @@ class CursesView:
                     ("preset", f"Configuration: {self.controller.data.get('default_preset', 'unset')}"),
                     ("net", f"Network: {current.get('net', 'automatic')}"),
                     ("sync", f"Claude history sync: {current.get('session_sync', True)}"),
+                    ("poketoken", f"PokeTokenBar (Codex containers): {'On' if current.get('poketoken') is True else 'Off'}"),
                 ])
                 try:
                     if action == "preset":
@@ -1860,6 +1917,30 @@ class CursesView:
                     elif action == "sync":
                         current["session_sync"] = not bool(current.get("session_sync", True))
                         self.controller.commit([{"action": "update_defaults", "value": current}])
+                    elif action == "poketoken":
+                        selected = self.menu(
+                            "Default PokeTokenBar export",
+                            [("on", "On for Codex CLI containers"), ("off", "Off")],
+                            details=[
+                                "Applies to existing, new, and temporary presets using the default.",
+                                "Explicit per-preset On/Off choices take precedence.",
+                                "Host Codex, Desktop, Claude, and OpenCode remain excluded.",
+                            ],
+                            initial_key="on" if current.get("poketoken") is True else "off",
+                        )
+                        if selected in ("on", "off"):
+                            enabled = selected == "on"
+                            if enabled and current.get("poketoken") is not True and not self.confirm(
+                                "Enable default PokeTokenBar export",
+                                [
+                                    "Codex container launches using the default will export accounting metadata to the host.",
+                                    "The export contains timestamps, model names, token counts, and opaque session IDs.",
+                                    "No conversations, credentials, uploads, or new host mounts for Codex.",
+                                ],
+                            ):
+                                continue
+                            current["poketoken"] = enabled
+                            self.controller.commit([{"action": "update_defaults", "value": current}])
                 except UiError as exc: self.message = str(exc)
             elif choice == "storage":
                 current = dict(self.controller.snapshot.get("storage", {}))
@@ -2179,6 +2260,12 @@ class CursesView:
                     f"Yolo: {'on' if shown_yolo else 'off'}"
                     + (" (command override)" if self.controller.yolo_override else ""),
                 ]
+                _, poketoken_label = poketoken_state(
+                    self.controller.data, effective_value,
+                    tool_override=self.controller.tool_override,
+                    target_override=self.controller.target_override,
+                )
+                details.append(f"PokeTokenBar: {poketoken_label}")
                 if effective.get("aws_access") == "host-cli":
                     details.append(
                         "AWS host CLI: enabled "

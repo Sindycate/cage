@@ -428,7 +428,7 @@ def _run_poketoken(
                 print(json.dumps(result, sort_keys=True))
             else:
                 print(f"PokeTokenBar Codex scan folder: {result['path']}")
-                print("Opt in with poketoken = true in each Codex container preset.")
+                print("Enable PokeTokenBar in TUI Launch defaults, or set poketoken = true in [defaults] or a Codex container preset.")
                 for source in result["sources"]:
                     print(f"  {source['source'][:12]}: {source.get('error') or 'exported at ' + source['updated_at']}")
             return 0

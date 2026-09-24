@@ -143,22 +143,44 @@ when a terminal provides an interactive stdin but restricts direct access to
 ### Optional PokeTokenBar export (Codex CLI containers only)
 
 [PokeTokenBar](https://chattymin.github.io/PokeTokenBar/) can count Cage's Codex
-CLI usage through an opt-in local accounting export. Add this setting to each
-**existing Codex container preset** you want to include in central `config.toml`:
+CLI usage through an opt-in local accounting export. In the TUI, open
+**Manage saved configuration > Launch defaults > PokeTokenBar (Codex
+containers)** and choose **On for Codex CLI containers**. Confirm the metadata
+export to enable it for existing, new, and temporary presets that use the
+default. It is off until you opt in.
+
+In **Customize launch > PokeTokenBar**, choose **Use default / On / Off**.
+The default's current value is shown alongside **Use default**. **Launch once**
+applies the choice without saving; **Remember for this exact project** or
+**Save named reusable configuration** persists the choice. Using the default
+does not copy its current value into the preset, so later default changes still
+apply. Explicit preset On/Off choices always win over the global default.
+
+The equivalent setting in central `config.toml` is:
+
+```toml
+[defaults]
+poketoken = true
+```
+
+To override it for one existing Codex container preset:
 
 ```toml
 [presets.codex-personal]
 tool = "codex"
 target = "container"
-poketoken = true
+poketoken = false # Off for this preset; omit the key to use the global default.
 # Keep the preset's existing auth, identity, MCP, and other settings.
 ```
 
-Launch that preset normally. Cage exports its existing and new usage at launch,
+Launch an enabled preset normally. Cage exports its existing and new usage at launch,
 every five minutes while running, and once at exit. The selected Codex image
 must be installed and Docker must be running. Host Codex, Desktop, Claude, and
-OpenCode are excluded; an incompatible target override fails before launch
-effects. No Token Monitor connection, hub, or upload is involved.
+OpenCode never inherit the export, even when a command overrides the target.
+An explicit preset `poketoken = true` still rejects incompatible tools or
+targets before launch effects. Changing to an unsupported tool or target in
+the preset editor clears that incompatible override. No Token Monitor
+connection, hub, or upload is involved.
 
 ```bash
 cage poketoken status
@@ -197,8 +219,11 @@ last good files. Limits are 20,000 rollouts, 512 MiB per rollout, 16 MiB per
 line, 2 GiB of source data and 64 MiB of accounting output per scan. The
 export deliberately retains history when a source file disappears.
 
-Set `poketoken = false` (or remove the setting) and finish existing Cage
-sessions to stop further exports. Removing the scan folder from PokeTokenBar
+Choose **Off** in Launch defaults to stop inherited exports, and disable any
+explicit preset **On** overrides separately. For just one launch/preset,
+choose **Off** in Customize launch. Removing a preset's setting restores
+inheritance; it does not disable an enabled global default. Finish existing Cage
+sessions to stop their exporters. Removing the scan folder from PokeTokenBar
 stops it reading retained data; disabling export does not erase history. Keep
 the private `poketoken/identity` file: replacing it changes pseudonyms and can
 cause downstream usage to be counted again.

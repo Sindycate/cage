@@ -6,6 +6,27 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.1 — 2026-09-24
+
+PokeTokenBar can now be enabled once in the TUI through **Manage saved
+configuration > Launch defaults > PokeTokenBar (Codex containers)**. This writes
+`poketoken = true` under `[defaults]`; the shipped default remains off.
+It covers existing, new and launch-once presets that omit their own
+`poketoken` setting. Existing explicit preset values keep their precedence.
+
+**Customize launch > PokeTokenBar** offers **Use default / On / Off**.
+Launch once does not save the override; remembered project and named presets
+save it without materializing inherited defaults. Choosing Use default removes
+the preset key. A global opt-in applies only to the final Codex CLI container
+target, never host Codex, Desktop or other tools, including command overrides.
+An explicit preset opt-in on an unsupported tool/target still fails closed;
+the editor clears incompatible overrides when changing tool or target.
+
+To disable inherited exports, turn off the global default; explicit preset
+opt-ins must be disabled separately. Finish existing sessions to stop their
+collectors. The private export folder and identity, accounting format, source
+permissions, retained history and five-minute cadence are unchanged.
+
 ## 0.38.0 — 2026-09-24
 
 No existing preset changes behavior. To count Codex CLI container usage in

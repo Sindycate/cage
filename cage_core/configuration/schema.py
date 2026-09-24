@@ -50,7 +50,7 @@ TOP_LEVEL_KEYS = {
 }
 
 
-DEFAULT_KEYS = {"default_preset", "net", "session_sync"}
+DEFAULT_KEYS = {"default_preset", "net", "session_sync", "poketoken"}
 
 
 STORAGE_KEYS = {
@@ -308,6 +308,8 @@ def validate_schema(data: dict[str, Any]) -> None:
     reject_unknown_keys(data, TOP_LEVEL_KEYS, "top-level config")
     defaults = as_table(data, "defaults")
     reject_unknown_keys(defaults, DEFAULT_KEYS, "defaults")
+    if "poketoken" in defaults and type(defaults["poketoken"]) is not bool:
+        raise ConfigError("defaults.poketoken must be true or false")
     storage_policy_from_config(data)
     validate_named_table(data, "auth", AUTH_KEYS)
     validate_named_table(data, "identities", IDENTITY_KEYS)

@@ -119,7 +119,8 @@ class ResolvedConfig:
     skill_pack_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: str = ""
-    poketoken: bool = False
+    poketoken_default: bool = False
+    poketoken_override: bool | None = None
     yolo: str = ""
     target: str = "container"
     claude_auth: str = ""
@@ -150,6 +151,17 @@ class ResolvedConfig:
     mcp_suppressed: list[str] = field(default_factory=list)
     mcp_disable_overrides: list[str] = field(default_factory=list)
     storage_policy: StoragePolicy = field(default_factory=StoragePolicy)
+
+    def poketoken_for_target(self, target: str) -> bool:
+        supported = self.tool == "codex" and target == "container"
+        if self.poketoken_override is True and not supported:
+            raise ContractError("poketoken requires Codex CLI container execution")
+        enabled = self.poketoken_default if self.poketoken_override is None else self.poketoken_override
+        return supported and enabled
+
+    @property
+    def poketoken(self) -> bool:
+        return self.poketoken_for_target(self.target)
 
     def public_dict(self) -> dict[str, Any]:
         """Return the non-secret, versioned resolver contract payload."""

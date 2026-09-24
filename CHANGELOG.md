@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.1 — 2026-09-24
+
+- add a TUI-editable global PokeTokenBar default for Codex CLI containers,
+  covering existing, new, and temporary presets without individual edits;
+- add per-launch Use default/On/Off choices, preserve inheritance in saved
+  presets, and disclose the effective setting in launch and risk review;
+- apply the inherited default only to the final Codex container target while
+  retaining fail-closed validation for explicit incompatible preset opt-ins.
+
 ## 0.38.0 — 2026-09-24
 
 - add opt-in `poketoken = true` for Codex CLI container presets: export

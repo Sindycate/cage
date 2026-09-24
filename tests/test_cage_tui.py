@@ -563,6 +563,187 @@ extra_mounts = [{ path = "/tmp/output", mode = "rw" }]
 
         self.assertNotIn("session_sync", edited)
 
+    def test_poketoken_launch_choices_preserve_inheritance_and_cancel(self):
+        for selection, expected in (("default", None), ("on", True), ("off", False), ("", True)):
+            with self.subTest(selection=selection):
+                controller = StubController()
+                controller.data["defaults"]["poketoken"] = False
+                view = cage_tui.CursesView(FakeScreen(), controller)
+                choices = iter(["poketoken", selection, "done"])
+                shown = []
+
+                def choose(title, options, **kwargs):
+                    shown.append((title, options, kwargs))
+                    return next(choices)
+
+                view.menu = choose
+                seed = {"tool": "codex", "poketoken": True}
+                edited = view.edit_preset(seed)
+                self.assertEqual(edited.get("poketoken"), expected)
+                self.assertEqual(seed["poketoken"], True)
+                self.assertEqual(shown[1][1], [("default", "Use default (Off)"), ("on", "On"), ("off", "Off")])
+                self.assertEqual(shown[1][2]["initial_key"], "on")
+
+    def test_poketoken_editor_labels_default_and_excludes_unsupported_targets(self):
+        for tool, target in (("codex", "container"), ("codex", "host"), ("codex", "desktop"), ("claude", "container"), ("opencode", "container")):
+            with self.subTest(tool=tool, target=target):
+                controller = StubController()
+                controller.data["defaults"]["poketoken"] = True
+                view = cage_tui.CursesView(FakeScreen(), controller)
+                choices = iter(["poketoken", "", "done"])
+                shown = []
+                view.menu = lambda title, options, **kwargs: (shown.append((title, options)) or next(choices))
+                edited = view.edit_preset({"tool": tool, "target": target})
+                self.assertNotIn("poketoken", edited)
+                supported = tool == "codex" and target == "container"
+                self.assertEqual("on" in dict(shown[1][1]), supported)
+                label = dict(shown[0][1])["poketoken"]
+                self.assertIn("Use default (On)" if supported else "Not available", label)
+
+    def test_poketoken_scope_changes_remove_incompatible_explicit_override(self):
+        for setting, choice in (("tool", "claude"), ("tool", "opencode"), ("target", "host"), ("target", "desktop")):
+            with self.subTest(setting=setting, choice=choice):
+                controller = StubController()
+                view = cage_tui.CursesView(FakeScreen(), controller)
+                choices = iter([setting, choice, "done"])
+                view.menu = lambda *_args, **_kwargs: next(choices)
+                edited = view.edit_preset({"tool": "codex", "poketoken": True})
+                self.assertNotIn("poketoken", edited)
+        controller = StubController()
+        controller.tool_override = "claude"
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        view.menu = lambda *_args, **_kwargs: "done"
+        self.assertNotIn("poketoken", view.edit_preset({"tool": "codex", "poketoken": True}))
+
+    def test_poketoken_default_save_preserves_presets_and_other_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            result = root / "result.json"
+            result.touch(mode=0o600)
+            self.write_config(config)
+            with config.open("a") as handle:
+                handle.write('\n[defaults]\nnet="gate"\nsession_sync=false\n')
+            controller = cage_tui.Controller(ROOT / "cage-config.py", config, root, result)
+            before_presets = json.dumps(controller.data["presets"], sort_keys=True)
+            view = cage_tui.CursesView(FakeScreen(), controller)
+            choices = iter(["defaults", "poketoken", "on", ""])
+            view.menu = lambda *_args, **_kwargs: next(choices)
+            confirmations = []
+            view.confirm = lambda title, lines: (confirmations.append((title, lines)) or True)
+
+            view.manage()
+
+            self.assertTrue(controller.data["defaults"]["poketoken"])
+            self.assertEqual(controller.data["defaults"]["net"], "gate")
+            self.assertFalse(controller.data["defaults"]["session_sync"])
+            self.assertEqual(json.dumps(controller.data["presets"], sort_keys=True), before_presets)
+            self.assertTrue(controller.snapshot["effective"]["poketoken"])
+            self.assertIn("timestamps", " ".join(confirmations[0][1]))
+            _, preset = controller.effective_preset()
+            self.assertTrue(any("PokeTokenBar" in risk for risk in controller.risks(preset)))
+            controller.target_override = "host"
+            self.assertFalse(any("PokeTokenBar" in risk for risk in controller.risks(preset)))
+            self.assertIn("Not available", " ".join(view._preset_summary(preset)))
+
+    def test_poketoken_global_cancel_and_declined_confirmation_do_not_save(self):
+        for selection, confirmed in (("", True), ("on", False)):
+            with self.subTest(selection=selection):
+                controller = StubController()
+                view = cage_tui.CursesView(FakeScreen(), controller)
+                choices = iter(["defaults", "poketoken", selection, ""])
+                view.menu = lambda *_args, **_kwargs: next(choices)
+                view.confirm = lambda *_args, **_kwargs: confirmed
+                view.manage()
+                self.assertEqual(controller.commits, [])
+
+    def test_saved_poketoken_choices_follow_later_default_changes_after_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            result = root / "result.json"
+            result.touch(mode=0o600)
+            self.write_config(config)
+            controller = cage_tui.Controller(ROOT / "cage-config.py", config, root, result)
+            inherited = {"tool": "codex"}
+            controller.commit([
+                {"action": "update_defaults", "value": {"poketoken": True}},
+                {"action": "remember_project", "path": str(root), "value": inherited},
+                {"action": "upsert", "collection": "presets", "name": "inherited", "value": inherited},
+                {"action": "upsert", "collection": "presets", "name": "enabled", "value": {"tool": "codex", "poketoken": True}},
+                {"action": "upsert", "collection": "presets", "name": "disabled", "value": {"tool": "codex", "poketoken": False}},
+            ])
+            for default in (True, False):
+                with self.subTest(default=default):
+                    controller.commit([{"action": "update_defaults", "value": {"poketoken": default}}])
+                    controller = cage_tui.Controller(ROOT / "cage-config.py", config, root, result)
+                    _, remembered = controller.effective_preset()
+                    self.assertEqual(remembered, inherited)
+                    self.assertEqual(controller.data["presets"]["inherited"], inherited)
+                    self.assertEqual(controller.snapshot["effective"]["poketoken"], default)
+                    for name, expected in (("inherited", default), ("enabled", True), ("disabled", False)):
+                        preset = controller.data["presets"][name]
+                        self.assertEqual(cage_tui.poketoken_state(controller.data, preset)[0], expected)
+                        self.assertEqual(any("PokeTokenBar" in risk for risk in controller.risks(preset)), expected)
+
+    def test_poketoken_disclosure_uses_auth_tool_and_final_target(self):
+        controller = StubController()
+        controller.data["defaults"]["poketoken"] = True
+        controller.data["auth"]["account"] = {"tool": "codex"}
+        preset = {"auth": "account", "target": "host"}
+        self.assertEqual(cage_tui.poketoken_state(controller.data, preset)[0], False)
+        self.assertEqual(
+            cage_tui.poketoken_state(controller.data, preset, target_override="container"),
+            (True, "Use default (On)"),
+        )
+        self.assertEqual(
+            cage_tui.poketoken_state(controller.data, preset, tool_override="claude", target_override="container")[0],
+            False,
+        )
+
+    def test_poketoken_default_can_be_disabled(self):
+        controller = StubController()
+        controller.data["defaults"] = {"poketoken": True, "net": "gate"}
+        view = cage_tui.CursesView(FakeScreen(), controller)
+        choices = iter(["defaults", "poketoken", "off", ""])
+        view.menu = lambda *_args, **_kwargs: next(choices)
+        view.manage()
+        self.assertEqual(controller.commits, [[{
+            "action": "update_defaults", "value": {"poketoken": False, "net": "gate"},
+        }]])
+
+    def test_poketoken_temporary_remembered_and_named_choices_are_not_flattened(self):
+        for action in ("once", "remember", "save"):
+            for override in (None, False, True):
+                with self.subTest(action=action, override=override):
+                    controller = StubController()
+                    controller.data["defaults"]["poketoken"] = True
+                    view = cage_tui.CursesView(FakeScreen(), controller)
+                    view.menu = lambda *_args, **_kwargs: action
+                    view.prompt = lambda *_args, **_kwargs: "export-choice"
+                    view.risk_review = lambda *_args, **_kwargs: True
+                    preset = {"tool": "codex"}
+                    if override is not None:
+                        preset["poketoken"] = override
+                    self.assertTrue(view.launch_actions(preset))
+                    saved = controller.results[0]["preset"] if action == "once" else controller.commits[0][0]["value"]
+                    self.assertEqual(saved, preset)
+                    if action == "once":
+                        self.assertEqual(controller.commits, [])
+                    label = "Use default (On)" if override is None else "On" if override else "Off"
+                    self.assertIn(f"PokeTokenBar: {label}", view._preset_summary(preset))
+
+    def test_poketoken_selection_is_keyboard_accessible_on_small_terminal(self):
+        screen = FakeScreen([curses.KEY_DOWN, 10], height=10, width=40)
+        view = cage_tui.CursesView(screen, StubController())
+        selected = view.menu(
+            "PokeTokenBar local export",
+            [("default", "Use default (On)"), ("on", "On"), ("off", "Off")],
+            initial_key="default",
+        )
+        self.assertEqual(selected, "on")
+        self.assertTrue(any("Use default" in text for _, _, text, _ in screen.writes))
+
     def test_launch_actions_highlights_remember_and_persists_yolo(self):
         controller = StubController()
         view = cage_tui.CursesView(FakeScreen(), controller)

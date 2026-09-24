@@ -214,12 +214,13 @@ class DesktopConfigTests(unittest.TestCase):
 
     def test_tui_surfaces_persistent_ssh_risks(self):
         controller = object.__new__(cage_tui.Controller)
+        controller.tool_override = ""
         controller.target_override = ""
         controller.yolo_override = ""
         controller.net_override = ""
         controller.snapshot = {
             "config": {
-                "defaults": {},
+                "defaults": {"poketoken": True},
                 "identities": {},
                 "mcp_packs": {},
             }
@@ -229,6 +230,7 @@ class DesktopConfigTests(unittest.TestCase):
         )
         self.assertTrue(any("remains running" in item for item in risks))
         self.assertTrue(any("SSH alias" in item for item in risks))
+        self.assertFalse(any("PokeTokenBar" in item for item in risks))
         self.assertEqual(
             cage_tui.execution_target_label("desktop"),
             "Desktop via Cage container",

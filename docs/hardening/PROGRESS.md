@@ -3,6 +3,28 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-24 — PokeTokenBar global defaults and TUI controls prepared for v0.38.1
+
+Add a typed `[defaults].poketoken` opt-in and per-launch Use default/On/Off
+controls. Defaults apply to all eligible presets, including hidden project
+presets and temporary launches, without rewriting each preset. Explicit preset
+booleans win; selecting Use default keeps future global changes effective.
+The TUI uses its existing preview, atomic save, backup and confirmation paths
+and displays the resolved export choice in launch and risk review.
+
+Resolution retains default/override intent until final-target planning.
+Inherited export applies only to Codex CLI containers after command overrides;
+host, Desktop and other tools remain excluded. Explicit incompatible opt-ins
+still fail before effects. Changing tool/target in the editor clears the
+incompatible override. Collector behavior and the local metadata trust boundary
+are unchanged.
+
+Focused regressions cover precedence across tools and targets, both directions
+of command target overrides, temporary/named/project persistence, no flattened
+inheritance, global save/cancel/confirmation, read-only source behavior and
+small-terminal keyboard selection. The canonical publisher owns full-suite,
+release and public verification.
+
 ## 2026-09-24 — Codex container PokeTokenBar export prepared for v0.38.0
 
 Add a default-off Codex CLI container-preset capability with one private host

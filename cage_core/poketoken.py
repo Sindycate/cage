@@ -222,7 +222,7 @@ def _prepare(data: bytes, key: bytes) -> dict[str, bytes]:
 
 def _require_plan(plan: LaunchPlan) -> None:
     if plan.tool != "codex" or plan.target != "container" or CAPABILITY not in plan.capabilities:
-        raise ExportError("PokeTokenBar export requires poketoken = true on a Codex container preset")
+        raise ExportError("PokeTokenBar export requires Codex CLI container execution with poketoken enabled in defaults or the preset")
 
 
 def sync(config_root: Path, docker: str, install_root: Path, plan: LaunchPlan) -> Path:

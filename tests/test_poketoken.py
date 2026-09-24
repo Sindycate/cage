@@ -1,4 +1,5 @@
 from dataclasses import replace
+import copy
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,98 @@ def test_target_override_fails_before_effects(prepared):
             replace(launch.request, target="host"), resolved, cage_version="dev",
             config_root=root, install_root=ROOT,
         )
+
+
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("override", [None, False, True])
+@pytest.mark.parametrize("tool,target", [
+    ("codex", "container"), ("codex", "host"), ("codex", "desktop"),
+    ("claude", "container"), ("opencode", "container"),
+])
+def test_global_default_precedence_and_supported_targets(prepared, default, override, tool, target, capsys):
+    root, launch = prepared
+    preset = {"tool": tool, "target": target, "net": "open"}
+    if override is not None:
+        preset["poketoken"] = override
+    data = {"default_preset": "main", "defaults": {"poketoken": default}, "presets": {"main": preset}}
+    original = copy.deepcopy(data)
+    if override is True and (tool != "codex" or target != "container"):
+        with pytest.raises(config.ConfigError, match="poketoken"):
+            config.resolve_config(data, root / "config.toml", launch.plan.repository)
+        return
+    resolved = config.resolve_config(data, root / "config.toml", launch.plan.repository)
+    expected = tool == "codex" and target == "container" and (default if override is None else override)
+    assert resolved.poketoken is expected
+    assert resolved.public_dict()["poketoken"] is expected
+    assert config.ui_summary(data, root / "config.toml", launch.plan.repository)["effective"]["poketoken"] is expected
+    config.explain(resolved)
+    assert ("local usage export: PokeTokenBar" in capsys.readouterr().out) is expected
+    plan = build_launch_plan(
+        launch.request, resolved, cage_version="dev", config_root=root, install_root=ROOT,
+    ).plan
+    assert (poketoken.CAPABILITY in plan.capabilities) is expected
+    assert data == original
+    if not expected:
+        with patch.object(poketoken, "ActiveExport") as worker:
+            container._start_poketoken_export(SimpleNamespace(plan=plan))
+        worker.assert_not_called()
+
+
+@pytest.mark.parametrize("saved_target", ["container", "host", "desktop"])
+@pytest.mark.parametrize("launch_target", ["container", "host", "desktop"])
+@pytest.mark.parametrize("override", [None, False])
+def test_inherited_default_uses_final_cli_target(prepared, saved_target, launch_target, override):
+    root, launch = prepared
+    preset = {"tool": "codex", "target": saved_target, "net": "open"}
+    if override is not None:
+        preset["poketoken"] = override
+    data = {"default_preset": "main", "defaults": {"poketoken": True}, "presets": {"main": preset}}
+    resolved = config.resolve_config(data, root / "config.toml", launch.plan.repository)
+    plan = build_launch_plan(
+        replace(launch.request, target=launch_target), resolved,
+        cage_version="dev", config_root=root, install_root=ROOT,
+    ).plan
+    assert (poketoken.CAPABILITY in plan.capabilities) is (launch_target == "container" and override is None)
+
+
+@pytest.mark.parametrize("value", ['"true"', "1", "[]"])
+def test_default_must_be_boolean_even_without_a_selected_preset(value):
+    with pytest.raises(config.ConfigError, match="defaults.poketoken must be true or false"):
+        config.parse_config_text(f"[defaults]\npoketoken={value}")
+    with pytest.raises(config.ConfigError, match="defaults.poketoken must be true or false"):
+        config.apply_ui_operations({}, [{"action": "update_defaults", "value": {"poketoken": json.loads(value)}}])
+    with pytest.raises(config.ConfigError, match="defaults.poketoken must be true or false"):
+        config.resolve_config(
+            {"defaults": {"poketoken": json.loads(value)}, "presets": {"main": {"tool": "codex"}}},
+            Path("/tmp/config.toml"), "/tmp/project", preset_name="main",
+        )
+
+
+def test_launch_once_inherits_without_saving_or_freezing_default(prepared, tmp_path):
+    root, launch = prepared
+    data = {"defaults": {"poketoken": True}, "presets": {}}
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps({"action": "launch_once", "preset": {"tool": "codex"}}))
+    resolved = config.resolve_ui_result(data, root / "config.toml", launch.plan.repository, result)
+    assert resolved.poketoken is True
+    assert resolved.poketoken_override is None
+    assert data["presets"] == {}
+    data["defaults"]["poketoken"] = False
+    assert config.resolve_ui_result(data, root / "config.toml", launch.plan.repository, result).poketoken is False
+
+
+def test_manual_sync_accepts_inherited_opt_in(prepared):
+    root, launch = prepared
+    (root / "config.toml").write_text(
+        'default_preset="main"\n[defaults]\npoketoken=true\n[presets.main]\ntool="codex"\n'
+    )
+    with patch.object(poketoken, "sync", return_value=poketoken.export_path(root)) as sync, patch.object(
+        cli.storage, "docker_command", return_value="docker",
+    ):
+        cli._run_poketoken(
+            ["sync", launch.plan.repository], config_root=root, install_root=ROOT, cage_version="dev",
+        )
+    assert poketoken.CAPABILITY in sync.call_args.args[3].capabilities
 
 
 def test_disabled_plan_cannot_export_or_start_worker(prepared):
