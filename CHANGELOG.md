@@ -5,6 +5,11 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.37.7 — 2026-09-24
+
+- remove both obsolete Codex RMCP feature keys from persistent config at
+  startup, preserving selected MCP server entries and other feature settings;
+
 ## 0.37.6 — 2026-09-23
 
 - retry exact successful-CI-run discovery briefly when GitHub's run list has

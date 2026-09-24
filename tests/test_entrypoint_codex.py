@@ -83,19 +83,20 @@ class CodexEntrypointTests(unittest.TestCase):
             generated = config_path.read_text()
 
         self.assertIn('mcp_oauth_credentials_store = "file"', generated)
-        self.assertIn('rmcp_client = true', generated)
+        self.assertNotIn('rmcp_client', generated)
         self.assertNotIn('experimental_use_rmcp_client', generated)
         self.assertIn('[mcp_servers."dash0"]', generated)
         self.assertIn('url = "https://api.eu-central-1.aws.dash0.com/mcp"', generated)
         self.assertIn('oauth_resource = "https://api.eu-central-1.aws.dash0.com"', generated)
         self.assertIn('scopes = ["*"]', generated)
 
-    def test_legacy_rmcp_feature_is_migrated_without_selected_servers(self):
+    def test_unsupported_rmcp_features_are_removed_without_selected_servers(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             config_path.write_text(
                 "[features]\n"
                 "experimental_use_rmcp_client = true\n"
+                "rmcp_client = false\n"
                 "web_search_request = true\n",
                 encoding="utf-8",
             )
@@ -115,11 +116,11 @@ class CodexEntrypointTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             generated = config_path.read_text(encoding="utf-8")
 
-        self.assertIn("rmcp_client = true", generated)
+        self.assertNotIn("rmcp_client", generated)
         self.assertIn("web_search_request = true", generated)
         self.assertNotIn("experimental_use_rmcp_client", generated)
 
-    def test_explicit_rmcp_feature_override_is_preserved(self):
+    def test_unsupported_rmcp_feature_is_removed_when_mcp_is_selected(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
             config_path.write_text(
@@ -147,9 +148,9 @@ class CodexEntrypointTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             generated = config_path.read_text(encoding="utf-8")
 
-        self.assertIn("rmcp_client = false", generated)
-        self.assertNotIn("rmcp_client = true", generated)
+        self.assertNotIn("rmcp_client", generated)
         self.assertNotIn("experimental_use_rmcp_client", generated)
+        self.assertIn('[mcp_servers."docs"]', generated)
 
 
 if __name__ == "__main__":

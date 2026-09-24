@@ -6,6 +6,21 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.37.7 — 2026-09-24
+
+### Remove unsupported Codex RMCP feature keys
+
+Corrects the 0.37.4 migration: current Codex builds ignore both
+`[features].experimental_use_rmcp_client` and `[features].rmcp_client`. On
+startup Cage now removes either stale setting from the persistent container
+config while keeping other feature settings, selected MCP server entries and
+OAuth credentials intact. Codex's documented Streamable HTTP, bearer-token and
+OAuth MCP settings need neither flag.
+
+Update Cage to 0.37.7 and restart the Codex container. Startup cleans the
+container config before Codex reads it; no manual config or credential changes
+are required.
+
 ## 0.37.4 — 2026-09-23
 
 ### Codex RMCP feature key

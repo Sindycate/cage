@@ -3,6 +3,19 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-24 — Remove unsupported Codex RMCP feature keys for v0.37.7
+
+The v0.37.4 migration changed the legacy RMCP key to `rmcp_client`, but the
+current Codex CLI still warns that this key is unrecognized. Remove both names
+from the persistent container config at startup, including imported host
+configuration, while preserving unrelated feature flags and generated MCP
+server configuration. Codex's current MCP configuration documents HTTP,
+bearer-token and OAuth support without either feature key.
+
+Regression coverage verifies cleanup with and without selected servers and
+preservation of other feature and MCP settings. The canonical publisher owns
+the full release validation and public verification gates.
+
 ## 2026-09-23 — Retry exact CI-run discovery for v0.37.6
 
 The v0.37.5 release workflow started immediately after exact-SHA CI passed, but
