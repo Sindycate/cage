@@ -119,6 +119,7 @@ class ResolvedConfig:
     skill_pack_names: list[str] = field(default_factory=list)
     net: str = ""
     session_sync: str = ""
+    poketoken: bool = False
     yolo: str = ""
     target: str = "container"
     claude_auth: str = ""
@@ -206,6 +207,7 @@ class ResolvedConfig:
             "network": self.net,
             "yolo": self.yolo == "1",
             "session_sync": self.session_sync == "1",
+            "poketoken": self.poketoken,
             "codex_profile": self.codex_profile,
             "auth": {
                 "name": self.auth_name,

@@ -134,6 +134,7 @@ PRESET_KEYS = {
     "extra_mounts",
     "yolo",
     "opencode_plugins",
+    "poketoken",
 }
 
 
@@ -409,6 +410,8 @@ def validate_schema(data: dict[str, Any]) -> None:
             raise ConfigError(
                 f"presets.{preset_name}.opencode_plugins must be true or false"
             )
+        if "poketoken" in preset and type(preset["poketoken"]) is not bool:
+            raise ConfigError(f"presets.{preset_name}.poketoken must be true or false")
 
 
 def bool_to_flag(value: Any, label: str) -> str:

@@ -5,6 +5,18 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.0 — 2026-09-24
+
+- add opt-in `poketoken = true` for Codex CLI container presets: export
+  accounting records into one private host scan folder for PokeTokenBar,
+  without a hub, uploads, or conversation/credential copies;
+- refresh at launch, every five minutes, and exit; expose the scan folder and
+  errors with `cage poketoken status` and refresh one project with
+  `cage poketoken sync PATH --preset NAME`;
+- preserve token snapshots, fork/subagent relationships and stable private
+  identities while keeping source mounts read-only and rejecting unsafe files,
+  replaced volumes, rewritten history and oversized input.
+
 ## 0.37.7 — 2026-09-24
 
 - remove both obsolete Codex RMCP feature keys from persistent config at

@@ -16,7 +16,7 @@ REFACTORED_CORE_MODULES = tuple(
     path.relative_to(ROOT / "cage_core").as_posix()
     for package in ("configuration", "monitoring")
     for path in sorted((ROOT / "cage_core" / package).rglob("*.py"))
-)
+) + ("poketoken.py", "poketoken_records.py")
 
 
 class InstallerSafetyTests(unittest.TestCase):
@@ -135,6 +135,8 @@ class InstallerSafetyTests(unittest.TestCase):
             "opencode.py",
             "opencode_policy.py",
             "planning.py",
+            "poketoken.py",
+            "poketoken_records.py",
             "monitor.py",
             "storage.py",
             "state/__init__.py",

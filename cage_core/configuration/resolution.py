@@ -208,6 +208,9 @@ def _resolve_launch_settings(
             f"presets.{preset_name}.target must be one of: {', '.join(sorted(VALID_EXEC_TARGETS))}"
         )
     resolved.target = target
+    resolved.poketoken = preset.get("poketoken", False)
+    if resolved.poketoken and (tool != "codex" or target != "container"):
+        raise ConfigError("poketoken is supported only for Codex CLI container presets")
     if target in {"host", "desktop"} and tool != "codex":
         raise ConfigError(
             f"preset {preset_name!r}: {target} execution is only supported for Codex, not {tool!r}"

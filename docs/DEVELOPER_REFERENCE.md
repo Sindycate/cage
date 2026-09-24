@@ -155,6 +155,14 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 ## Architecture
 
+The optional Codex CLI container accounting exporter lives in
+`cage_core/poketoken.py`; its bounded standalone collector and record allowlist
+live in `cage_core/poketoken_records.py`. The `poketoken = true` preset setting
+adds `poketoken-local-export` to the immutable launch plan. Only container
+launches start its lifecycle worker, independently of Token Monitor. See
+[PokeTokenBar setup and retention](../README.md#optional-poketokenbar-export-codex-cli-containers-only)
+and the [metadata trust boundary](../SECURITY.md#optional-poketokenbar-export).
+
 The [monitor and configuration component ADR](adr-003-monitor-config-boundaries.md)
 maps implementation ownership and dependency rules. `cage_core.monitor` and
 `cage_core.config` remain public compatibility facades; new behavior belongs in

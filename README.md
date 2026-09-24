@@ -140,6 +140,69 @@ project's persistent tool-state volume. The collision menu remains available
 when a terminal provides an interactive stdin but restricts direct access to
 `/dev/tty`, as some IDE and sandboxed terminals do.
 
+### Optional PokeTokenBar export (Codex CLI containers only)
+
+[PokeTokenBar](https://chattymin.github.io/PokeTokenBar/) can count Cage's Codex
+CLI usage through an opt-in local accounting export. Add this setting to each
+**existing Codex container preset** you want to include in central `config.toml`:
+
+```toml
+[presets.codex-personal]
+tool = "codex"
+target = "container"
+poketoken = true
+# Keep the preset's existing auth, identity, MCP, and other settings.
+```
+
+Launch that preset normally. Cage exports its existing and new usage at launch,
+every five minutes while running, and once at exit. The selected Codex image
+must be installed and Docker must be running. Host Codex, Desktop, Claude, and
+OpenCode are excluded; an incompatible target override fails before launch
+effects. No Token Monitor connection, hub, or upload is involved.
+
+```bash
+cage poketoken status
+cage poketoken status --json
+cage poketoken sync ~/code/project --preset codex-personal
+```
+
+`status` prints **one scan folder**, normally
+`~/.config/cage/poketoken/exports` (under the Cage configuration directory when
+`XDG_CONFIG_HOME` is customized). Add that exact folder once in PokeTokenBar's
+**Settings > Advanced > Additional scan folders**, selecting **Codex**.
+Opaque subfolders cover each opted-in container volume; new projects appear
+when launched with an opted-in preset. `sync` refreshes one existing project's
+volume without starting a coding session or changing its state.
+
+The separate, network-disabled collector mounts only `sessions/` and
+`archived_sessions/` read-only, with Docker copy-up disabled. It receives no
+host bind mounts, credentials, or Docker socket. Its accounting output retains
+timestamps, model names, usage counters, and pseudonymous session/fork IDs, not
+conversation content, tool output, instructions, repository paths, or auth
+files. The private export directory is not mounted into Codex. These are local
+metadata disclosures, not zero-risk isolation: PokeTokenBar is a separately
+trusted host application. See [the security model](SECURITY.md#optional-poketokenbar-export).
+
+Repeated exports, parallel launches, archive moves, and copied sessions within
+the export retain stable identities. Do not also add another raw-log mirror of
+the same container sessions to PokeTokenBar: raw and pseudonymous session IDs
+differ. PokeTokenBar establishes its own growth baseline, so importing old
+usage does not promise retroactive rewards. Official account-limit rewards are
+separate from this token feed.
+
+Errors are retained in `cage poketoken status` and warned after the coding
+session exits. Invalid records, symlinks, oversized sources, changed volume
+identities, or rewritten accounting history fail closed and preserve the
+last good files. Limits are 20,000 rollouts, 512 MiB per rollout, 16 MiB per
+line, 2 GiB of source data and 64 MiB of accounting output per scan. The
+export deliberately retains history when a source file disappears.
+
+Set `poketoken = false` (or remove the setting) and finish existing Cage
+sessions to stop further exports. Removing the scan folder from PokeTokenBar
+stops it reading retained data; disabling export does not erase history. Keep
+the private `poketoken/identity` file: replacing it changes pseudonyms and can
+cause downstream usage to be counted again.
+
 ### Optional Token Monitor aggregation
 
 Cage can optionally aggregate accumulated Codex token totals into a Token

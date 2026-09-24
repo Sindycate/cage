@@ -6,6 +6,32 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.0 — 2026-09-24
+
+No existing preset changes behavior. To count Codex CLI container usage in
+PokeTokenBar, add `poketoken = true` to each selected Codex container preset,
+launch it, and add the one folder printed by `cage poketoken status` to
+PokeTokenBar's additional **Codex** scan folders. The default folder is
+`~/.config/cage/poketoken/exports`; it follows the Cage configuration root.
+Host Codex, Desktop and other tools are intentionally unsupported.
+
+The collector exports accounting only, at launch, every five minutes and at
+exit. It does not connect Token Monitor or change provider credentials.
+`cage poketoken sync PATH --preset NAME` refreshes an existing selected volume
+when Docker and the selected Codex image are available. Background failures
+remain visible in `status`; the last good export is retained.
+
+Do not add a second raw-log mirror of the same container usage: the export uses
+different, private session IDs. Preserve `poketoken/identity` across upgrades.
+PokeTokenBar's growth baseline and account-limit rewards remain its own
+policies; historical import is not a promise of retroactive rewards.
+
+To disable, remove the setting or set it false and finish existing sessions.
+Retained export history is not erased. Remove the folder from PokeTokenBar to
+stop reading it. Volume replacement or accounting-history rewrites require
+investigation rather than automatic adoption; do not delete runtime state or
+the export identity to silence an error.
+
 ## 0.37.7 — 2026-09-24
 
 ### Remove unsupported Codex RMCP feature keys

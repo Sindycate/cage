@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import config, monitor, opencode_policy, storage
+from . import poketoken
 from .monitoring import hub as monitor_hub, state as monitor_state
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
@@ -72,6 +73,8 @@ Commands:
   monitor provider migrate LABEL --yes  Verify and restore one named provider stream
   monitor pricing ...         Manage private custom model prices
   monitor forget DEVICE_ID    Delete a Cage-owned hub device
+  poketoken status            Show the local PokeTokenBar scan folder and errors
+  poketoken sync PATH         Export one opted-in Codex container's usage now
 
 Options:
   --preset NAME     Use a central config preset (one-shot override)
@@ -405,7 +408,59 @@ def _dispatch_management(
                 cage_version=cage_version,
             )
         )
+    if command == "poketoken":
+        raise SystemExit(
+            _run_poketoken(
+                rest, config_root=config_root, install_root=install_root,
+                cage_version=cage_version,
+            )
+        )
     return False
+
+
+def _run_poketoken(
+    arguments: list[str], *, config_root: Path, install_root: Path, cage_version: str,
+) -> int:
+    try:
+        if arguments in (["status"], ["status", "--json"]):
+            result = poketoken.status(config_root)
+            if arguments[-1] == "--json":
+                print(json.dumps(result, sort_keys=True))
+            else:
+                print(f"PokeTokenBar Codex scan folder: {result['path']}")
+                print("Opt in with poketoken = true in each Codex container preset.")
+                for source in result["sources"]:
+                    print(f"  {source['source'][:12]}: {source.get('error') or 'exported at ' + source['updated_at']}")
+            return 0
+        if not arguments or arguments[0] != "sync":
+            raise CliError("Usage: cage poketoken status [--json] | sync PATH [--preset NAME]")
+        rest = arguments[1:]
+        preset = ""
+        paths = []
+        index = 0
+        while index < len(rest):
+            item = rest[index]
+            if item == "--preset" and index + 1 < len(rest) and not preset:
+                index += 1
+                preset = rest[index]
+            elif item.startswith("-"):
+                raise CliError("Usage: cage poketoken sync PATH [--preset NAME]")
+            else:
+                paths.append(item)
+            index += 1
+        if len(paths) != 1:
+            raise CliError("PokeTokenBar sync requires exactly one project path")
+        prepared, _ = _resolve_monitor_registration(
+            paths[0], preset, "", config_root=config_root,
+            install_root=install_root, cage_version=cage_version,
+        )
+        destination = poketoken.sync(
+            config_root, storage.docker_command(), install_root, prepared.plan,
+        )
+        print(f"Exported Codex accounting to {destination}")
+        return 0
+    except poketoken.ExportError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def _run_storage(arguments: list[str], *, config_root: Path) -> int:

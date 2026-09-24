@@ -3,6 +3,37 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-24 — Codex container PokeTokenBar export prepared for v0.38.0
+
+Add a default-off Codex CLI container-preset capability with one private host
+scan root, periodic/final refresh, explicit project sync, and persisted error
+status. It is independent of the Token Monitor hub and excludes Desktop, host
+Codex and other tools. The immutable plan validates target compatibility before
+effects; configuration diagnostics and TUI review disclose the metadata export.
+
+The network-free, resource-bounded collector reads only exact session subpaths
+with read-only/no-copy mounts and no host mounts. Allowlisted records are
+revalidated on the host; session/fork identities and filenames receive stable
+HMAC pseudonyms. Directory-relative no-follow writes, private permissions,
+serialization, source identity rechecks and append-only history validation
+preserve existing state and reject unsafe or ambiguous updates.
+
+Focused Python checks and a disposable real-Docker fixture exercise the export,
+privacy, lifecycle, source/destination links, timeout cleanup, target gating,
+installer completeness and retained last-good behavior. The released
+PokeTokenBar v2.5.4 parser was compiled and linked into a standalone local
+compatibility harness: original and sanitized records matched exactly for
+ordinary usage (150 tokens), upstream forks (369,215 tokens), and subagents
+(222,190 tokens), including duplicate exported volume copies. XCTest was not
+available in the local toolchain; the standalone harness used the same compiled
+upstream parser without running the application. The canonical publisher owns
+the remaining full release and public-verification gates.
+
+The local full suite passed (817 tests, 19 opt-in skips); the focused export
+suite also passed with its real-Docker fixture enabled. Source content,
+credentials, ownership and modification time were unchanged after repeated
+exports from the disposable volume.
+
 ## 2026-09-24 — Remove unsupported Codex RMCP feature keys for v0.37.7
 
 The v0.37.4 migration changed the legacy RMCP key to `rmcp_client`, but the

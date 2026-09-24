@@ -276,7 +276,7 @@ unsafe_entry="$(find "$STAGE_DIR/cage_core" -type l -print -quit)"
 unsafe_entry="$(find "$STAGE_DIR/cage_core" ! -type f ! -type d -print -quit)"
 [ -z "$unsafe_entry" ] || error "Release archive contains a non-regular package entry: $unsafe_entry"
 for required in \
-    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py monitor.py opencode.py opencode_policy.py planning.py storage.py \
+    __init__.py bridge.py cli.py codex_policy.py codex_runtime.py config.py lifecycle.py models.py monitor.py opencode.py opencode_policy.py planning.py poketoken.py poketoken_records.py storage.py \
     configuration/__init__.py configuration/schema.py configuration/selection.py configuration/storage.py \
     configuration/rendering.py configuration/editing.py configuration/interaction.py configuration/codex.py \
     configuration/resolution.py configuration/packs.py configuration/diagnostics.py configuration/oauth.py configuration/ui.py configuration/cli.py \

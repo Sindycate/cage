@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .. import bridge as bridge_policy, config, monitor, opencode_policy, storage, oauth_broker
+from .. import poketoken
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -1282,6 +1283,16 @@ def _stop_codex_monitor(runtime: ContainerRuntime) -> int:
     return 0
 
 
+def _start_poketoken_export(runtime: ContainerRuntime) -> None:
+    if poketoken.CAPABILITY not in runtime.plan.capabilities:
+        return
+    worker = poketoken.ActiveExport(
+        lambda: poketoken.sync(runtime.config_root, runtime.docker, runtime.install_root, runtime.plan)
+    )
+    runtime.lifecycle.register("PokeTokenBar local export", worker.stop)
+    print(f"  PokeTokenBar scan folder: {poketoken.export_path(runtime.config_root)}")
+
+
 def _install_signal_handlers():
     previous = {
         signal.SIGINT: signal.getsignal(signal.SIGINT),
@@ -1515,6 +1526,7 @@ def run_container_target(
             primary_status = run_desktop(runtime, docker_arguments)
         else:
             _start_codex_monitor(runtime)
+            _start_poketoken_export(runtime)
             primary_status = _run_ordinary(
                 runtime, docker_arguments, tool_arguments
             )

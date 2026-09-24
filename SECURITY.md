@@ -308,6 +308,40 @@ host ChatGPT application itself into a containerized process. The repository,
 explicit read-write mounts, selected credentials, MCP/host-command bridges,
 and external connector actions retain their documented authority.
 
+## Optional PokeTokenBar export
+
+`poketoken = true` is an explicit Codex CLI container-preset capability, off by
+default and visible in launch planning and configuration diagnostics. It
+exports accounting metadata to a private host directory, independently of
+Token Monitor; it neither connects to a hub nor uploads anything.
+
+A separate short-lived collector uses the selected Codex image with no network,
+a read-only root filesystem, all capabilities dropped, no-new-privileges,
+bounded CPU/memory/process resources, and only the selected volume's
+`sessions/` and `archived_sessions/` read-only subpath mounts with copy-up
+disabled. It runs as the host UID/GID, receives no credentials, host mounts, or
+Docker socket, and cannot write back into the volume. Its input, records, and
+output are bounded. Unsupported subpath mounts never fall back to mounting an
+entire volume.
+
+Only allowlisted accounting records cross its stdout boundary. The host
+revalidates them, replaces raw session/fork identities and filenames with stable
+per-install HMAC pseudonyms, and writes mode-0600 files under mode-0700
+directories. Model names and timestamps remain visible. Conversation content,
+instructions, tool output, repository paths and arbitrary nested metadata are
+not exported. Host file operations use directory-relative, no-follow access
+and atomic replacement; symlink/hardlink destinations and changed source
+fingerprints are rejected. Parallel writers serialize. The scan folder is not
+mounted into the coding container.
+
+This adds a deliberate container-to-host metadata channel and parser exposure.
+Container-generated counters are not attested billing data and can be falsified
+by a process that can modify its own session logs. PokeTokenBar runs on the host
+and remains separately trusted; Cage does not control its networking or data
+handling. The export is not a sandbox for hostile code. Disabling the preset
+setting takes effect for subsequent launches; finish existing sessions to stop
+their collectors. Retained exports are not deleted automatically.
+
 ## Writable repository state
 
 The repository mount includes `.git`, ignored files, and untracked files. A tool

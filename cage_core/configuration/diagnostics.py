@@ -222,6 +222,8 @@ def explain(resolved: ResolvedConfig, doctor: bool = False) -> int:
         print("  - network: open")
     if resolved.tool == "claude" and resolved.session_sync == "1":
         print("  - host state writeback: Claude session sync enabled")
+    if resolved.poketoken:
+        print("  - local usage export: PokeTokenBar accounting only (no conversations or credentials)")
     if resolved.ssh_key:
         print(f"  - SSH private key: mounted read-only ({resolved.ssh_key})")
     if resolved.yolo == "1":

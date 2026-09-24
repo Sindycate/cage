@@ -477,6 +477,8 @@ class Controller:
             )
         if yolo:
             risks.append("Coding-tool permission prompts are disabled (yolo).")
+        if preset.get("poketoken") is True:
+            risks.append("Codex accounting metadata is exported privately to the host for PokeTokenBar.")
         if preset.get("tool") == "opencode" and preset.get("opencode_plugins") is True:
             risks.append(
                 "OpenCode plugins are enabled and may execute global or project extension code."
@@ -1473,6 +1475,8 @@ class CursesView:
             f"MCP packs: {', '.join(preset.get('mcp_packs', [])) or 'none'}",
             f"Skill packs: {', '.join(preset.get('skill_packs', [])) or 'none'}",
         ]
+        if preset.get("poketoken") is True:
+            lines.append("PokeTokenBar: local accounting export enabled")
         aws_access, _ = self._aws_setting(preset, "aws_access")
         aws_profile, _ = self._aws_setting(preset, "aws_profile")
         if aws_access == "host-cli":

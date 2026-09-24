@@ -257,6 +257,8 @@ def build_launch_plan(
         target=target,
         network=network,
     )
+    if resolved.poketoken and (resolved.tool != "codex" or target != "container"):
+        raise PlanError("poketoken requires Codex CLI container execution")
 
     mounts, mount_warnings = normalize_extra_mounts(
         replace(request, target=target),
@@ -316,6 +318,8 @@ def build_launch_plan(
                     "invalid internal desktop configuration fingerprint"
                 )
     capabilities = ["repo-write", "persistent-tool-state"]
+    if resolved.poketoken:
+        capabilities.append("poketoken-local-export")
     if network == "gate":
         capabilities.append("netgate")
     if resolved.stdio_mcp:
