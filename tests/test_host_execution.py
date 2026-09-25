@@ -289,6 +289,22 @@ class TestHostModeLaunches(unittest.TestCase):
         self.assertNotIn("FAKE_DOCKER_CALLED", result.stderr)
         self.assertIn("no Docker isolation", result.stderr)
 
+    def test_selected_provider_reaches_direct_and_monitored_resume(self):
+        for monitored in (False, True):
+            with self.subTest(monitored=monitored):
+                result, _, _, temporary = setup_host_test(
+                    HOST_CONFIG,
+                    tool_args=["resume", "session-id"],
+                    codex_files={"config.toml": 'model_provider = "current"\n'},
+                    monitor_auth=monitored,
+                )
+                self.addCleanup(temporary.cleanup)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    'ARGS=-c model_provider="current" resume session-id\n',
+                    result.stdout,
+                )
+
     def test_host_mode_rejects_passthrough_mcp_config(self):
         result, _, _, tmp = setup_host_test(
             HOST_CONFIG,

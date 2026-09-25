@@ -6,6 +6,30 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.2 — 2026-09-25
+
+### Codex terminal resume uses the selected provider
+
+An explicit `model_provider` in the selected auth home's `config.toml` or
+selected `<profile>.config.toml` is now passed to terminal Codex as a `-c`
+override. The named profile wins over the base file and a caller's explicit
+provider override wins over both. The selected auth provider also takes
+precedence over project-level provider configuration. This fixes resume
+bootstrap failures when saved history names a provider absent from the newly
+selected auth config.
+
+Codex's explicit-provider resume path uses the current model/reasoning config
+rather than restoring those settings from saved metadata, including when the
+provider has not changed. Specify a model or reasoning override when retaining
+particular old settings matters. If neither selected config file names a
+provider, native Codex behavior is unchanged; explicitly set
+`model_provider = "openai"` to select the built-in provider when switching back.
+
+Select only an endpoint authorized to receive the resumed conversation.
+Encrypted history may not be portable between providers. Cage does not copy
+credentials between auth profiles, convert encrypted content, or rewrite any
+session/history/database state. Desktop client-controlled resume is unchanged.
+
 ## 0.38.1 — 2026-09-24
 
 PokeTokenBar can now be enabled once in the TUI through **Manage saved

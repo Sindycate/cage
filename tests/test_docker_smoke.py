@@ -864,7 +864,7 @@ class DockerSmokeTests(unittest.TestCase):
             )
             self.assertEqual(saved.returncode, 0, saved.stderr)
             (host_codex / "config.toml").write_text(
-                'model = "host-config"\n',
+                'model = "host-config"\nmodel_provider = "current"\n',
                 encoding="utf-8",
             )
             (host_codex / "rules").mkdir()
@@ -914,6 +914,8 @@ class DockerSmokeTests(unittest.TestCase):
                 fake_bin / "codex",
                 "#!/bin/sh\n"
                 "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
+                '[ "$1" = "-c" ] && [ "$2" = \'model_provider="current"\' ] && '
+                '[ "$3" = "resume" ] && [ "$4" = "session-id" ] || exit 1\n'
                 "grep -q 'host-config' \"$HOME/.codex/config.toml\" && "
                 "grep -q 'git' \"$HOME/.codex/rules/host.rules\" && "
                 "for name in history.jsonl session_index.jsonl state_5.sqlite "
@@ -979,7 +981,7 @@ class DockerSmokeTests(unittest.TestCase):
                     "chown -R 21001:21001 /host-codex && "
                     "mkdir -p /workspace /home/codex && "
                     "cp -R /volume-codex-source /home/codex/.codex && "
-                    "/entrypoint.sh --version && /entrypoint.sh --version",
+                    "/entrypoint.sh resume session-id && /entrypoint.sh resume session-id",
                 ],
                 cwd=ROOT,
                 text=True,

@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 # Isolated mode intentionally excludes the script directory. Add only this
@@ -22,6 +23,45 @@ from cage_core import codex_policy
 
 MAX_INVENTORY_BYTES = 4 * 1024 * 1024
 INVENTORY_TIMEOUT = 60.0
+
+
+def configured_model_provider_override(
+    codex_home: Path, profile: str = ""
+) -> str | None:
+    """Read only the provider selected by the auth home's static config layers."""
+    paths = [codex_home / "config.toml"]
+    if profile:
+        if not profile.isascii() or not all(
+            character.isalnum() or character in "_-" for character in profile
+        ):
+            raise codex_policy.PolicyError("invalid selected Codex profile")
+        paths.append(codex_home / f"{profile}.config.toml")
+    layers: list[dict[str, object]] = []
+    for path in paths:
+        if path.exists() and not path.is_file():
+            raise codex_policy.PolicyError(
+                "cannot read selected Codex provider configuration: not a regular file"
+            )
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_INVENTORY_BYTES + 1)
+        except FileNotFoundError:
+            if path.name == "config.toml":
+                continue
+            raise codex_policy.PolicyError("selected Codex profile is missing") from None
+        except OSError as exc:
+            raise codex_policy.PolicyError(
+                "cannot read selected Codex provider configuration"
+            ) from exc
+        if len(raw) > MAX_INVENTORY_BYTES:
+            raise codex_policy.PolicyError("selected Codex provider configuration is too large")
+        try:
+            layers.append(tomllib.loads(raw.decode("utf-8")))
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise codex_policy.PolicyError(
+                "cannot parse selected Codex provider configuration"
+            ) from exc
+    return codex_policy.model_provider_override(layers)
 
 
 def toml_transports(
@@ -150,6 +190,9 @@ def _main(argv: list[str]) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate-argv")
     validate.add_argument("argv", nargs=argparse.REMAINDER)
+    provider = subparsers.add_parser("provider-override")
+    provider.add_argument("--codex-home", type=Path, required=True)
+    provider.add_argument("--profile", default="")
     runtime = subparsers.add_parser("runtime-overrides")
     runtime.add_argument("--codex-bin", required=True)
     runtime.add_argument("--codex-home", type=Path, required=True)
@@ -164,6 +207,11 @@ def _main(argv: list[str]) -> int:
             if passthrough and passthrough[0] == "--":
                 passthrough = passthrough[1:]
             codex_policy.reject_unsafe_passthrough_args(passthrough)
+            return 0
+        if args.command == "provider-override":
+            override = configured_model_provider_override(args.codex_home, args.profile)
+            if override is not None:
+                print(override)
             return 0
         selected = codex_policy.selected_names(
             args.selected_stdio_json,

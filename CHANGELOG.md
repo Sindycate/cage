@@ -5,6 +5,14 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.2 — 2026-09-25
+
+- pass the provider explicitly selected by the Codex auth configuration or
+  named profile as a terminal launch override, so resume does not restore an
+  unavailable provider from saved history after switching auth;
+- preserve caller provider overrides, selected-only MCP policy and runtime
+  history; document current-config resume semantics and cross-provider limits.
+
 ## 0.38.1 — 2026-09-24
 
 - add a TUI-editable global PokeTokenBar default for Codex CLI containers,

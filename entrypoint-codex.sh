@@ -854,6 +854,17 @@ if [ -n "${CAGE_CODEX_PROFILE:-}" ]; then
     CAGE_CODEX_PROFILE_ARGS+=(--profile "$CAGE_CODEX_PROFILE")
 fi
 
+# Codex resume otherwise restores the provider saved in the thread, even when
+# this launch selected a different auth config. Keep caller overrides last.
+CAGE_CODEX_PROVIDER_OVERRIDE="$(
+    gosu "$TARGET_USER" python3 -I \
+        /usr/local/lib/cage/cage_core/codex_runtime.py provider-override \
+        --codex-home "$CODEX_DIR" --profile "${CAGE_CODEX_PROFILE:-}"
+)" || exit 1
+if [ -n "$CAGE_CODEX_PROVIDER_OVERRIDE" ]; then
+    CAGE_CODEX_PROFILE_ARGS+=(-c "$CAGE_CODEX_PROVIDER_OVERRIDE")
+fi
+
 cd "$WORK_DIR"
 exec gosu "$TARGET_USER" codex \
     ${CAGE_CODEX_PROFILE_ARGS[@]+"${CAGE_CODEX_PROFILE_ARGS[@]}"} \

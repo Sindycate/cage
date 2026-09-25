@@ -333,6 +333,14 @@ def host_codex_arg_lines(payload: dict[str, Any], repo: Path, codex_home: Path) 
     args: list[str] = []
     if profile:
         args.extend(["--profile", profile])
+    try:
+        provider_override = codex_runtime.configured_model_provider_override(
+            codex_home, profile
+        )
+    except codex_policy.PolicyError as exc:
+        raise ConfigError(str(exc)) from exc
+    if provider_override is not None:
+        args.extend(["-c", provider_override])
     for server in stdio:
         name = str(server["name"])
         command = server.get("command")

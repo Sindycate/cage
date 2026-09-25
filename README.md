@@ -915,6 +915,30 @@ container-side bridges and remain unsupported there. See Codex's official
 [provider configuration](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers),
 and [auto-review documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
 
+For terminal launches (container and host), Cage passes an explicitly configured
+`model_provider` from the selected auth home's `config.toml`, overridden by the
+selected named profile, as a process-local `-c` argument. This makes the current
+auth/profile provider authoritative even when resuming a thread saved with a
+different provider, or when a project config names another provider. Caller
+`-c 'model_provider="NAME"'` arguments still win. No provider is inferred from
+credentials or from the list of provider definitions: if neither selected file
+sets `model_provider`, Codex retains its native selection/resume behavior.
+To explicitly select Codex's built-in provider, set `model_provider = "openai"`
+in that auth configuration.
+
+```bash
+cage --preset codex-provider ~/projects/myapp resume SESSION_ID
+```
+
+Codex treats an explicit provider as a resume configuration override, so the
+current model and reasoning settings also take precedence over saved resume
+metadata; pass `--model` or `-c model_reasoning_effort=...` if needed. Cage does
+not rewrite sessions or convert encrypted reasoning between providers.
+Cross-provider continuation still depends on the receiving provider's model
+and encrypted-history compatibility; an `invalid_encrypted_content` error is
+not repaired by provider selection. Desktop's app-server resume requests remain
+controlled by the Desktop client rather than this terminal override.
+
 ## Host-native execution (no Docker)
 
 For maintenance tasks that need access outside the repository, Cage can run

@@ -3,6 +3,27 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — Selected Codex resume provider prepared for v0.38.2
+
+Terminal container and host launches promote the provider explicitly selected
+by the auth home's base/named config into a process-local Codex override.
+This prevents persisted resume metadata from restoring an unavailable previous
+provider after an auth switch. Caller overrides remain last; absent explicit
+provider selection retains native behavior. Desktop request semantics are
+unchanged. Configuration reads are bounded and failures omit config contents.
+
+The upstream resume guard also skips saved model/reasoning restoration when a
+provider override is present. README and migrations disclose this current-config
+behavior, project-provider precedence and encrypted-history compatibility limits.
+No runtime history, credentials, provider definitions or MCP allowlists change.
+
+An isolated real Codex 0.156.1 terminal probe with synthetic history reproduced
+the missing saved-provider error without an override and reached a ready prompt
+with the selected-provider override. No model request or private session was
+used. Focused coverage exercises base/profile/caller precedence, malformed and
+oversized input, host/monitored-host launch, actual container final argv, and
+unchanged runtime state. Canonical publication owns the full release gates.
+
 ## 2026-09-24 — PokeTokenBar global defaults and TUI controls prepared for v0.38.1
 
 Add a typed `[defaults].poketoken` opt-in and per-launch Use default/On/Off

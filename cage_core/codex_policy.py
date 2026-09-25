@@ -35,6 +35,21 @@ class PolicyError(ValueError):
     pass
 
 
+def model_provider_override(layers: list[dict[str, object]]) -> str | None:
+    """Promote an explicitly selected provider to a Codex resume override."""
+    provider = None
+    for layer in layers:
+        if "model_provider" not in layer:
+            continue
+        value = layer["model_provider"]
+        if not isinstance(value, str) or not value.strip():
+            raise PolicyError("selected Codex model_provider must be a non-empty string")
+        provider = value
+    if provider is None:
+        return None
+    return f"model_provider={json.dumps(provider, ensure_ascii=True)}"
+
+
 def key_segment(name: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_-]+", name):
         return name
