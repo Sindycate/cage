@@ -5,6 +5,12 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.4 — 2026-09-25
+
+- allow Token Monitor to read checkpointed Codex WAL databases without retained
+  WAL/SHM files, using a private bounded scratch directory while every source
+  file remains read-only; fixes full reconciliation stopping on inactive stores.
+
 ## 0.38.3 — 2026-09-25
 
 - detect provider changes hidden by Codex's original rollout header using

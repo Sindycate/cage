@@ -75,6 +75,10 @@ class MonitorCollectorTests(MonitorTestCase):
                 f"/scan/codex:rw,noexec,nosuid,nodev,size=32m,uid={os.getuid()},gid={os.getgid()},mode=700",
                 joined,
             )
+            self.assertIn(
+                f"/scan/codex-state:rw,noexec,nosuid,nodev,size=8m,uid={os.getuid()},gid={os.getgid()},mode=700",
+                joined,
+            )
             pricing = (
                 snapshots_api._project_state_path(root, state)
                 / "tokscale"

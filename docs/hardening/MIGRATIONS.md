@@ -6,6 +6,16 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.4 — 2026-09-25
+
+Fixes 0.38.3 full monitor reconciliation stopping on inactive, checkpointed
+Codex databases that still use WAL mode but no longer have WAL/SHM files.
+SQLite can now create temporary sidecars in a bounded private collector tmpfs;
+all source database/session mounts remain read-only. No source files are
+created, copied or modified. After upgrading and relaunching older monitored
+Cage processes, `cage monitor sync` retries the failed reconciliation using the
+existing private provider observations and last-good publication state.
+
 ## 0.38.3 — 2026-09-25
 
 ### Token Monitor corrects detected mixed-provider sessions

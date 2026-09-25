@@ -3,6 +3,24 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — Checkpointed monitor database recovery prepared for v0.38.4
+
+The v0.38.3 publisher reached public_verified, but subsequent normal full
+reconciliation exposed a missed database lifecycle case: inactive stores can
+retain SQLite WAL mode after their WAL/SHM companions disappear. A query-only
+reader still needs writable scratch sidecars, so the read-only mount parent
+prevented opening these databases. Publication stopped without replacing the
+last-good hub generation.
+
+Add an 8 MiB private ephemeral tmpfs for the database mount parent. Exact source
+files remain read-only, including existing WAL/SHM companions; only missing
+sidecars can be created in scratch space. The real collector regression now
+uses an explicitly checkpointed WAL fixture, reproduces the old failure, and
+checks source bytes and absence of source-side sidecars after collection.
+Focused monitor and real collector regressions pass. A subsequent no-upload
+collection of every registered source and the deduplicated provider aggregate
+also succeeded, including the originally affected mixed session.
+
 ## 2026-09-25 — Mixed-provider monitor attribution prepared for v0.38.3
 
 Codex updates its thread database provider after resume but can retain the old

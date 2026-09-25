@@ -290,7 +290,9 @@ with volume copy-up disabled, to detect resumed-provider changes. No entire
 Codex home or volume root is mounted. A bounded, query-only SQLite reader emits
 only rollout basenames and provider labels into private local evidence;
 database files can contain other native metadata and remain readable inside
-this trusted collector. The host holds the hub
+this trusted collector. Their mount parent is an 8 MiB private ephemeral tmpfs,
+allowing SQLite to create missing WAL/SHM scratch files for checkpointed stores
+without creating or modifying any source file. The host holds the hub
 credential and performs uploads. Consequently, an enabled monitor can upload
 while the tool itself runs with `--net off`; disconnect the monitor to disable
 that host-side traffic. Plain HTTP hubs are limited to literal private or
