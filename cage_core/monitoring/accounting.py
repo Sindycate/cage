@@ -85,6 +85,8 @@ def _session_dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if _session_number(left, field) < _session_number(right, field):
             return False
     for field in constants_api.SESSION_MAP_FIELDS:
+        if field == "providers":
+            continue
         left_map = _session_map(left, field)
         right_map = _session_map(right, field)
         if any(left_map.get(key, 0) < value for key, value in right_map.items()):
@@ -124,7 +126,17 @@ def _select_session(candidates: list[tuple[models_api.VolumeRegistration, dict[s
             raise errors_api.MonitorError(
                 "conflicting copies of one Codex session; hub snapshot was preserved"
             )
-    return dict(winner)
+    result = dict(winner)
+    providers = {
+        validation_api._provider_slug(name)
+        for _, candidate in candidates
+        for name in (_session_map(candidate, "providers") or {constants_api.UNATTRIBUTED_PROVIDER: 0})
+    }
+    if len(providers) != 1 or None in providers or constants_api.UNATTRIBUTED_PROVIDER in providers:
+        result["providers"] = {
+            constants_api.UNATTRIBUTED_PROVIDER: _session_number(result, "totalTokens")
+        }
+    return result
 
 
 def _empty_aggregate_period() -> dict[str, Any]:
@@ -573,9 +585,21 @@ def _provider_partitions(
 
     partitions: dict[str, dict[str, dict[str, list[tuple[models_api.VolumeRegistration, dict[str, Any]]]]]] = {}
     winners: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    providers_by_session: dict[str, set[str]] = {}
+    for values in occurrences.values():
+        for key, candidates in values.items():
+            providers_by_session.setdefault(key, set()).update(
+                session_provider(candidate, allowed_provider_ids=allowed_provider_ids)
+                for _, candidate in candidates
+            )
     for period_name, values in occurrences.items():
         for key, candidates in values.items():
             winner = _select_session(candidates)
+            providers = providers_by_session[key]
+            if len(providers) != 1 or constants_api.UNATTRIBUTED_PROVIDER in providers:
+                winner["providers"] = {
+                    constants_api.UNATTRIBUTED_PROVIDER: _session_number(winner, "totalTokens")
+                }
             provider = session_provider(
                 winner, allowed_provider_ids=allowed_provider_ids
             )

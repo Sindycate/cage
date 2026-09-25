@@ -111,6 +111,11 @@ class MonitorHostSourcesTests(MonitorTestCase):
                     ),
                     encoding="utf-8",
                 )
+                state_mount = next(item for item in command if "dst=/state" in item)
+                state_path = Path(state_mount.split("src=", 1)[1].split(",", 1)[0])
+                evidence = state_path / "provider-evidence.json"
+                evidence.write_text(json.dumps({"version": 1, "observations": [{}, {}]}))
+                evidence.chmod(0o600)
                 return type("Result", (), {"returncode": 0, "stderr": ""})()
 
             with patch('cage_core.monitoring.collector.subprocess.run', side_effect=fake_run):

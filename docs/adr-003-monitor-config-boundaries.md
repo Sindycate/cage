@@ -33,7 +33,7 @@ attribute forwarding, source execution or mutable shared namespace is used.
 | `state`, `identity`, `connection`, `pricing`, `providers` | Private files, installation identity, connection and approved policy |
 | `registry`, `volumes`, `host_sources`, `cleanup` | Exact source adoption, Docker identity, host static/auth reconciliation and removal |
 | `locks`, `snapshots`, `scheduler`, `split_state` | Cross-process ownership, trusted caches and durable coordination |
-| `collector` | Bounded, network-disabled collection and local usage evidence |
+| `collector`, `thread_providers` | Bounded, network-disabled collection, scoped read-only thread metadata and local usage evidence |
 | `accounting`, `aggregation` | Pure accounting and its one-snapshot input adapter |
 | `hub`, `publication` | Outbound privacy/HTTP and durable generation/rollback transactions |
 | `service`, `migrations`, `lifecycle` | Scan coordination, resumable migrations and optional background execution |

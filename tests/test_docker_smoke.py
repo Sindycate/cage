@@ -171,6 +171,55 @@ class DockerSmokeTests(unittest.TestCase):
             self.assertTrue(status["period_pricing"]["month"]["cost_complete"])
             self.assertAlmostEqual(status["period_pricing"]["month"]["cost_usd"], .000104)
 
+    def test_managed_host_monitor_detects_provider_switch_from_readonly_database(self):
+        image = os.environ.get("CAGE_MONITOR_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_MONITOR_SMOKE_IMAGE to a built collector image")
+        from datetime import datetime, timezone
+        import sqlite3
+        stamp = datetime.now(timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("")
+            record = monitor.register_host_source(root / "state", source, copy_auth=False, allow_replacement=True)
+            home = monitor.host_source_home(root / "state", record)
+            rollout = home / "sessions" / "provider-switch.jsonl"
+            usage = {"input_tokens": 100, "output_tokens": 10, "cached_input_tokens": 40,
+                     "reasoning_output_tokens": 0, "total_tokens": 110}
+            rows = [
+                {"type": "session_meta", "timestamp": stamp, "payload": {"id": "provider-switch", "model_provider": "zllm"}},
+                {"type": "turn_context", "timestamp": stamp, "payload": {"model": "test-model"}},
+                {"type": "event_msg", "timestamp": stamp, "payload": {"type": "token_count", "info": {
+                    "total_token_usage": usage, "last_token_usage": usage}}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute("CREATE TABLE threads (model_provider TEXT, rollout_path TEXT)")
+            connection.execute("INSERT INTO threads VALUES (?, ?)", ("zllm", str(rollout)))
+            connection.commit()
+            connection.close()
+            database.chmod(0o600)
+            for provider, expected in (("zllm", "zllm"), ("openai-eu", "unattributed"), ("zllm", "unattributed")):
+                connection = sqlite3.connect(database)
+                connection.execute("UPDATE threads SET model_provider=?", (provider,))
+                connection.commit()
+                connection.close()
+                before = (database.read_bytes(), rollout.read_bytes())
+                payload = collector._run_collector(
+                    "docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid()
+                )
+                self.assertEqual((database.read_bytes(), rollout.read_bytes()), before)
+                for period in ("today", "month", "allTime"):
+                    self.assertEqual(payload[period]["totalTokens"], 110)
+                    session = next(iter(payload[period]["sessions"].values()))
+                    self.assertEqual(session["providers"], {expected: 110})
+                streams, _ = monitor.aggregate_provider_summaries(root / "state", [(record, payload)])
+                self.assertEqual(set(streams), {expected})
+                self.assertEqual(streams[expected][0]["allTime"]["totalTokens"], 110)
+
     def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)

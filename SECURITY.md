@@ -283,15 +283,21 @@ official SSH-host workflow.
 
 Token Monitor is an optional host-owned accounting aid, not part of the tool
 container's network boundary. The collector container has no network and sees
-only read-only `sessions/` and `archived_sessions/` subdirectories from a Cage
-volume or an explicitly adopted managed host store; the host holds the hub
+read-only `sessions/` and `archived_sessions/` subdirectories from a Cage
+volume or an explicitly adopted managed host store. It also receives exact
+read-only mounts for `state_5.sqlite` and its existing `-wal`/`-shm` companions,
+with volume copy-up disabled, to detect resumed-provider changes. No entire
+Codex home or volume root is mounted. A bounded, query-only SQLite reader emits
+only rollout basenames and provider labels into private local evidence;
+database files can contain other native metadata and remain readable inside
+this trusted collector. The host holds the hub
 credential and performs uploads. Consequently, an enabled monitor can upload
 while the tool itself runs with `--net off`; disconnect the monitor to disable
 that host-side traffic. Plain HTTP hubs are limited to literal private or
 loopback IP addresses and should otherwise use HTTPS.
 
 The collector never receives a host source's root, credentials, static config,
-history, cache, or logs. Cage stores its managed host source, registry, raw
+standalone history file, cache, or logs. Cage stores its managed host source, registry, raw
 deduplication snapshots, and upload generations privately. Before an aggregate
 reaches the hub, raw local session IDs are replaced with stable per-install HMAC
 pseudonyms. Built-in provider labels `openai-api`, `openai-compatible`, and
@@ -302,6 +308,14 @@ approval is stored only in private monitor state, never central configuration
 or tracked source. A separate verified `cage monitor provider migrate LABEL
 --yes` operation is required before the label becomes active, preserving an
 existing named hub device rather than silently reclassifying its history.
+
+Observed provider conflicts are stored in a private, fingerprint-bound ledger.
+Mixed sessions remain Unattributed even if the current provider later returns
+to the original label; source rollouts and databases are never rewritten.
+Missing databases contribute no new evidence. Unreadable, malformed, oversized
+or unsupported schemas fail collection rather than silently trusting an old
+provider label. The supported database filename is `state_5.sqlite`; absent
+historical evidence and unobserved switches cannot be reconstructed.
 
 This preserves Cage's existing container threat model; it does not turn the
 host ChatGPT application itself into a containerized process. The repository,

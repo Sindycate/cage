@@ -19,6 +19,7 @@ from . import models as models_api
 from . import pricing as pricing_api
 from . import snapshots as snapshots_api
 from . import state as state_api
+from . import thread_providers as thread_providers_api
 from . import validation as validation_api
 
 
@@ -186,6 +187,140 @@ def _host_session_mounts(
     return mounts
 
 
+def _provider_metadata_mounts(
+    docker: str,
+    image: str,
+    config_root: Path,
+    record: models_api.VolumeRegistration,
+) -> list[str]:
+    mounts: list[str] = []
+    home = (
+        host_sources_api._ensure_managed_host_home(config_root, record)
+        if record.target == "host" else None
+    )
+    for suffix in ("", "-wal", "-shm"):
+        name = thread_providers_api.DATABASE_NAME + suffix
+        destination = f"/scan/codex-state/{name}"
+        if home is not None:
+            source = home / name
+            try:
+                info = source.lstat()
+            except FileNotFoundError:
+                if not suffix:
+                    break
+                continue
+            if (
+                not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid()
+            ):
+                raise errors_api.MonitorError("unsafe managed thread/provider metadata")
+            mounts.extend(("--mount", f"type=bind,src={source},dst={destination},readonly"))
+        elif _subpath_available(docker, image, record.volume_name, name):
+            mounts.extend((
+                "--mount",
+                f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={name},volume-nocopy",
+            ))
+        elif not suffix:
+            break
+    return mounts
+
+
+def _apply_provider_evidence(
+    state_path: Path, payload: dict[str, Any], record: models_api.VolumeRegistration
+) -> None:
+    """Keep observed provider switches ambiguous, including after switching back."""
+    ledger_path = state_path / "provider-observations.json"
+    ledger = state_api._read_json(ledger_path, max_bytes=constants_api.MAX_ARCHIVE_BYTES)
+    if ledger is None:
+        ledger = {
+            "version": 1, "logical_id": record.logical_id,
+            "fingerprint": record.fingerprint, "sessions": {},
+        }
+    if (
+        not isinstance(ledger, dict)
+        or set(ledger) != {"version", "logical_id", "fingerprint", "sessions"}
+        or ledger["version"] != 1 or ledger["logical_id"] != record.logical_id
+        or ledger["fingerprint"] != record.fingerprint
+        or not isinstance(ledger["sessions"], dict)
+        or len(ledger["sessions"]) > thread_providers_api.MAX_ROWS
+    ):
+        raise errors_api.MonitorError("monitor provider observations have an invalid identity")
+
+    def identifier(value: object) -> bool:
+        return (
+            isinstance(value, str) and 0 < len(value) <= 300
+            and not any(c in value for c in "/\\\x00\r\n")
+        )
+
+    def provider(value: object) -> str:
+        normalized = validation_api._provider_slug(value)
+        if normalized is None:
+            # Unsafe labels cannot establish a provider.
+            return constants_api.UNATTRIBUTED_PROVIDER
+        return normalized
+
+    observed: dict[str, set[str]] = {}
+    for session_id, names in ledger["sessions"].items():
+        if (
+            not identifier(session_id) or not isinstance(names, list)
+            or not names or len(names) > constants_api.MAX_PROVIDER_LABELS
+            or any(not isinstance(n, str) or provider(n) != n for n in names)
+        ):
+            raise errors_api.MonitorError("monitor provider observations are invalid")
+        observed[session_id] = set(names)
+
+    path = state_path / "provider-evidence.json"
+    evidence = state_api._read_json(path, max_bytes=constants_api.MAX_ARCHIVE_BYTES)
+    if evidence is None:
+        raise errors_api.MonitorError("collector thread/provider evidence is missing")
+    current: dict[str, set[str]] = {}
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != {"version", "observations"} or evidence["version"] != 1
+        or not isinstance(evidence["observations"], list)
+        or len(evidence["observations"]) != 2
+    ):
+        raise errors_api.MonitorError("collector provider evidence is invalid")
+    for observation in evidence["observations"]:
+        if not isinstance(observation, dict) or len(observation) > thread_providers_api.MAX_ROWS:
+            raise errors_api.MonitorError("collector provider observation is invalid")
+        for session_id, name in observation.items():
+            if not identifier(session_id) or not isinstance(name, str) or len(name) > 256:
+                raise errors_api.MonitorError("collector provider record is invalid")
+            current.setdefault(session_id, set()).add(provider(name))
+    for period_name in ("today", "month", "allTime"):
+        period = payload.get(period_name)
+        if not isinstance(period, dict) or not isinstance(period.get("sessions", {}), dict):
+            raise errors_api.MonitorError("collector provider period is invalid")
+        for session in period.get("sessions", {}).values():
+            if not isinstance(session, dict):
+                raise errors_api.MonitorError("collector provider session is invalid")
+            session_id = session.get("sessionId")
+            if not identifier(session_id):
+                raise errors_api.MonitorError("collector session identifier is invalid")
+            names = observed.setdefault(session_id, set())
+            names.update(current.get(session_id, set()))
+            reported = accounting_api._session_map(session, "providers")
+            names.update(provider(name) for name in reported)
+            if not reported:
+                names.add(constants_api.UNATTRIBUTED_PROVIDER)
+    if len(observed) > thread_providers_api.MAX_ROWS or any(
+        len(names) > constants_api.MAX_PROVIDER_LABELS for names in observed.values()
+    ):
+        raise errors_api.MonitorError("monitor provider observations are too large")
+    for period_name in ("today", "month", "allTime"):
+        for session in payload[period_name].get("sessions", {}).values():
+            names = observed[session["sessionId"]]
+            if len(names) != 1 or constants_api.UNATTRIBUTED_PROVIDER in names:
+                session["providers"] = {
+                    constants_api.UNATTRIBUTED_PROVIDER: accounting_api._session_number(session, "totalTokens")
+                }
+    ledger["sessions"] = {key: sorted(names) for key, names in observed.items()}
+    if len(json.dumps(ledger).encode()) > constants_api.MAX_ARCHIVE_BYTES:
+        raise errors_api.MonitorError("monitor provider observations are too large")
+    state_api._write_json(ledger_path, ledger)
+
+
 def _archive_sessions_for_payload(state_path: Path, payload: dict[str, Any]) -> None:
     """Restore complete session detail that upstream removes from sync payloads."""
 
@@ -305,6 +440,7 @@ def _run_collector(
         for subpath, destination in (("sessions", "/scan/codex/sessions"), ("archived_sessions", "/scan/codex/archived_sessions")):
             if _subpath_available(docker, image, record.volume_name, subpath):
                 mounts.extend(("--mount", f"type=volume,src={record.volume_name},dst={destination},readonly,volume-subpath={subpath},volume-nocopy"))
+    mounts.extend(_provider_metadata_mounts(docker, image, config_root, record))
     mounts.extend(("--mount", f"type=bind,src={state_path},dst=/state", "--mount", f"type=bind,src={output_path},dst=/out/summary.json"))
     command = [
         docker,
@@ -392,6 +528,8 @@ def _run_collector(
             raise errors_api.MonitorError(f"Token Monitor collector output is invalid: {exc}") from exc
         _archive_sessions_for_payload(state_path, payload)
         _restore_model_token_usage(state_path, payload)
+        validation_api._validate_summary(payload, record.device_id)
+        _apply_provider_evidence(state_path, payload, record)
         return validation_api._validate_summary(payload, record.device_id)
     finally:
         output_path.unlink(missing_ok=True)

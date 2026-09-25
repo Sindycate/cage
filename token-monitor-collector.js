@@ -11,7 +11,7 @@ process.umask(0o077);
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 const MAX_BYTES = 1024 * 1024;
 const outputPath = String(process.env.CAGE_MONITOR_OUTPUT || '/out/summary.json');
@@ -19,6 +19,22 @@ const loopbackSecret = crypto.randomBytes(32).toString('hex');
 let received = false;
 let closed = false;
 let child;
+let providerBefore;
+
+function readProviders() {
+  return JSON.parse(execFileSync('python3', ['/usr/local/lib/cage-token-monitor-providers.py'], {
+    timeout: 10000, maxBuffer: 32 * MAX_BYTES, stdio: ['ignore', 'pipe', 'pipe']
+  }).toString('utf8'));
+}
+
+function saveProviders() {
+  const observations = [providerBefore, readProviders()];
+  const body = JSON.stringify({ version: 1, observations });
+  if (Buffer.byteLength(body) > 32 * MAX_BYTES) throw new Error('provider evidence is too large');
+  const filename = `${process.env.TOKEN_MONITOR_SHARED_DIR || '/state'}/provider-evidence.json`;
+  const descriptor = fs.openSync(filename, 'wx', 0o600);
+  try { fs.writeFileSync(descriptor, body); } finally { fs.closeSync(descriptor); }
+}
 
 function finish(code) {
   if (closed) return;
@@ -115,8 +131,10 @@ server.listen(17321, '127.0.0.1', () => {
     ensureScanDirectory(`${codexHome}/sessions`);
     ensureScanDirectory(`${codexHome}/archived_sessions`);
     fs.rmSync(`${process.env.TOKEN_MONITOR_SHARED_DIR || '/state'}/model-token-usage.json`, { force: true });
+    fs.rmSync(`${process.env.TOKEN_MONITOR_SHARED_DIR || '/state'}/provider-evidence.json`, { force: true });
+    providerBefore = readProviders();
   } catch (error) {
-    fail(`scan directory is unsafe: ${error.message}`);
+    fail('cannot prepare scoped session/provider scan');
     return;
   }
   const environment = {
@@ -150,7 +168,11 @@ server.listen(17321, '127.0.0.1', () => {
     if (code !== 0 && stderr.trim()) process.stderr.write(stderr.trim().slice(0, 8192) + '\n');
     if (code !== 0 && !received) fail(`upstream agent exited with status ${code}`);
     else if (!received) fail('upstream agent did not deliver a usage summary');
-    else finish(code || 0);
+    else {
+      try { saveProviders(); }
+      catch { fail('cannot retain scoped thread/provider evidence'); return; }
+      finish(code || 0);
+    }
   });
 });
 

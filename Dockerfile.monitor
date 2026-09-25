@@ -24,6 +24,7 @@ RUN set -eux; \
 
 COPY THIRD_PARTY_NOTICES.md /usr/local/share/cage-third-party-notices.md
 COPY token-monitor-accounting.js /usr/local/lib/cage-token-monitor-accounting.js
+COPY cage_core/monitoring/thread_providers.py /usr/local/lib/cage-token-monitor-providers.py
 COPY token-monitor-collector.js /usr/local/bin/cage-token-monitor-collector
 RUN chmod 755 /usr/local/bin/cage-token-monitor-collector && \
     chmod 644 /usr/local/lib/cage-token-monitor-accounting.js /usr/local/share/cage-third-party-notices.md && \

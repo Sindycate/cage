@@ -5,6 +5,14 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.3 — 2026-09-25
+
+- detect provider changes hidden by Codex's original rollout header using
+  scoped, read-only thread metadata during Token Monitor collection;
+- retain observed provider conflicts privately and report unsplittable mixed
+  sessions as Unattributed, preserving token totals across periods and copies
+  without applying a guessed provider price.
+
 ## 0.38.2 — 2026-09-25
 
 - pass the provider explicitly selected by the Codex auth configuration or

@@ -6,6 +6,33 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.3 — 2026-09-25
+
+### Token Monitor corrects detected mixed-provider sessions
+
+Upgrading does not change auth or inference routing. Token Monitor now compares
+recorded session providers with current Codex thread metadata through exact
+read-only `state_5.sqlite`/WAL/SHM mounts. The collector receives no source root
+or credentials. Relaunch existing monitored Cage processes after upgrading,
+since already-running background scanners keep their loaded code. Then run
+`cage monitor sync` to force reconciliation;
+ordinary active-source and hourly scans also apply the correction.
+
+A detected provider mismatch moves the whole unsplittable session to
+Unattributed in every reporting period. Totals are conserved, but the original
+provider's total decreases and the Unattributed total increases. Its cost is
+unavailable rather than charged at a guessed rate. Duplicate copies still
+count once; only an emptied, previously-known provider stream is zeroed.
+
+Private `provider-observations.json` files below the existing project monitor
+state retain observed ambiguity, including after switching back. Preserve
+these alongside monitor snapshots. No rollout, database, credential or provider
+definition is edited. Missing metadata cannot recover old switch boundaries;
+switches that reverted before any observation may remain undetectable.
+Unreadable or incompatible present metadata stops the scan and preserves the
+last-good published generation. Existing custom-provider approval rules remain
+unchanged; this does not alias private endpoint names to OpenAI.
+
 ## 0.38.2 — 2026-09-25
 
 ### Codex terminal resume uses the selected provider

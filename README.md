@@ -315,6 +315,18 @@ device. Cage deduplicates sessions before partitioning them, then replaces each
 provider device summary. It never uploads both the old unsplit aggregate and
 its provider partitions.
 
+Codex can retain the original provider in a rollout header after resuming with
+another provider. The monitor compares that label with scoped thread metadata
+from `state_5.sqlite` before and after collection. A detected mismatch makes the
+whole unsplittable session `Unattributed` in every period, not entirely charged
+to either the old or the current provider. Private, source-bound observations
+retain that ambiguity after switching back. Token totals are unchanged; no
+provider-specific price is guessed. Missing historical metadata and switches
+that occurred and reverted between observations cannot be reconstructed.
+After upgrading, relaunch existing monitored Cage processes (their background
+scanners retain the old code), then run `cage monitor sync` to force correction
+of existing snapshots.
+
 Built-in provider labels are readable by default. An arbitrary account or
 endpoint label remains `Unattributed` unless you explicitly approve that exact
 label in Cage's private monitor state. Approval changes no hub data; the

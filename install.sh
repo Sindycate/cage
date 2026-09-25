@@ -284,7 +284,7 @@ for required in \
     monitoring/connection.py monitoring/constants.py monitoring/errors.py monitoring/host_sources.py monitoring/hub.py \
     monitoring/identity.py monitoring/lifecycle.py monitoring/locks.py monitoring/migrations.py monitoring/models.py \
     monitoring/pricing.py monitoring/providers.py monitoring/publication.py monitoring/registry.py monitoring/scheduler.py \
-    monitoring/service.py monitoring/snapshots.py monitoring/split_state.py monitoring/state.py monitoring/validation.py monitoring/volumes.py \
+    monitoring/service.py monitoring/snapshots.py monitoring/split_state.py monitoring/state.py monitoring/thread_providers.py monitoring/validation.py monitoring/volumes.py \
     state/__init__.py state/oauth.py state/opencode.py state/sessions.py \
     targets/__init__.py targets/container.py targets/desktop.py targets/host.py; do
     [ -f "$STAGE_DIR/cage_core/$required" ] && [ ! -L "$STAGE_DIR/cage_core/$required" ] || \

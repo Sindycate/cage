@@ -3,6 +3,30 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — Mixed-provider monitor attribution prepared for v0.38.3
+
+Codex updates its thread database provider after resume but can retain the old
+rollout header. Token Monitor previously assigned all continued usage to that
+header. The collector now reads exact read-only `state_5.sqlite`/WAL/SHM mounts
+with bounded, query-only SQLite access before and after scanning. Only rollout
+basenames and provider labels cross into private evidence; no source-root
+mount, auth access, database write or history rewrite is added.
+
+A fingerprint-bound private ledger retains observed conflicts. Unsplittable
+mixed sessions become Unattributed across periods and deduplicated copies,
+including after switching back. Token/component totals remain unchanged and
+provider-specific costs are not guessed. Missing/unobserved historical switch
+boundaries remain a documented limitation. Invalid present evidence fails
+closed and retains the last-good publication.
+
+Focused monitor regressions cover read-only WAL queries, unsafe/corrupt/schema
+inputs, persistence, cross-period replica conflicts, source identity, exact
+mounts and privacy. Real pinned-collector fixtures exercise unchanged-provider,
+switch and switch-back scans without mutating source files. A read-only
+existing-source scan in disposable private monitor state also demonstrated
+the correction without a hub upload. Canonical publication owns full-suite
+and public verification.
+
 ## 2026-09-25 — Selected Codex resume provider prepared for v0.38.2
 
 Terminal container and host launches promote the provider explicitly selected

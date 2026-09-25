@@ -40,8 +40,8 @@ ID or display label.
 ## Attribution rules
 
 1. Scan and deduplicate session copies before partitioning them.
-2. Use the provider information recorded in each session as the historical
-   accounting source of truth.
+2. Use recorded session providers, checked against observed Codex thread
+   metadata; a saved rollout header alone can be stale after resume.
 3. Put a session with no provider in `unattributed`.
 4. Put a session with more than one provider in `unattributed`; never split its
    counters by guesswork and never count it twice.
@@ -51,6 +51,17 @@ ID or display label.
    unsplit aggregate at the same time as its partitions. If a provider leaves
    the retained history, upload a zero summary so the hub does not keep stale
    totals.
+
+Since 0.38.3, collection reads exact read-only `state_5.sqlite` and existing
+WAL/SHM file mounts, never the source root. Before/after observations contain
+only rollout basenames and provider labels. Conflicts with historical labels
+are retained in a private source-fingerprint-bound ledger. A mismatch assigns
+the entire unsplittable session to Unattributed across periods and duplicate
+copies, even after switching back; it does not split counters or overwrite
+history. Missing databases add no evidence, while malformed or unreadable
+metadata fails the scan. Switches that happened and reverted before observation
+and missing historical boundaries remain unknowable. No provider is inferred
+from model names, selected auth, or credentials.
 
 ## Discovery and coverage
 

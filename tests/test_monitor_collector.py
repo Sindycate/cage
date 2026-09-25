@@ -50,10 +50,14 @@ class MonitorCollectorTests(MonitorTestCase):
                         }),
                         encoding="utf-8",
                     )
+                    state_api._write_json(
+                        snapshots_api._project_state_path(root, state) / "provider-evidence.json",
+                        {"version": 1, "observations": [{}, {}]},
+                    )
                     return type("Result", (), {"returncode": 0, "stderr": ""})()
                 raise AssertionError(command)
 
-            with patch('cage_core.monitoring.collector._subpath_available', side_effect=[True, False]), patch(
+            with patch('cage_core.monitoring.collector._subpath_available', side_effect=[True, False, False]), patch(
                 'cage_core.monitoring.collector.subprocess.run', side_effect=fake_run
             ):
                 result = collector_api._run_collector("docker", "cage-token-monitor:dev", state, root, uid=os.getuid(), gid=os.getgid())
