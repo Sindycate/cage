@@ -6,6 +6,31 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.5 — 2026-09-25
+
+### Recorded provider changes restore split accounting
+
+Codex histories can contain `thread_settings_applied` snapshots with explicit
+`model_provider_id` changes even when the original rollout header never changes.
+Token Monitor now reads those records, keeps in-flight usage on its starting
+provider, and splits subsequent turns under their recorded providers. Switching
+presets/providers within a session, including switching back or retaining the
+same model, no longer automatically makes the entire session Unattributed.
+
+After upgrading, relaunch previously running monitored Cage processes and run
+`cage monitor sync`. Reconciled provider/model token components automatically
+supersede the 0.38.3/0.38.4 conflict classification, including for historical
+sessions. Source histories and total tokens are unchanged. The provider ledger
+is retained as a fallback only when recorded usage cannot be reconciled.
+Missing or unapproved provider evidence remains Unattributed; existing explicit
+custom-provider approvals and per-provider pricing rules remain in force.
+
+Private volume snapshots now use version 2 to carry provider components safely.
+New Cage reads old version-1 snapshots; older running processes reject version 2
+instead of publishing private fields they do not understand. Do not delete
+monitor state to clear a stale process's snapshot-version error: restart that
+process with the upgraded installation.
+
 ## 0.38.4 — 2026-09-25
 
 Fixes 0.38.3 full monitor reconciliation stopping on inactive, checkpointed

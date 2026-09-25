@@ -127,6 +127,15 @@ def _select_session(candidates: list[tuple[models_api.VolumeRegistration, dict[s
                 "conflicting copies of one Codex session; hub snapshot was preserved"
             )
     result = dict(winner)
+    evidence = [
+        candidate["providerTokenUsage"] for _, candidate in candidates
+        if "providerTokenUsage" in candidate
+        and _session_dominates(candidate, winner) and _session_dominates(winner, candidate)
+    ]
+    if evidence:
+        if any(item != evidence[0] for item in evidence):
+            raise errors_api.MonitorError("conflicting provider token evidence; hub snapshot was preserved")
+        result["providerTokenUsage"] = evidence[0]
     providers = {
         validation_api._provider_slug(name)
         for _, candidate in candidates
@@ -135,6 +144,10 @@ def _select_session(candidates: list[tuple[models_api.VolumeRegistration, dict[s
     if len(providers) != 1 or None in providers or constants_api.UNATTRIBUTED_PROVIDER in providers:
         result["providers"] = {
             constants_api.UNATTRIBUTED_PROVIDER: _session_number(result, "totalTokens")
+        }
+    if evidence:
+        result["providers"] = {
+            provider: part["totalTokens"] for provider, part in _provider_token_usage(result).items()
         }
     return result
 
@@ -289,6 +302,98 @@ def _price_session(
     return costs, covered, reasons
 
 
+def _provider_token_usage(session: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Accept recorded provider buckets only when every usage component reconciles."""
+    raw = session.get("providerTokenUsage")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw or len(raw) > constants_api.MAX_PROVIDER_LABELS:
+        raise errors_api.MonitorError("collector provider token evidence is invalid")
+    source_models = _session_map(session, "models")
+    source_costs = _session_map(session, "modelCosts")
+    result = {}
+    for provider, bucket in raw.items():
+        if (
+            not isinstance(provider, str) or not provider or len(provider) > 256
+            or not isinstance(bucket, dict)
+            or set(bucket) != {"messageCount", "reasoningTokens", "models"}
+            or not isinstance(bucket["models"], dict) or not bucket["models"]
+            or any(not isinstance(parts, dict) for parts in bucket["models"].values())
+        ):
+            raise errors_api.MonitorError("collector provider token bucket is invalid")
+        models = {model: _session_number(parts, "totalTokens") for model, parts in bucket["models"].items()}
+        costs = {model: source_costs[model] for model in models
+                 if model in source_costs and models[model] == source_models.get(model)}
+        part = {
+            **session, "models": models, "modelCosts": costs, "costUsd": sum(costs.values()),
+            "totalTokens": sum(models.values()), "providers": {provider: sum(models.values())},
+            "messageCount": _session_number(bucket, "messageCount"),
+            "reasoningTokens": _session_number(bucket, "reasoningTokens"),
+            "modelTokenUsage": bucket["models"],
+            **{field: sum(_session_number(m, field) for m in bucket["models"].values())
+               for field in constants_api.TOKEN_COMPONENT_FIELDS},
+        }
+        part.pop("providerTokenUsage", None)
+        if any(not part[f].is_integer() for f in ("messageCount", "reasoningTokens")):
+            raise errors_api.MonitorError("collector provider token counts are not integral")
+        _model_token_usage(part)
+        result[provider] = part
+    for fields in (
+        ("totalTokens",), ("inputTokens", "cacheWriteTokens"), ("outputTokens",),
+        ("cacheReadTokens",), ("messageCount",), ("reasoningTokens",),
+    ):
+        if sum(_session_number(p, f) for p in result.values() for f in fields) != sum(
+            _session_number(session, f) for f in fields
+        ):
+            raise errors_api.MonitorError("collector provider token components do not reconcile")
+    combined: dict[str, dict[str, float]] = {}
+    for part in result.values():
+        for model, values in _model_token_usage(part).items():
+            total = combined.setdefault(model, {field: 0 for field in constants_api.TOKEN_COMPONENT_FIELDS})
+            for field in total:
+                total[field] += values[field]
+    expected = _model_token_usage(session)
+    if set(combined) != set(expected):
+        raise errors_api.MonitorError("collector provider evidence does not cover its models")
+    for model in expected:
+        for fields in (("inputTokens", "cacheWriteTokens"), ("outputTokens",), ("cacheReadTokens",)):
+            if sum(combined[model][f] for f in fields) != sum(expected[model][f] for f in fields):
+                raise errors_api.MonitorError("collector provider model components do not reconcile")
+    return result
+
+
+def _provider_slices(
+    session: dict[str, Any], *, allowed_provider_ids: frozenset[str] | set[str],
+) -> dict[str, dict[str, Any]]:
+    slices: dict[str, dict[str, Any]] = {}
+    for part in _provider_token_usage(session).values():
+        provider = session_provider(part, allowed_provider_ids=allowed_provider_ids)
+        if provider not in slices:
+            slices[provider] = part
+            continue
+        target = slices[provider]
+        for field in constants_api.SESSION_NUMBER_FIELDS:
+            target[field] += part[field]
+        for model, value in part["models"].items():
+            target["models"][model] = target["models"].get(model, 0) + value
+        for model, value in part["modelCosts"].items():
+            target["modelCosts"][model] = target["modelCosts"].get(model, 0) + value
+        evidence = dict(target["modelTokenUsage"])
+        for model, values in part["modelTokenUsage"].items():
+            if model not in evidence:
+                evidence[model] = dict(values)
+            else:
+                left = evidence[model]
+                evidence[model] = {
+                    **{f: left[f] + values[f] for f in (*constants_api.TOKEN_COMPONENT_FIELDS, "totalTokens")},
+                    "cacheWriteVerified": left["cacheWriteVerified"] and values["cacheWriteVerified"],
+                }
+        target["modelTokenUsage"] = evidence
+    for provider, part in slices.items():
+        part["providers"] = {provider: part["totalTokens"]}
+    return slices
+
+
 def _period_from_sessions(
     inputs: AccountingInputs,
     occurrences: dict[str, list[tuple[models_api.VolumeRegistration, dict[str, Any]]]],
@@ -303,6 +408,7 @@ def _period_from_sessions(
         candidates = occurrences[key]
         duplicates += max(0, len(candidates) - 1)
         session = dict(winners[key]) if winners is not None and key in winners else _select_session(candidates)
+        session.pop("providerTokenUsage", None)
         provider = session_provider(session, allowed_provider_ids=allowed_provider_ids)
         model_costs, _, _ = _price_session(
             session, pricing, allowed_provider_ids=allowed_provider_ids
@@ -595,6 +701,14 @@ def _provider_partitions(
     for period_name, values in occurrences.items():
         for key, candidates in values.items():
             winner = _select_session(candidates)
+            slices = _provider_slices(winner, allowed_provider_ids=allowed_provider_ids)
+            if slices:
+                for provider, part in slices.items():
+                    partitions.setdefault(provider, {name: {} for name in occurrences})
+                    winners.setdefault(provider, {name: {} for name in occurrences})
+                    partitions[provider][period_name][key] = candidates
+                    winners[provider][period_name][key] = part
+                continue
             providers = providers_by_session[key]
             if len(providers) != 1 or constants_api.UNATTRIBUTED_PROVIDER in providers:
                 winner["providers"] = {

@@ -3,6 +3,35 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — Recorded provider split correction prepared for v0.38.5
+
+The earlier claim that mixed-session provider boundaries were unavailable was
+incorrect. Codex's own `thread_settings_applied` events record
+`thread_settings.model_provider_id`; the pinned tokscale 4.14.0 parser reads
+the original session header but ignores these snapshots. The previous
+whole-session Unattributed fallback discarded attribution that could be
+reconstructed. The precise historical onset of the user's earlier symptom is
+still unproven.
+
+Extend the existing bounded private accounting sidecar to track owner-scoped
+settings inherited by turns and reconcile provider/model components, message
+and reasoning counts against pinned-parser totals. Preserve fork replay gates,
+request-start period assignment and cache-write reconciliation. Deduplicate
+before provider slicing; identical copies count once even across several
+provider streams. Verified evidence supersedes the earlier conflict ledger.
+Unapproved provider labels still map to Unattributed and no model-name-based
+provider guessing or source history/database rewriting is introduced.
+
+Regression coverage includes same-model provider changes, switching back,
+in-flight requests, parent/foreign-thread snapshots, period boundaries,
+malformed or inconsistent evidence, stale ambiguity recovery, per-provider
+pricing, replica conflicts and outbound privacy. The real pinned collector
+reconstructs a synthetic switched session with archived copies. A no-upload
+collection of every registered source conserved deduplicated totals in all
+three periods and recovered the affected session's explicit provider split.
+Version-2 private snapshots fail closed in older readers; version-1 inputs
+remain compatible with the new reader.
+
 ## 2026-09-25 — Checkpointed monitor database recovery prepared for v0.38.4
 
 The v0.38.3 publisher reached public_verified, but subsequent normal full

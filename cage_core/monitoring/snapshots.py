@@ -102,7 +102,7 @@ def _load_trusted_volume_snapshot(
     }:
         raise errors_api.MonitorError("monitor volume snapshot has an invalid shape")
     if (
-        value["version"] != constants_api.VOLUME_SNAPSHOT_VERSION
+        value["version"] not in (1, constants_api.VOLUME_SNAPSHOT_VERSION)
         or value["logical_id"] != record.logical_id
         or value["device_id"] != record.device_id
         or value["volume_name"] != record.volume_name

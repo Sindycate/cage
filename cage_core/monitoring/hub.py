@@ -86,6 +86,7 @@ def _outbound_payload(config_root: Path, payload: dict[str, Any]) -> dict[str, A
             if pseudonymous_key in pseudonymous:
                 raise errors_api.MonitorError("collector session pseudonym collision")
             session.pop("modelTokenUsage", None)
+            session.pop("providerTokenUsage", None)
             session["sessionId"] = pseudonym
             pseudonymous[pseudonymous_key] = session
         period["sessions"] = pseudonymous

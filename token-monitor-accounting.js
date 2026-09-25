@@ -47,6 +47,10 @@ const day = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStar
 
 function readWrites(filename, now = new Date()) {
   const periods = { today: new Map(), month: new Map(), allTime: new Map() };
+  const providerPeriods = { today: new Map(), month: new Map(), allTime: new Map() };
+  let sessionId, configuredProvider, turnProvider, sawSettings = false;
+  const providerName = value => typeof value === 'string' && value.trim() &&
+    value.length <= 256 && !/[\x00-\x1f]/.test(value) ? value : 'unattributed';
   let model, previous, unsupported = false, sawWrites = false, tokenStart = null;
   let childId, waiting = false, replayId, inherited, inheritedReported, userFork = false;
   const startedTurns = new Set();
@@ -63,6 +67,15 @@ function readWrites(filename, now = new Date()) {
   lines(filename, line => {
     let entry; try { entry = JSON.parse(line); } catch { return; }
     const p = entry.payload || {};
+    if (entry.type === 'session_meta' && !sessionId) {
+      sessionId = p.id;
+      configuredProvider = providerName(p.model_provider);
+    }
+    if (entry.type === 'event_msg' && p.type === 'thread_settings_applied' &&
+        sessionId && (p.thread_id === sessionId || (!p.thread_id && !waiting))) {
+      configuredProvider = providerName(p.thread_settings?.model_provider_id);
+      sawSettings = true;
+    }
     // Follow the pinned Codex parser's replay gate. Exact per-model bucket
     // reconciliation below remains mandatory even after this event selection.
     if (Object.hasOwn(p.info?.last_token_usage || {}, 'cache_write_input_tokens')) sawWrites = true;
@@ -92,6 +105,10 @@ function readWrites(filename, now = new Date()) {
     if (entry.type === 'turn_context') {
       model = p.model_info?.slug || p.model || p.model_name;
       tokenStart = timestampMs(entry.timestamp);
+      turnProvider = Object.hasOwn(p, 'model_provider') ? providerName(p.model_provider) : configuredProvider;
+    }
+    if (entry.type === 'event_msg' && ['task_complete', 'turn_complete', 'turn_aborted'].includes(p.type)) {
+      turnProvider = undefined;
     }
     if (entry.type === 'event_msg' && p.type === 'user_message' && typeof p.message === 'string' &&
         !injectedPrefixes.some(prefix => p.message.trimStart().startsWith(prefix))) {
@@ -145,9 +162,49 @@ function readWrites(filename, now = new Date()) {
       row.cacheWriteTokens += writes;
       row.cacheWriteVerified &&= Boolean(known);
       rows.set(model, row);
+      const provider = turnProvider || configuredProvider || 'unattributed';
+      const buckets = providerPeriods[period];
+      const bucket = buckets.get(provider) || { models: new Map(), messageCount: 0, reasoningTokens: 0 };
+      const parts = bucket.models.get(model) || { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWriteVerified: true };
+      parts.inputTokens += input;
+      parts.outputTokens += increment[1];
+      parts.cacheReadTokens += cached;
+      parts.cacheWriteTokens += writes;
+      parts.cacheWriteVerified &&= Boolean(known);
+      bucket.models.set(model, parts);
+      bucket.messageCount++;
+      bucket.reasoningTokens += increment[3];
+      buckets.set(provider, bucket);
     }
   });
-  return { periods, unsupported, sawWrites };
+  return { periods, providerPeriods, sawSettings, unsupported, sawWrites };
+}
+
+function providerEvidence(models, sources, session) {
+  const matches = [];
+  for (const source of sources) {
+    if (source.unsupported || !source.sawSettings) continue;
+    for (const [period, rows] of Object.entries(source.periods)) {
+      if (rows.size !== Object.keys(models).length || !Object.entries(models).every(([model, m]) => {
+        const r = rows.get(model);
+        return r && r.inputTokens === m.inputTokens + m.cacheWriteTokens &&
+          r.outputTokens === m.outputTokens && r.cacheReadTokens === m.cacheReadTokens;
+      })) continue;
+      const buckets = [...source.providerPeriods[period]].sort(([a], [b]) => a.localeCompare(b));
+      if (sum(buckets.map(([, b]) => b.messageCount)) !== session.messageCount ||
+          sum(buckets.map(([, b]) => b.reasoningTokens)) !== session.reasoningTokens) continue;
+      matches.push(Object.fromEntries(buckets.map(([provider, bucket]) => [provider, {
+        messageCount: bucket.messageCount, reasoningTokens: bucket.reasoningTokens,
+        models: Object.fromEntries([...bucket.models].sort(([a], [b]) => a.localeCompare(b)).map(([model, parts]) => {
+          const writes = parts.cacheWriteVerified ? parts.cacheWriteTokens : 0;
+          return [model, { ...parts, totalTokens: parts.inputTokens + parts.outputTokens + parts.cacheReadTokens,
+            inputTokens: parts.inputTokens - writes, cacheWriteTokens: writes }];
+        }))
+      }])));
+    }
+  }
+  const distinct = new Map(matches.map(m => [JSON.stringify(m), m]));
+  return distinct.size === 1 ? distinct.values().next().value : undefined;
 }
 
 function sourceIndex(home) {
@@ -236,9 +293,10 @@ function install() {
           if (!cache.has(filename)) cache.set(filename, readWrites(filename));
           return cache.get(filename);
         });
+        const parts = addWrites(models, evidence);
         sessions[key] = { ...Object.fromEntries(FIELDS.map(k => [k, session[k]])),
           models: session.models, providers: session.providers,
-          modelTokenUsage: addWrites(models, evidence) };
+          modelTokenUsage: parts, providerTokenUsage: providerEvidence(parts, evidence, session) };
       }
       observations.push(sessions);
       if (observations.length > 16) throw new Error('too many accounting observations');
@@ -252,5 +310,5 @@ function install() {
   }
 }
 
-module.exports = { componentsFor, readWrites, addWrites, install };
+module.exports = { componentsFor, readWrites, addWrites, providerEvidence, install };
 if (process.env.CAGE_MONITOR_ACCOUNTING_PRELOAD === '1') install();

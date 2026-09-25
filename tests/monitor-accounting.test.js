@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { readWrites, addWrites } = require('../token-monitor-accounting');
+const { readWrites, addWrites, providerEvidence } = require('../token-monitor-accounting');
 process.env.TZ = 'UTC';
 const now = new Date('2026-09-15T12:00:00Z');
 function context(model, timestamp) { return { type: 'turn_context', timestamp, payload: { model } }; }
@@ -84,4 +84,77 @@ test('human input resets the request clock; injected context does not', () => {
     ]);
     assert.equal(source.periods.today.get('model-a')?.cacheWriteTokens || 0, expected, message);
   }
+});
+
+const meta = (id = 'session', provider = 'zllm', extra = {}) =>
+  ({ type: 'session_meta', payload: { id, model_provider: provider, ...extra } });
+const settings = (provider, owner = 'session') => ({
+  type: 'event_msg', payload: { type: 'thread_settings_applied', thread_id: owner,
+    thread_settings: { model_provider_id: provider } }
+});
+function split(source, period = 'allTime') {
+  const models = Object.fromEntries([...source.periods[period]].map(([model, row]) => [model, {
+    totalTokens: row.inputTokens + row.outputTokens + row.cacheReadTokens,
+    inputTokens: row.inputTokens, outputTokens: row.outputTokens, cacheReadTokens: row.cacheReadTokens, cacheWriteTokens: 0
+  }]));
+  const buckets = [...source.providerPeriods[period].values()];
+  const session = { messageCount: buckets.reduce((s, b) => s + b.messageCount, 0),
+    reasoningTokens: buckets.reduce((s, b) => s + b.reasoningTokens, 0) };
+  addWrites(models, [source]);
+  return providerEvidence(models, [source], session);
+}
+test('same-model provider changes and switch-back split recorded usage, not session totals', () => {
+  const source = read([
+    meta(), context('same-model'), event([100, 10, 40, 50], [100, 10, 40, 50]),
+    settings('openai'), context('same-model'), event([300, 30, 140, 130], [200, 20, 100, 80]),
+    settings('zllm'), context('same-model'), event([350, 35, 140, 170], [50, 5, 0, 40]),
+  ]);
+  const result = split(source);
+  assert.equal(result.zllm.models['same-model'].totalTokens, 165);
+  assert.equal(result.openai.models['same-model'].totalTokens, 220);
+  assert.equal(result.zllm.models['same-model'].cacheWriteTokens, 90);
+  assert.equal(result.openai.models['same-model'].cacheWriteTokens, 80);
+  assert.equal(result.zllm.messageCount, 2);
+});
+test('setting changes affect future turns, not an already-started request', () => {
+  const source = read([
+    meta(), context('same-model'), settings('openai'),
+    event([100, 10, 0, 90], [100, 10, 0, 90]),
+    context('same-model'), event([200, 20, 0, 180], [100, 10, 0, 90]),
+  ]);
+  assert.equal(split(source).zllm.models['same-model'].totalTokens, 110);
+  assert.equal(split(source).openai.models['same-model'].totalTokens, 110);
+});
+test('copied parent settings and foreign-thread events do not relabel child usage', () => {
+  const source = read([
+    meta('child', 'zllm', { forked_from_id: 'parent' }),
+    settings('zllm', 'child'), meta('parent', 'openai'), settings('openai', 'parent'),
+    event([100, 10, 0, 90], [100, 10, 0, 90]),
+    context('same-model'), event([300, 30, 0, 270], [200, 20, 0, 180]),
+    settings('openai', 'parent'),
+    context('same-model'), event([400, 40, 0, 360], [100, 10, 0, 90]),
+  ]);
+  assert.deepEqual(Object.keys(split(source)), ['zllm']);
+  assert.equal(split(source).zllm.models['same-model'].totalTokens, 330);
+});
+test('missing settings use legacy fallback and malformed provider affects only its interval', () => {
+  assert.equal(split(read([meta(), context('model'), event([100, 10, 0, 0], [100, 10, 0, 0])])), undefined);
+  const result = split(read([
+    meta(), settings(null), context('model'), event([100, 10, 0, 0], [100, 10, 0, 0]),
+    settings('openai'), context('model'), event([200, 20, 0, 0], [100, 10, 0, 0]),
+  ]));
+  assert.equal(result.unattributed.models.model.totalTokens, 110);
+  assert.equal(result.openai.models.model.totalTokens, 110);
+});
+test('provider attribution respects period boundaries and rejects inconsistent parser totals', () => {
+  const source = read([
+    meta(), settings('zllm'), context('model', '2026-08-31T23:59:00Z'),
+    event([100, 10, 0, 0], [100, 10, 0, 0], '2026-09-01T00:01:00Z'),
+    settings('openai'), context('model', '2026-09-15T10:00:00Z'),
+    event([200, 20, 0, 0], [100, 10, 0, 0]),
+  ]);
+  assert.deepEqual(Object.keys(split(source, 'month')), ['openai']);
+  assert.deepEqual(Object.keys(split(source, 'allTime')), ['openai', 'zllm']);
+  assert.equal(providerEvidence({ model: { inputTokens: 999, cacheWriteTokens: 0, outputTokens: 20, cacheReadTokens: 0 } },
+    [source], { messageCount: 2, reasoningTokens: 0 }), undefined);
 });

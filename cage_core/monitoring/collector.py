@@ -311,6 +311,8 @@ def _apply_provider_evidence(
     for period_name in ("today", "month", "allTime"):
         for session in payload[period_name].get("sessions", {}).values():
             names = observed[session["sessionId"]]
+            if accounting_api._provider_token_usage(session):
+                continue
             if len(names) != 1 or constants_api.UNATTRIBUTED_PROVIDER in names:
                 session["providers"] = {
                     constants_api.UNATTRIBUTED_PROVIDER: accounting_api._session_number(session, "totalTokens")
@@ -408,9 +410,16 @@ def _restore_model_token_usage(state_path: Path, payload: dict[str, Any]) -> Non
                     if not isinstance(evidence, dict):
                         raise errors_api.MonitorError("collector model token evidence is missing")
                     accounting_api._model_token_usage({**session, "modelTokenUsage": evidence})
-                    matches.append(evidence)
+                    provider_evidence = candidate.get("providerTokenUsage")
+                    if provider_evidence is not None:
+                        accounting_api._provider_token_usage({
+                            **session, "modelTokenUsage": evidence, "providerTokenUsage": provider_evidence,
+                        })
+                    matches.append((evidence, provider_evidence))
             if matches and all(m == matches[0] for m in matches):
-                session["modelTokenUsage"] = matches[0]
+                session["modelTokenUsage"] = matches[0][0]
+                if matches[0][1] is not None:
+                    session["providerTokenUsage"] = matches[0][1]
 
 
 def _run_collector(

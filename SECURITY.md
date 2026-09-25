@@ -312,12 +312,18 @@ or tracked source. A separate verified `cage monitor provider migrate LABEL
 existing named hub device rather than silently reclassifying its history.
 
 Observed provider conflicts are stored in a private, fingerprint-bound ledger.
-Mixed sessions remain Unattributed even if the current provider later returns
-to the original label; source rollouts and databases are never rewritten.
+Recorded `thread_settings_applied` snapshots can establish per-provider usage
+without relying on the original header. Snapshots with another thread owner
+and replayed parent usage are excluded. Private provider/model evidence must
+reconcile with the collector's exact counters before splitting deduplicated
+sessions. It is stripped before upload, and unapproved provider labels still
+map to Unattributed. Verified splits supersede earlier conflict classifications;
+otherwise mixed sessions remain Unattributed even if the current provider
+returns to the original label. Source rollouts and databases are never rewritten.
 Missing databases contribute no new evidence. Unreadable, malformed, oversized
 or unsupported schemas fail collection rather than silently trusting an old
 provider label. The supported database filename is `state_5.sqlite`; absent
-historical evidence and unobserved switches cannot be reconstructed.
+historical evidence cannot establish a provider split.
 
 This preserves Cage's existing container threat model; it does not turn the
 host ChatGPT application itself into a containerized process. The repository,

@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.5 — 2026-09-25
+
+- reconstruct Token Monitor provider splits from Codex's recorded
+  `thread_settings_applied` events, including same-model switches and switching
+  back, rather than assigning all mixed-session usage to Unattributed;
+- verify per-provider/model token components against the pinned collector,
+  deduplicate before splitting, retain custom-provider privacy rules, and
+  automatically recover previously Unattributed sessions with complete evidence.
+
 ## 0.38.4 — 2026-09-25
 
 - allow Token Monitor to read checkpointed Codex WAL databases without retained

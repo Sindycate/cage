@@ -24,8 +24,8 @@ cage-zllm-mac-63ef6569
 cage-openai-api-mac-63ef6569
 ```
 
-An `unattributed` stream is created only when a session has no trustworthy
-provider attribution, including a session that reports more than one provider.
+An `unattributed` stream is created only for usage without trustworthy approved
+provider attribution, including mixed sessions without reconciled boundaries.
 It is not created merely because one repository contains sessions from more
 than one provider. The old unsplit
 `cage-local-<id>` device remains during migration and is removed only after the
@@ -43,8 +43,9 @@ ID or display label.
 2. Use recorded session providers, checked against observed Codex thread
    metadata; a saved rollout header alone can be stale after resume.
 3. Put a session with no provider in `unattributed`.
-4. Put a session with more than one provider in `unattributed`; never split its
-   counters by guesswork and never count it twice.
+4. Split a mixed session only using recorded provider boundaries and exactly
+   reconciled token components; otherwise retain it in `unattributed`.
+   Never split counters by guesswork or count a session twice.
 5. A repository may appear under more than one provider device. This is correct
    when its session history contains both providers.
 6. A provider device contains only its attributed sessions. Do not upload the
@@ -55,13 +56,21 @@ ID or display label.
 Since 0.38.3, collection reads exact read-only `state_5.sqlite` and existing
 WAL/SHM file mounts, never the source root. Before/after observations contain
 only rollout basenames and provider labels. Conflicts with historical labels
-are retained in a private source-fingerprint-bound ledger. A mismatch assigns
-the entire unsplittable session to Unattributed across periods and duplicate
-copies, even after switching back; it does not split counters or overwrite
-history. Missing databases add no evidence, while malformed or unreadable
-metadata fails the scan. Switches that happened and reverted before observation
-and missing historical boundaries remain unknowable. No provider is inferred
-from model names, selected auth, or credentials.
+are retained in a private source-fingerprint-bound ledger. Without reconciled
+recorded boundaries, a mismatch assigns the unsplittable session to
+Unattributed, including after switching back. Missing databases add no
+evidence, while malformed or unreadable metadata fails the scan.
+
+Since 0.38.5, owner-scoped `thread_settings_applied` snapshots establish the
+provider inherited by subsequent turns. Settings do not relabel in-flight
+requests, and parent/foreign-thread snapshots do not relabel child usage.
+Per-provider/model components, message counts and reasoning counts must
+reconcile with the pinned parser before splitting the winning session copy.
+Recorded splits supersede the conflict ledger and recover earlier
+Unattributed classifications. Provider evidence remains in private version-2
+snapshots; old version-1 snapshots can still be read, while older Cage processes
+reject the new snapshots rather than exposing unfamiliar private fields.
+No provider is inferred from model names, selected auth, or credentials.
 
 ## Discovery and coverage
 

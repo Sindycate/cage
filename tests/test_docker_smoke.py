@@ -229,6 +229,65 @@ class DockerSmokeTests(unittest.TestCase):
                 self.assertEqual(set(streams), {expected})
                 self.assertEqual(streams[expected][0]["allTime"]["totalTokens"], 110)
 
+    def test_managed_host_monitor_splits_recorded_provider_changes_and_switch_back(self):
+        image = os.environ.get("CAGE_MONITOR_SMOKE_IMAGE")
+        if not image:
+            self.skipTest("set CAGE_MONITOR_SMOKE_IMAGE to a built collector image")
+        from datetime import datetime, timedelta, timezone
+        from cage_core.monitoring import snapshots, state
+        now = datetime.now(timezone.utc)
+        old = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+
+        def settings(provider, stamp):
+            return {"type": "event_msg", "timestamp": stamp, "payload": {
+                "type": "thread_settings_applied", "thread_id": "switched",
+                "thread_settings": {"model_provider_id": provider},
+            }}
+
+        def usage(value):
+            return {"input_tokens": value * 100, "output_tokens": value * 10,
+                    "cached_input_tokens": 0, "cache_write_input_tokens": value * 90,
+                    "reasoning_output_tokens": 0, "total_tokens": value * 110}
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "config.toml").write_text("")
+            record = monitor.register_host_source(root / "state", source, copy_auth=False, allow_replacement=True)
+            home = monitor.host_source_home(root / "state", record)
+            rollout = home / "sessions" / "switched.jsonl"
+            rows = [{"type": "session_meta", "timestamp": old.isoformat(),
+                     "payload": {"id": "switched", "model_provider": "zllm"}}]
+            total = 0
+            for provider, count, stamp in (("zllm", 1, old.isoformat()), ("openai", 2, now.isoformat()), ("zllm", 3, now.isoformat())):
+                total += count
+                event = {"type": "event_msg", "timestamp": stamp, "payload": {"type": "token_count", "info": {
+                    "total_token_usage": usage(total), "last_token_usage": usage(count),
+                }}}
+                rows.extend([settings(provider, stamp),
+                             {"type": "turn_context", "timestamp": stamp, "payload": {"model": "same-model"}},
+                             event, event])
+            content = "\n".join(json.dumps(row) for row in rows) + "\n"
+            rollout.write_text(content)
+            (home / "archived_sessions" / "switched.jsonl").write_text(content)
+            state._write_json(snapshots._project_state_path(root / "state", record) / "provider-observations.json", {
+                "version": 1, "logical_id": record.logical_id, "fingerprint": record.fingerprint,
+                "sessions": {"switched": ["openai-api", "unattributed", "zllm"]},
+            })
+            payload = collector._run_collector(
+                "docker", image, record, root / "state", uid=os.getuid(), gid=os.getgid()
+            )
+            streams, status = monitor.aggregate_provider_summaries(root / "state", [(record, payload)])
+            self.assertEqual(set(streams), {"zllm", "openai-api"})
+            for period, zllm in (("today", 330), ("month", 330), ("allTime", 440)):
+                self.assertEqual(streams["zllm"][0][period]["totalTokens"], zllm)
+                self.assertEqual(streams["openai-api"][0][period]["totalTokens"], 220)
+                self.assertEqual(payload[period]["totalTokens"], zllm + 220)
+            self.assertEqual(status["total_tokens"], 660)
+            self.assertEqual(rollout.read_text(), content)
+            self.assertEqual((home / "archived_sessions" / "switched.jsonl").read_text(), content)
+
     def test_all_entrypoints_remap_linux_ids_and_write_as_mapped_owner(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             temp_path = Path(temp_dir)

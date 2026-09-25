@@ -97,7 +97,7 @@ def _aggregate_provider_summaries_for_allowed(
         )
     total_tokens = sum(item[1]["total_tokens"] for item in result.values())
     total_cost = round(sum(item[1]["cost_usd"] for item in result.values()), 9)
-    duplicate_sessions = sum(item[1]["duplicate_sessions"] for item in result.values())
+    duplicate_sessions = sum(max(0, len(candidates) - 1) for candidates in occurrences["allTime"].values())
     priced_tokens = sum(item[1]["priced_tokens"] for item in result.values())
     missing_models = sorted({model for _, status in result.values() for model in status.get("missing_models", [])})
     missing_prices = sorted({key for _, status in result.values() for key in status.get("missing_prices", [])})

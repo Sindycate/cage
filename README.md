@@ -316,13 +316,18 @@ provider device summary. It never uploads both the old unsplit aggregate and
 its provider partitions.
 
 Codex can retain the original provider in a rollout header after resuming with
-another provider. The monitor compares that label with scoped thread metadata
-from `state_5.sqlite` before and after collection. A detected mismatch makes the
-whole unsplittable session `Unattributed` in every period, not entirely charged
-to either the old or the current provider. Private, source-bound observations
-retain that ambiguity after switching back. Token totals are unchanged; no
-provider-specific price is guessed. Missing historical metadata and switches
-that occurred and reverted between observations cannot be reconstructed.
+another provider. The monitor reads recorded `thread_settings_applied`
+snapshots and attributes subsequent turns to their recorded provider, including
+same-model switches and switching back. It deduplicates sessions before
+splitting their usage across provider devices and requires exact reconciliation
+of per-model tokens, components and message counts. Previously Unattributed
+history is recovered automatically when these records establish the split.
+
+Scoped thread metadata from `state_5.sqlite` detects conflicts when recorded
+boundaries are missing. Only unreconciled or unapproved usage stays
+`Unattributed`; no provider is inferred from model names. The private conflict
+ledger does not override a verified historical split. Token totals and source
+history are unchanged, and provider-specific prices are never guessed.
 After upgrading, relaunch existing monitored Cage processes (their background
 scanners retain the old code), then run `cage monitor sync` to force correction
 of existing snapshots.
