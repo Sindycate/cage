@@ -139,6 +139,21 @@ class CodexProviderTests(unittest.TestCase):
             'codex() { python3 "$CAPTURE" "$@"; }\n'
             + tail.replace("exec gosu", "gosu")
         )
+        def launched_args(argv):
+            result = subprocess.run(
+                ["/bin/bash", "-c", script, "cage-test", *argv],
+                env={
+                    "PATH": os.environ["PATH"],
+                    "CODEX_DIR": str(self.home),
+                    "WORK_DIR": str(self.home),
+                    "TARGET_USER": "test",
+                    "CAPTURE": str(capture),
+                },
+                text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
         for argv in (
             ["resume", "session-id"],
             ["resume", "--last"],
@@ -147,22 +162,15 @@ class CodexProviderTests(unittest.TestCase):
             ["--", "prompt containing resume"],
         ):
             with self.subTest(argv=argv):
-                result = subprocess.run(
-                    ["/bin/bash", "-c", script, "cage-test", *argv],
-                    env={
-                        "PATH": os.environ["PATH"],
-                        "CODEX_DIR": str(self.home),
-                        "WORK_DIR": str(self.home),
-                        "TARGET_USER": "test",
-                        "CAPTURE": str(capture),
-                    },
-                    text=True, capture_output=True, timeout=10,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
-                    json.loads(result.stdout),
-                    ["-c", 'model_provider="current"', *argv],
+                    launched_args(argv),
+                    ["--no-daemon", "-c", 'model_provider="current"', *argv],
                 )
+
+        self.config.write_text("")
+        self.assertEqual(launched_args([]), [])
+        self.assertEqual(launched_args(["--search"]), ["--no-daemon", "--search"])
+        self.assertEqual(launched_args(["--", "literal -c"]), ["--", "literal -c"])
 
     def test_cli_error_does_not_print_config_contents(self):
         self.config.write_text('secret = "private"\nmodel_provider = []\n')

@@ -6,6 +6,21 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.6 — 2026-09-25
+
+### Codex container startup notices
+
+Codex CLI container launches with configuration overrides now request embedded
+mode explicitly. They already ran in that mode after Codex's automatic fallback;
+the startup notice is no longer expected. Other launches can still use Codex's
+shared background server when eligible.
+
+Cage removes `mcp_oauth_refresh_coordination` from the container's imported
+base Codex config because its host broker coordinates the selected OAuth MCPs.
+The source host profile and direct Codex launches are unchanged. If a named
+Codex profile separately enables this experimental feature, remove it from
+that profile to avoid the warning when Cage selects it.
+
 ## 0.38.5 — 2026-09-25
 
 ### Recorded provider changes restore split accounting

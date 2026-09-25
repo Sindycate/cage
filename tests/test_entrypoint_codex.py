@@ -97,6 +97,7 @@ class CodexEntrypointTests(unittest.TestCase):
                 "[features]\n"
                 "experimental_use_rmcp_client = true\n"
                 "rmcp_client = false\n"
+                "mcp_oauth_refresh_coordination = true\n"
                 "web_search_request = true\n",
                 encoding="utf-8",
             )
@@ -119,6 +120,7 @@ class CodexEntrypointTests(unittest.TestCase):
         self.assertNotIn("rmcp_client", generated)
         self.assertIn("web_search_request = true", generated)
         self.assertNotIn("experimental_use_rmcp_client", generated)
+        self.assertNotIn("mcp_oauth_refresh_coordination", generated)
 
     def test_unsupported_rmcp_feature_is_removed_when_mcp_is_selected(self):
         with tempfile.TemporaryDirectory() as tmp:

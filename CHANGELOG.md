@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.6 — 2026-09-25
+
+- request Codex embedded mode explicitly for container launches whose CLI
+  overrides already require it, avoiding the shared-background-server fallback
+  notice without changing the selected-only MCP policy;
+- remove the experimental MCP OAuth refresh-coordination flag from imported
+  container configuration, where Cage's shared host broker owns refreshes;
+  leave the host Codex profile unchanged.
+
 ## 0.38.5 — 2026-09-25
 
 - reconstruct Token Monitor provider splits from Codex's recorded

@@ -377,10 +377,11 @@ def write_text_atomic(destination, value):
             pass
 
 
-def remove_unsupported_rmcp_features(src):
-    # Both names have been ignored by current Codex builds. Host config imports
-    # and persistent container state can retain either, so remove them before
-    # Codex reads its config without disturbing other feature flags.
+def remove_container_mcp_features(src):
+    # The first two names have been ignored by current Codex builds. Cage's
+    # host broker owns selected MCP OAuth refreshes, so Codex's experimental
+    # refresh coordinator is unnecessary inside this container as well. Leave
+    # the source host profile and every unrelated feature setting untouched.
     feature_match = re.search(r'(?m)^[ \t]*\[features\][ \t]*(?:#.*)?\r?$', src)
     if not feature_match:
         return src
@@ -392,7 +393,7 @@ def remove_unsupported_rmcp_features(src):
     )
     section = src[section_start:section_end]
     section = re.sub(
-        r'(?m)^[ \t]*(?:experimental_use_rmcp_client|rmcp_client)'
+        r'(?m)^[ \t]*(?:experimental_use_rmcp_client|rmcp_client|mcp_oauth_refresh_coordination)'
         r'[ \t]*=[^\r\n]*(?:\r?\n|$)',
         '',
         section,
@@ -493,7 +494,7 @@ for srv in new_servers:
         sys.stderr.write('cage: Codex config already defines MCP server %r; remove it or choose a preset without that server\n' % name)
         sys.exit(1)
 
-text = remove_unsupported_rmcp_features(text)
+text = remove_container_mcp_features(text)
 if new_servers:
     if any(srv.get('auth') == 'oauth' for srv in new_servers):
         text = set_top_level_key(text, 'mcp_oauth_credentials_store', 'file')
@@ -865,8 +866,27 @@ if [ -n "$CAGE_CODEX_PROVIDER_OVERRIDE" ]; then
     CAGE_CODEX_PROFILE_ARGS+=(-c "$CAGE_CODEX_PROVIDER_OVERRIDE")
 fi
 
+# Codex 0.157+ starts a shared background server by default, but its CLI
+# overrides require embedded mode. Select that same mode explicitly when this
+# launch has overrides so Codex does not print a fallback warning.
+CAGE_CODEX_EMBEDDED_ARGS=()
+if [ ${#CAGE_MCP_DISABLE_ARGS[@]} -gt 0 ] || [ -n "$CAGE_CODEX_PROVIDER_OVERRIDE" ]; then
+    CAGE_CODEX_EMBEDDED_ARGS+=(--no-daemon)
+else
+    for _arg in "$@"; do
+        case "$_arg" in
+            --) break ;;
+            -c|--config|--enable|--disable|--search|-c?*|--config=*|--enable=*|--disable=*)
+                CAGE_CODEX_EMBEDDED_ARGS+=(--no-daemon)
+                break
+                ;;
+        esac
+    done
+fi
+
 cd "$WORK_DIR"
 exec gosu "$TARGET_USER" codex \
+    ${CAGE_CODEX_EMBEDDED_ARGS[@]+"${CAGE_CODEX_EMBEDDED_ARGS[@]}"} \
     ${CAGE_CODEX_PROFILE_ARGS[@]+"${CAGE_CODEX_PROFILE_ARGS[@]}"} \
     ${CAGE_MCP_DISABLE_ARGS[@]+"${CAGE_MCP_DISABLE_ARGS[@]}"} \
     "$@"

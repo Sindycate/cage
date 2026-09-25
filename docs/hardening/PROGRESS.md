@@ -3,6 +3,20 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — Codex container startup notices prepared for v0.38.6
+
+Codex 0.157.0 automatically tries its shared background server, but Cage's
+selected-only MCP and provider overrides require embedded mode. The container
+entrypoint now selects `--no-daemon` when those or caller configuration/search
+overrides are present. Codex's experimental MCP OAuth refresh coordinator is
+removed from the imported container config because Cage's host broker owns
+selected OAuth refreshes; the host source profile is not changed.
+
+The focused entrypoint regression preserves other feature settings while
+removing the inapplicable flag. Bash 3.2 syntax and the installed Codex 0.157.0
+`--no-daemon` flag were checked. Full release validation and public
+verification remain the publisher's gate.
+
 ## 2026-09-25 — Recorded provider split correction prepared for v0.38.5
 
 The earlier claim that mixed-session provider boundaries were unavailable was
