@@ -3,6 +3,18 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-25 — v0.38.6 CI smoke fixture corrected for v0.38.7
+
+The v0.38.6 publisher pushed exact commit `16e7750db424` and its CI run failed
+only in `test_codex_entrypoint_preserves_volume_owned_history`: the fake Codex
+expected `-c` as its first argument, but the intentional new `--no-daemon`
+argument comes first. The publisher's one failed-job rerun was denied by the
+current GitHub identity's repository permissions; no tag or release was made.
+Keep that pushed commit immutable. The real Docker fixture expectation and
+user-facing release notes now target v0.38.7. The local Docker smoke gate
+passed (`9 passed, 6 skipped`) with the corrected fixture before integration;
+canonical publication remains the completion gate.
+
 ## 2026-09-25 — Codex container startup notices prepared for v0.38.6
 
 Codex 0.157.0 automatically tries its shared background server, but Cage's

@@ -6,7 +6,7 @@ when that version is committed and tagged.
 
 ## Unreleased
 
-## 0.38.6 — 2026-09-25
+## 0.38.7 — 2026-09-25
 
 ### Codex container startup notices
 

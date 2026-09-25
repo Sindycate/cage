@@ -1031,8 +1031,9 @@ class DockerSmokeTests(unittest.TestCase):
                 fake_bin / "codex",
                 "#!/bin/sh\n"
                 "case \"$*\" in *\"mcp list --json\"*) printf '[]\\n'; exit 0;; esac\n"
-                '[ "$1" = "-c" ] && [ "$2" = \'model_provider="current"\' ] && '
-                '[ "$3" = "resume" ] && [ "$4" = "session-id" ] || exit 1\n'
+                '[ "$1" = "--no-daemon" ] && '
+                '[ "$2" = "-c" ] && [ "$3" = \'model_provider="current"\' ] && '
+                '[ "$4" = "resume" ] && [ "$5" = "session-id" ] || exit 1\n'
                 "grep -q 'host-config' \"$HOME/.codex/config.toml\" && "
                 "grep -q 'git' \"$HOME/.codex/rules/host.rules\" && "
                 "for name in history.jsonl session_index.jsonl state_5.sqlite "

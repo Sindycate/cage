@@ -5,7 +5,7 @@ details live in the linked migration guide.
 
 ## Unreleased
 
-## 0.38.6 — 2026-09-25
+## 0.38.7 — 2026-09-25
 
 - request Codex embedded mode explicitly for container launches whose CLI
   overrides already require it, avoiding the shared-background-server fallback
@@ -13,6 +13,8 @@ details live in the linked migration guide.
 - remove the experimental MCP OAuth refresh-coordination flag from imported
   container configuration, where Cage's shared host broker owns refreshes;
   leave the host Codex profile unchanged.
+- align the real Docker entrypoint smoke fixture with the explicit embedded-mode
+  argument after the first CI run for v0.38.6 failed before tagging.
 
 ## 0.38.5 — 2026-09-25
 
