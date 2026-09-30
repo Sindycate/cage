@@ -5,6 +5,16 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.8 — 2026-09-30
+
+- reconcile supplemental cache-write and provider counters with the exact
+  history prefix read by Token Monitor, so active sessions remain priceable
+  when new usage arrives between collector passes;
+- deduplicate supplemental parent/sibling replay events in the pinned parser's
+  source order before assigning cache writes and provider components;
+- refresh supplemental evidence for each pass while retaining exact component
+  checks and conservative handling of incomplete or conflicting records.
+
 ## 0.38.7 — 2026-09-25
 
 - request Codex embedded mode explicitly for container launches whose CLI

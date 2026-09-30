@@ -45,10 +45,64 @@ const regresses = (a, b) => a.some((v, i) => v < b[i]);
 const sum = values => values.reduce((a, b) => a + b, 0);
 const day = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
-function readWrites(filename, now = new Date()) {
+// Mirror pinned Tokscale 4.14's missing-header dedup key only. This value
+// never establishes Cage provider attribution or selects a price.
+function dedupProvider(model) {
+  let value = model.toLowerCase();
+  while (value.startsWith('ollama/')) value = value.slice(7);
+  const versioned = family => new RegExp(`(?:^|[^\\p{L}\\p{N}])${family}(?=$|[0-9]|[^\\p{L}\\p{N}])`, 'u').test(value);
+  const delimited = family => new RegExp(`(?:^|[^a-z0-9])${family}(?=$|[^a-z0-9])`).test(value);
+  if (['claude', 'anthropic'].some(f => value.includes(f)) ||
+      ['opus', 'sonnet', 'haiku', 'fable'].some(versioned)) return 'anthropic';
+  if (['gpt', 'openai'].some(f => value.includes(f)) || ['o1', 'o3', 'o4'].some(delimited)) return 'openai';
+  if (['gemini', 'google'].some(f => value.includes(f))) return 'google';
+  for (const [provider, families] of [
+    ['xai', ['grok']], ['deepseek', ['deepseek']], ['minimax', ['minimax']],
+    ['mistral', ['mistral', 'mixtral']],
+  ]) if (families.some(f => value.includes(f))) return provider;
+  if (value.includes('llama') || versioned('meta')) return 'meta';
+  if (value.includes('qwen')) return 'qwen';
+  if (value.includes('fugu')) return 'sakana';
+  if (versioned('kimi') || ['k2', 'k3'].some(delimited)) return 'moonshotai';
+  if (versioned('mimo')) return 'xiaomi';
+  if (versioned('glm')) return 'zai';
+  return 'openai';
+}
+
+function readWrites(filename, now = new Date(), targets = null, sharedSeen = null) {
   const periods = { today: new Map(), month: new Map(), allTime: new Map() };
   const providerPeriods = { today: new Map(), month: new Map(), allTime: new Map() };
+  // Keep only exact parser-prefix matches, never the entire growing history.
+  const matched = { today: new Map(), month: new Map(), allTime: new Map() };
+  const matchedProviders = { today: new Map(), month: new Map(), allTime: new Map() };
+  const matchState = Object.create(null), settingsAtMatch = Object.create(null), unsupportedAtMatch = Object.create(null);
+  function capture(period) {
+    const rows = periods[period];
+    if (!targets || rows.size !== Object.keys(targets).length ||
+        !Object.entries(targets).every(([name, values]) => {
+          const row = rows.get(name);
+          return row && values.cacheWriteTokens === 0 &&
+            ['inputTokens', 'outputTokens', 'cacheReadTokens'].every(k => row[k] === values[k]);
+        })) return;
+    const evidence = JSON.stringify({ rows: [...rows], providers: [...providerPeriods[period]].map(([name, bucket]) => [name, { ...bucket, models: [...bucket.models] }]),
+      sawSettings, unsupported });
+    if (Object.hasOwn(matchState, period)) {
+      if (matchState[period] !== evidence) {
+        matchState[period] = null;
+        matched[period] = new Map(); matchedProviders[period] = new Map();
+        settingsAtMatch[period] = false;
+      }
+      return;
+    }
+    matchState[period] = evidence;
+    matched[period] = new Map([...rows].map(([name, row]) => [name, { ...row }]));
+    matchedProviders[period] = new Map([...providerPeriods[period]].map(([name, bucket]) =>
+      [name, { ...bucket, models: new Map([...bucket.models].map(([model, row]) => [model, { ...row }])) }]));
+    settingsAtMatch[period] = sawSettings && !unsupported;
+    unsupportedAtMatch[period] = unsupported;
+  }
   let sessionId, configuredProvider, turnProvider, sawSettings = false;
+  let upstreamSessionId, upstreamProvider, forkParent;
   const providerName = value => typeof value === 'string' && value.trim() &&
     value.length <= 256 && !/[\x00-\x1f]/.test(value) ? value : 'unattributed';
   let model, previous, unsupported = false, sawWrites = false, tokenStart = null;
@@ -76,12 +130,18 @@ function readWrites(filename, now = new Date()) {
       configuredProvider = providerName(p.thread_settings?.model_provider_id);
       sawSettings = true;
     }
+    if (entry.type === 'session_meta' && !waiting) {
+      if (p.id) upstreamSessionId = p.id;
+      if (typeof p.model_provider === 'string') upstreamProvider = p.model_provider;
+      forkParent = p.forked_from_id || p.source?.subagent?.thread_spawn?.parent_thread_id || forkParent;
+    }
     // Follow the pinned Codex parser's replay gate. Exact per-model bucket
     // reconciliation below remains mandatory even after this event selection.
     if (Object.hasOwn(p.info?.last_token_usage || {}, 'cache_write_input_tokens')) sawWrites = true;
     if (waiting) {
       if (entry.type === 'turn_context' && ownTurn(p.turn_id)) {
         waiting = false; replayId = null; startedTurns.clear();
+        upstreamSessionId = childId;
       } else {
         if (entry.type === 'session_meta' && p.id && p.id !== childId) replayId = p.id;
         if (entry.type === 'event_msg' && p.type === 'task_started' && p.turn_id) {
@@ -145,6 +205,20 @@ function readWrites(filename, now = new Date()) {
     const identity = JSON.stringify([model, total || [entry.timestamp, ...increment]]);
     if (seen.has(identity)) return;
     seen.add(identity);
+    if (sharedSeen) {
+      // The pinned scanner deduplicates parent/sibling replays across files
+      // before filtering dates. Advance parser state above even for a copy.
+      const provider = upstreamProvider ?? dedupProvider(model);
+      const scope = forkParent || upstreamSessionId || path.basename(filename, '.jsonl');
+      const cacheRead = Math.min(increment[0], increment[2]);
+      const reasoning = Math.min(increment[1], increment[3]);
+      const key = total ? JSON.stringify([scope, provider, model, ...total]) :
+        JSON.stringify([started, provider, model, increment[0] - cacheRead,
+          increment[1] - reasoning, cacheRead, 0, reasoning]);
+      if (sharedSeen.has(key)) return;
+      if (sharedSeen.size >= 2000000) throw new Error('too many accounting token identities');
+      sharedSeen.add(key);
+    }
     const cached = Math.min(increment[0], increment[2]);
     const input = increment[0] - cached;
     const rawWrite = info.last_token_usage?.cache_write_input_tokens;
@@ -175,16 +249,24 @@ function readWrites(filename, now = new Date()) {
       bucket.messageCount++;
       bucket.reasoningTokens += increment[3];
       buckets.set(provider, bucket);
+      capture(period);
     }
   });
+  if (targets) {
+    for (const period of Object.keys(periods)) if (!periods[period].size) capture(period);
+    return { periods: matched, providerPeriods: matchedProviders, settingsAtMatch, unsupportedAtMatch,
+      sawSettings, unsupported, sawWrites };
+  }
   return { periods, providerPeriods, sawSettings, unsupported, sawWrites };
 }
 
 function providerEvidence(models, sources, session) {
+  if (!Object.keys(models).length) return undefined;
   const matches = [];
   for (const source of sources) {
-    if (source.unsupported || !source.sawSettings) continue;
+    if ((!source.unsupportedAtMatch && source.unsupported) || !source.sawSettings) continue;
     for (const [period, rows] of Object.entries(source.periods)) {
+      if (source.settingsAtMatch && !source.settingsAtMatch[period]) continue;
       if (rows.size !== Object.keys(models).length || !Object.entries(models).every(([model, m]) => {
         const r = rows.get(model);
         return r && r.inputTokens === m.inputTokens + m.cacheWriteTokens &&
@@ -251,8 +333,9 @@ function addWrites(models, sources) {
   // must never authorize a cache-write adjustment from a different window.
   const matches = [];
   for (const source of sources) {
-    if (source.unsupported) continue;
-    for (const rows of Object.values(source.periods)) {
+    if (!source.unsupportedAtMatch && source.unsupported) continue;
+    for (const [period, rows] of Object.entries(source.periods)) {
+      if (source.unsupportedAtMatch?.[period]) continue;
       if (rows.size !== Object.keys(models).length) continue;
       if (!Object.entries(models).every(([model, m]) => {
         const r = rows.get(model);
@@ -278,21 +361,32 @@ function install() {
   const upstream = require('/opt/token-monitor/src/shared/usage');
   const normalize = upstream.extractUsageFromTokscale;
   const sources = sourceIndex(process.env.CODEX_HOME || '/scan/codex');
-  const cache = new Map(), observations = [];
+  const observations = [];
   for (const name of ['extractUsageFromTokscale', 'extractUsageBundleFromTokscale']) {
     const original = upstream[name];
     upstream[name] = function(json) {
       const result = original(json), period = result.period || result;
       const components = componentsFor(json, normalize);
       const sessions = Object.create(null);
+      const now = new Date(), sharedSeen = new Set(), evidenceByFile = new Map();
+      // Match Tokscale's deterministic ordering: sessions root first, then
+      // archived_sessions; byte-lexical paths inside each root.
+      const home = process.env.CODEX_HOME || '/scan/codex';
+      const files = [...sources.values()].flat();
+      for (const root of ['sessions', 'archived_sessions']) {
+        const prefix = path.join(home, root) + path.sep;
+        for (const filename of files.filter(f => f.startsWith(prefix)).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+          const key = `codex:${path.basename(filename, '.jsonl')}`;
+          const targets = components[key] || null;
+          const evidence = readWrites(filename, now, targets, sharedSeen);
+          if (targets) evidenceByFile.set(filename, evidence);
+        }
+      }
       for (const [key, models] of Object.entries(components)) {
         const session = period.sessions?.[key];
         if (!session) continue;
         const filenames = sources.get(session.sessionId) || [];
-        const evidence = filenames.map(filename => {
-          if (!cache.has(filename)) cache.set(filename, readWrites(filename));
-          return cache.get(filename);
-        });
+        const evidence = filenames.map(filename => evidenceByFile.get(filename)).filter(Boolean);
         const parts = addWrites(models, evidence);
         sessions[key] = { ...Object.fromEntries(FIELDS.map(k => [k, session[k]])),
           models: session.models, providers: session.providers,

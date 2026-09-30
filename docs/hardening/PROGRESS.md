@@ -3,6 +3,26 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-09-30 — v0.38.8 active monitor counter reconciliation
+
+- Whole-volume usage failed cache-write reconciliation while an isolated copy
+  of the same rollout matched. The supplemental reader omitted the pinned
+  parser's cross-file parent/sibling replay deduplication. Both fresh and
+  retained parser caches reproduced the difference; applying the same replay
+  identities and source order reconciled the affected whole-volume counters.
+- Also remove filename caching between parser passes and handle appends by
+  matching the exact history prefix represented by each parser result.
+- Match supplemental cache-write and provider buckets to the exact per-model
+  input/output/cache-read prefix reported by each parser pass. Retain only
+  bounded matching buckets and reread each pass; preserve strict component,
+  provider message/reasoning and ambiguity checks. Source history stays read-only.
+- Mirror the pinned parser's cross-file replay identities and source ordering
+  before date filtering, without changing upstream token totals. Verified the
+  affected whole-volume source now reconciles cache writes exactly.
+- Validation: 29 focused Python checks, 20 Node accounting regressions, and five
+  real Docker monitor smoke checks passed. The canonical publisher owns the
+  full release checks and public verification.
+
 ## 2026-09-25 — v0.38.6 CI smoke fixture corrected for v0.38.7
 
 The v0.38.6 publisher pushed exact commit `16e7750db424` and its CI run failed

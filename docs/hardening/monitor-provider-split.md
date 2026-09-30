@@ -114,6 +114,16 @@ clock, including turn-context/human-input resets. A request whose completion
 crosses a period boundary keeps the same period assignment as its input/output
 usage. Duplicate, inherited and zero token snapshots do not advance the clock.
 
+Since 0.38.8, supplemental accounting mirrors the pinned parser's cross-file
+parent/sibling replay identities and source order before filtering periods.
+This preserves the parser's deduplicated token totals when joining cache writes.
+The parser's model-family fallback is used only to match replay identities;
+Cage provider attribution and pricing still require recorded approved providers.
+Supplemental evidence is refreshed for each parser pass and
+matched to its exact per-model history prefix. Appends during an active scan
+do not mix newer cache/provider counters with older usage. Only matching
+buckets are retained; incomplete and conflicting evidence remains unverified.
+
 Provider-qualified rates apply independently to each model. Missing rates leave
 only the affected components unpriced. Legacy mixed sessions without source
 components remain unpriced. `--cache-write` supplies an explicit write rate;

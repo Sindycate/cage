@@ -6,6 +6,15 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.8 — 2026-09-30
+
+### Active Token Monitor sessions
+
+Update Cage normally. The next successful scan recalculates retained active
+sessions using counters from the same history prefix. No history migration or
+pricing changes are required. `cage monitor sync` forces immediate reconciliation.
+Incomplete or conflicting cache-write evidence still remains explicitly unpriced.
+
 ## 0.38.7 — 2026-09-25
 
 ### Codex container startup notices
