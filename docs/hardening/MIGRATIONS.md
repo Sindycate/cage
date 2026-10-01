@@ -6,6 +6,27 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.9 — 2026-10-01
+
+### CLI launch and final monitor scan
+
+Update Cage normally. Ordinary launches check Docker capacity using an
+available local image without downloading a probe image. Full image provenance
+and cleanup inventory still run for `cage storage` commands and interactive
+low-space recovery. The configured warning, critical and build-space floors
+remain in force; an unavailable capacity measurement still warns as before.
+
+Token Monitor still reads fresh usage before a monitored process exits. If the
+complete hub payload has not changed, it retains the last successful upload
+instead of sending the same generation again. Changed usage, provider streams,
+reporting windows, hub-visible display metadata or connection still require
+publication; scheduled full reconciliation and `cage monitor sync` retain
+forced publication.
+The first successful publication after upgrading establishes a private
+connection-bound comparison baseline. Interrupted uploads still require repair.
+No configuration or history migration is required. Already-running processes
+keep their loaded code; the improvement applies to newly launched processes.
+
 ## 0.38.8 — 2026-09-30
 
 ### Active Token Monitor sessions

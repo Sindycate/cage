@@ -592,7 +592,8 @@ def scan_registration(
     A final lifecycle refresh is deliberately current-volume-only: it may
     publish already-trusted peer snapshots and reread a stale reporting-period
     peer, but it never starts the bounded host-wide safety reconciliation or
-    collects a peer with no snapshot.
+    collects a peer with no snapshot. It always freshly collects the current
+    source, while publication can reuse an equivalent last-good generation.
     """
 
     connection = connection_api.load_connection(config_root)
@@ -621,7 +622,7 @@ def scan_registration(
             uid=uid,
             gid=gid,
             interval_seconds=connection.interval_seconds,
-            force=force,
+            force=force or final,
         )
     except Exception as exc:
         safe_error = registry_api._scan_error_for_records(config_root, [current], str(exc))
@@ -721,7 +722,8 @@ def scan_registration(
                         reference_payload=current_payload,
                     )
                 should_publish = bool(
-                    force
+                    final
+                    or force
                     or full_due
                     or content_changed
                     or metadata_changed
@@ -747,6 +749,7 @@ def scan_registration(
                     split_payloads,
                     status,
                     previous_status,
+                    skip_unchanged=final,
                 )
                 split_state_api._mark_split_complete(config_root, status)
                 updated_all = _mark_scan_success(config_root, active, state_api._now())

@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.9 — 2026-10-01
+
+- check Docker free space without enumerating every image at ordinary launch;
+  retain the full image inventory for storage commands and interactive
+  low-space recovery, and prevent capacity probes from pulling images;
+- collect fresh Token Monitor usage on exit while avoiding another upload of
+  an unchanged complete provider generation; retain scheduled reconciliation,
+  manual forced sync, connection changes and interrupted-upload recovery.
+
 ## 0.38.8 — 2026-09-30
 
 - reconcile supplemental cache-write and provider counters with the exact

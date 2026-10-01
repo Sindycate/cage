@@ -1,5 +1,6 @@
 import io
 import json
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
@@ -16,6 +17,144 @@ from monitor_test_support import FINGERPRINT, MonitorTestCase
 
 
 class MonitorPublicationTests(MonitorTestCase):
+    def _published_fixture(self, root):
+        connection = monitor.MonitorConnection("https://hub.example", "secret")
+        record = self._registered_monitor_projects(root, "current")[0]
+        summary = self._period_summary(record, "current", 5, "2026-09-03")
+        payloads, status = monitor.aggregate_provider_summaries(root, [(record, summary)])
+        status["split_complete"] = True
+        with patch.object(hub_api, "upload_summary"):
+            published = publication_api._publish_provider_payloads(
+                root, connection, payloads, status, None,
+            )
+        return connection, payloads, published
+
+    def test_equivalent_outward_generation_refreshes_local_status_without_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, payloads, previous = self._published_fixture(root)
+            candidate = deepcopy(payloads)
+            payload = candidate["openai-api"][0]
+            payload["updatedAt"] = "2026-09-03T00:01:00Z"
+            payload["limits"]["updatedAt"] = "2026-09-03T00:01:00Z"
+            payload["today"]["sessions"]["codex:current"]["providerTokenUsage"] = {"private": {}}
+            status = deepcopy(previous)
+            status["updated_at"] = "2026-09-03T00:01:00Z"
+            status["project_count"] += 1
+            with patch.object(hub_api, "upload_summary") as upload:
+                refreshed = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous, skip_unchanged=True,
+                )
+
+            upload.assert_not_called()
+            self.assertEqual(refreshed["generation"], previous["generation"])
+            self.assertEqual(refreshed["last_good_generation"], previous["last_good_generation"])
+            self.assertEqual(refreshed["updated_at"], status["updated_at"])
+            self.assertEqual(refreshed["project_count"], status["project_count"])
+            self.assertEqual(monitor.load_aggregate_status(root), refreshed)
+            self.assertEqual(publication_api._load_generation_payloads(root, refreshed["generation"])["openai-api"], payloads["openai-api"][0])
+
+    def test_equivalence_retains_usage_timestamps_metadata_and_reporting_windows(self):
+        for change in ("session-time", "message-count", "agent-version", "hostname", "period-window"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                connection, payloads, previous = self._published_fixture(root)
+                candidate = deepcopy(payloads)
+                payload = candidate["openai-api"][0]
+                if change == "session-time":
+                    payload["today"]["sessions"]["codex:current"]["lastUsedAt"] = "2026-09-03T00:02:00Z"
+                elif change == "message-count":
+                    payload["today"]["sessions"]["codex:current"]["messageCount"] += 1
+                elif change == "agent-version":
+                    payload["agentVersion"] = "test-new-version"
+                elif change == "hostname":
+                    payload["hostname"] = "Cage (updated label)"
+                else:
+                    payload["periodWindows"] = self._period_windows("2026-09-04")
+                with patch.object(hub_api, "upload_summary") as upload:
+                    refreshed = publication_api._publish_provider_payloads(
+                        root, connection, candidate, deepcopy(previous), previous,
+                        skip_unchanged=True,
+                    )
+                upload.assert_called_once()
+                self.assertNotEqual(refreshed["generation"], previous["generation"])
+
+    def test_connection_and_incomplete_baselines_require_publication(self):
+        for change in ("legacy-context", "hub", "credential", "failed-status", "missing-last-good"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                connection, payloads, previous = self._published_fixture(root)
+                old_context = previous["publication_context"]
+                if change == "legacy-context":
+                    previous.pop("publication_context")
+                elif change == "hub":
+                    connection = monitor.MonitorConnection("https://other-hub.example", "secret")
+                elif change == "credential":
+                    connection = monitor.MonitorConnection("https://hub.example", "different-secret")
+                elif change == "failed-status":
+                    previous["upload_state"] = "failed"
+                else:
+                    previous.pop("last_good_generation")
+                with patch.object(hub_api, "upload_summary") as upload:
+                    refreshed = publication_api._publish_provider_payloads(
+                        root, connection, payloads, deepcopy(previous), previous,
+                        skip_unchanged=True,
+                    )
+                upload.assert_called_once()
+                self.assertNotEqual(refreshed["generation"], previous["generation"])
+                if change in ("hub", "credential"):
+                    self.assertNotEqual(refreshed["publication_context"], old_context)
+                encoded = json.dumps(refreshed, sort_keys=True)
+                self.assertNotIn(connection.hub_url, encoded)
+                self.assertNotIn(connection.secret, encoded)
+
+    def test_comparison_uses_last_good_generation_instead_of_current_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, payloads, previous = self._published_fixture(root)
+            candidate = deepcopy(payloads)
+            candidate["openai-api"][0]["hostname"] = "Cage (changed metadata)"
+            different_generation = publication_api._write_generation_payloads(root, candidate)
+            previous["generation"] = different_generation
+            with patch.object(hub_api, "upload_summary") as upload:
+                refreshed = publication_api._publish_provider_payloads(
+                    root, connection, candidate, deepcopy(previous), previous,
+                    skip_unchanged=True,
+                )
+            upload.assert_called_once()
+            self.assertNotEqual(refreshed["generation"], different_generation)
+
+    def test_equivalent_pending_generation_repairs_then_publishes_complete_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, payloads, previous = self._published_fixture(root)
+            pending_generation = publication_api._write_generation_payloads(root, payloads)
+            monitor.save_upload_state(root, publication_api._upload_state_for_generation(
+                generation=pending_generation,
+                previous_generation=previous["generation"],
+                provider_ids={"openai-api": monitor.provider_device_id(root, "openai-api")},
+                attempted=["openai-api"], state="repair_pending",
+            ))
+            with patch.object(hub_api, "upload_summary") as upload:
+                refreshed = publication_api._publish_provider_payloads(
+                    root, connection, payloads, deepcopy(previous), previous,
+                    skip_unchanged=True,
+                )
+            self.assertEqual(upload.call_count, 2)
+            self.assertNotEqual(refreshed["generation"], previous["generation"])
+            self.assertIsNone(monitor.load_upload_state(root))
+
+    def test_default_publication_republishes_even_an_equivalent_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, payloads, previous = self._published_fixture(root)
+            with patch.object(hub_api, "upload_summary") as upload:
+                refreshed = publication_api._publish_provider_payloads(
+                    root, connection, payloads, deepcopy(previous), previous,
+                )
+            upload.assert_called_once()
+            self.assertNotEqual(refreshed["generation"], previous["generation"])
+
     def test_previous_private_provider_stream_is_not_republished(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

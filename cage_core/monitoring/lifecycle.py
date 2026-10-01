@@ -58,6 +58,7 @@ class ActiveMonitor:
             # The lifecycle callback uses scan_registration(final=True): it
             # refreshes only this launch's exact volume, can merge cached peer
             # snapshots, and never calls the all-volume reconciliation path.
+            # Fresh final collection does not force a redundant hub upload.
             final_scan = getattr(self, "_final_scan", self._scan)
             final_scan(True)
         except Exception as exc:

@@ -3,6 +3,34 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-10-01 — v0.38.9 CLI lifecycle latency
+
+Ordinary launch previously collected full Docker image provenance before
+checking free space. A macOS diagnosis attributed 29–32 seconds to that image
+inventory. Probe capacity first using an immutable local image ID with
+`--pull never`, no network and a read-only container. Retain exact cleanup
+inventory for explicit storage commands and interactive low-space recovery,
+including fresh capacity and deletion race checks.
+
+Final Token Monitor scans still collect fresh usage and aggregate all current
+provider streams. Compare the complete privacy-normalized outbound generation
+with the actual last-good generation, excluding only observation clocks.
+Equivalent final scans update local status without another upload. Bind the
+baseline privately to the hub/account connection; legacy or incomplete
+baselines, changed reporting windows and pending upload repair still publish.
+Manual forced sync and scheduled full reconciliation remain unchanged.
+
+A matched macOS TUI comparison used the same existing container image and
+configuration, a fresh temporary workspace/volume, then a repeat launch.
+Readiness excluding scripted dialog waits fell from 38.1/34.3 seconds to
+5.9/4.9 seconds; normal `/quit` return fell from 9.1/8.6 to 6.6/6.1 seconds.
+Final scans made zero upload calls while preserving fresh collection. The
+remaining exit wait includes synchronous collection. No existing sessions
+were stopped and no protection setting changed. Validation: 33 storage and
+35 monitor service/publication regressions passed, including a recent cached
+source that must still be freshly collected on exit. The canonical publisher
+owns the full release checks and public verification.
+
 ## 2026-09-30 — v0.38.8 active monitor counter reconciliation
 
 - Whole-volume usage failed cache-write reconciliation while an isolated copy

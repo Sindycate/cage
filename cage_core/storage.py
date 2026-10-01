@@ -36,6 +36,16 @@ KNOWN_REPOSITORIES = {
     "ghcr.io/sindycate/cage/token-monitor": "monitor",
 }
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CAPACITY_FALLBACK_IMAGES = (
+    "cage-base:latest",
+    "codex:latest",
+    "claude-code:latest",
+    "opencode:latest",
+    "cage-token-monitor:latest",
+    "token-monitor:latest",
+)
+MAX_CAPACITY_FALLBACK_PROBES = 3
 
 
 class StorageError(RuntimeError):
@@ -390,15 +400,54 @@ def probe_capacity(
     probes: list[str] = []
     if preferred_image:
         probes.append(preferred_image)
-    for image in images:
+    available_images = tuple(images)
+    for image in available_images:
         if image.managed or any(_tag_parts(tag) for tag in image.tags):
-            probes.extend(image.tags[:1] or (image.image_id,))
-    for image in dict.fromkeys(probes):
+            probes.append(image.image_id)
+    if not available_images:
+        # Launches do not need a host-wide cleanup inventory to measure free
+        # space. A missing new-version image can use an older local Cage image;
+        # the bounded fallback never discovers or downloads unrelated images.
+        probes.extend(CAPACITY_FALLBACK_IMAGES)
+
+    def probe_references() -> Iterable[str]:
+        yield from dict.fromkeys(probes)
+        if available_images:
+            return
+        # Old versioned images may survive after their latest aliases are
+        # removed. List only known Cage repositories, and inspect/probe at
+        # most three local IDs; do not build a cleanup/provenance inventory.
+        arguments = ["image", "ls", "--quiet", "--no-trunc"]
+        for repository in KNOWN_REPOSITORIES:
+            arguments.extend(("--filter", f"reference={repository}:*"))
+        listed = _run(docker, arguments)
+        if listed.returncode != 0:
+            errors.append(listed.stderr.strip())
+            return
+        local_ids = dict.fromkeys(
+            line.strip() for line in listed.stdout.splitlines()
+            if IMAGE_ID_RE.fullmatch(line.strip()) and line.strip() not in inspected_ids
+        )
+        yield from list(local_ids)[:MAX_CAPACITY_FALLBACK_PROBES]
+
+    inspected_ids: set[str] = set()
+    for reference in probe_references():
+        inspected = _run(docker, ["image", "inspect", "--format", "{{.Id}}", reference])
+        if inspected.returncode != 0:
+            errors.append(inspected.stderr.strip())
+            continue
+        image_id = inspected.stdout.strip()
+        if not IMAGE_ID_RE.fullmatch(image_id):
+            errors.append("Docker returned an invalid local probe image ID")
+            continue
+        if image_id in inspected_ids:
+            continue
+        inspected_ids.add(image_id)
         result = _run(
             docker,
             [
-                "run", "--rm", "--network", "none", "--read-only",
-                "--entrypoint", "df", image, "-Pk", "/",
+                "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
+                "--entrypoint", "df", image_id, "-Pk", "/",
             ],
         )
         if result.returncode != 0:
@@ -410,10 +459,10 @@ def probe_capacity(
                 return CapacityProbe(
                     free_bytes=int(lines[-1][3]) * 1024,
                     total_bytes=int(lines[-1][1]) * 1024,
-                    source=f"Docker overlay via {image}",
+                    source=f"Docker overlay via {image_id}",
                 )
             except ValueError:
-                errors.append(f"invalid df output from {image}")
+                errors.append(f"invalid df output from {image_id}")
     detail = next((item for item in errors if item), "no managed probe image is available")
     return CapacityProbe(None, None, "unavailable", detail)
 
@@ -571,15 +620,29 @@ def preflight(
     requires_build: bool,
     input_stream=None,
 ) -> None:
-    state = snapshot(docker, policy, preferred_image=preferred_image)
-    free = state.capacity.free_bytes
+    capacity = probe_capacity(docker, preferred_image=preferred_image)
+    threshold = policy.min_build_free_gib if requires_build else policy.warn_free_gib
+    stream = input_stream or sys.stdin
+    state: StorageSnapshot | None = None
+    if (
+        capacity.free_bytes is not None
+        and capacity.free_bytes < threshold * GIB
+        and stream.isatty()
+    ):
+        # Only interactive low-space recovery needs cleanup candidates and
+        # their full provenance checks. Reuse the snapshot's fresh capacity
+        # before deciding whether recovery is still necessary.
+        state = snapshot(docker, policy, preferred_image=preferred_image)
+        # An unavailable recheck must not erase the already-measured low floor.
+        if state.capacity.free_bytes is not None:
+            capacity = state.capacity
+    free = capacity.free_bytes
     if free is None:
         print(
-            f"WARNING: Docker free space could not be measured: {state.capacity.error}",
+            f"WARNING: Docker free space could not be measured: {capacity.error}",
             file=sys.stderr,
         )
         return
-    threshold = policy.min_build_free_gib if requires_build else policy.warn_free_gib
     critical = free < policy.critical_free_gib * GIB
     below = free < threshold * GIB
     if not below:
@@ -589,7 +652,6 @@ def preflight(
         f"WARNING: Docker has {_gib(free)} free, below the {kind} of {threshold if requires_build else (policy.critical_free_gib if critical else policy.warn_free_gib)} GiB.",
         file=sys.stderr,
     )
-    stream = input_stream or sys.stdin
     must_recover = requires_build or critical
     if not stream.isatty():
         if must_recover:
@@ -598,6 +660,7 @@ def preflight(
             )
         print("WARNING: noninteractive launch is proceeding above the critical floor.", file=sys.stderr)
         return
+    assert state is not None
     print_status(state, policy)
     choices = "[c]lean/[a]bort" if must_recover else "[c]lean/[p]roceed/[a]bort"
     print(f"Storage action {choices}: ", end="", flush=True)

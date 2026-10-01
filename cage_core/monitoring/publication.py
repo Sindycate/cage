@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 import secrets
@@ -349,6 +351,67 @@ def _prune_generations(
             )
 
 
+def _publication_context(
+    config_root: Path,
+    connection: models_api.MonitorConnection,
+) -> str:
+    """Bind the last-good baseline to its private hub/account connection."""
+
+    encoded = json.dumps(
+        [connection.hub_url, connection.secret], ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hmac.new(
+        bytes.fromhex(identity_api.host_install_id(config_root)),
+        b"publication-connection\0" + encoded,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _equivalent_provider_payloads(
+    config_root: Path,
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    previous: dict[str, dict[str, Any]],
+) -> bool:
+    """Compare the complete hub-visible generation, excluding observation clocks.
+
+    Session usage timestamps, reporting windows, pricing, labels and every
+    other outward field remain significant. Private accounting evidence is
+    normalized through the same privacy boundary used by actual uploads.
+    """
+
+    if set(payloads) != set(previous):
+        return False
+    for provider, (payload, _status) in payloads.items():
+        device_id = providers_api.provider_device_id(config_root, provider)
+        validation_api._validate_summary(payload, device_id)
+        current_outbound = hub_api._outbound_payload(config_root, payload)
+        previous_outbound = hub_api._outbound_payload(config_root, previous[provider])
+        for outward in (current_outbound, previous_outbound):
+            outward.pop("updatedAt", None)
+            outward["limits"].pop("updatedAt", None)
+        if current_outbound != previous_outbound:
+            return False
+    return True
+
+
+def _save_published_status(
+    config_root: Path,
+    status: dict[str, Any],
+    generation: str,
+    context: str,
+) -> dict[str, Any]:
+    next_status = dict(status)
+    next_status["generation"] = generation
+    next_status["last_good_generation"] = generation
+    next_status["upload_state"] = "complete"
+    next_status["publication_context"] = context
+    state_api._write_json(
+        state_api.monitor_root(config_root) / constants_api.AGGREGATE_STATUS_FILE,
+        next_status,
+    )
+    return next_status
+
+
 def _publish_provider_payloads(
     config_root: Path,
     connection: models_api.MonitorConnection,
@@ -357,6 +420,7 @@ def _publish_provider_payloads(
     previous_status: dict[str, Any] | None,
     *,
     skip_upload_for: frozenset[str] | set[str] = frozenset(),
+    skip_unchanged: bool = False,
 ) -> dict[str, Any]:
     """Publish one generation and repair any interrupted older generation.
 
@@ -369,8 +433,24 @@ def _publish_provider_payloads(
     skipped = set(skip_upload_for)
     if not skipped.issubset(payloads):
         raise errors_api.MonitorError("monitor provider upload skip set is invalid")
+    had_pending_upload = load_upload_state(config_root) is not None
     _repair_pending_upload(config_root, connection)
     previous_generation, previous = _previous_generation(config_root, previous_status)
+    context = _publication_context(config_root, connection)
+    if (
+        skip_unchanged
+        and not had_pending_upload
+        and previous_generation
+        and isinstance(previous_status, dict)
+        and previous_status.get("last_good_generation") == previous_generation
+        and previous_status.get("upload_state") == "complete"
+        and previous_status.get("publication_context") == context
+        and _equivalent_provider_payloads(config_root, payloads, previous)
+    ):
+        # A fresh collection can change local pricing coverage or scan metadata
+        # without changing anything the hub receives. Refresh that local status
+        # while retaining the actual last-good upload generation and its clocks.
+        return _save_published_status(config_root, status, previous_generation, context)
     generation = _write_generation_payloads(config_root, payloads)
     provider_ids = {
         provider: providers_api.provider_device_id(config_root, provider)
@@ -450,11 +530,7 @@ def _publish_provider_payloads(
         remove_upload_state(config_root)
         raise failure
 
-    next_status = dict(status)
-    next_status["generation"] = generation
-    next_status["last_good_generation"] = generation
-    next_status["upload_state"] = "complete"
-    state_api._write_json(state_api.monitor_root(config_root) / constants_api.AGGREGATE_STATUS_FILE, next_status)
+    next_status = _save_published_status(config_root, status, generation, context)
     remove_upload_state(config_root)
     _prune_generations(
         config_root,

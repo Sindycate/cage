@@ -1,4 +1,6 @@
 import contextlib
+from copy import deepcopy
+from dataclasses import replace
 import io
 import json
 import os
@@ -13,6 +15,8 @@ from cage_core.monitoring import (
     constants as constants_api,
     hub as hub_api,
     lifecycle as lifecycle_api,
+    providers as providers_api,
+    publication as publication_api,
     scheduler as scheduler_api,
     service as service_api,
     snapshots as snapshots_api,
@@ -23,6 +27,191 @@ from monitor_test_support import FINGERPRINT, MonitorTestCase
 
 
 class MonitorServiceTests(MonitorTestCase):
+    def _published_scan_fixture(self, root, *, provider="openai"):
+        connection = monitor.MonitorConnection("https://hub.example", "secret")
+        monitor.save_connection(root, connection)
+        records = self._registered_monitor_projects(root, "current", "peer")
+        payloads = {
+            item.logical_id: self._summary(
+                item.device_id,
+                {f"codex:{name}": self._session(
+                    name, total=5, input_tokens=5, output_tokens=0, provider=provider
+                )},
+                period_windows=self._period_windows("2026-09-03"),
+            )
+            for item, name in zip(records, ("current", "peer"))
+        }
+        with patch.object(state_api, "_now", return_value="2026-09-03T00:00:00Z"):
+            for item in records:
+                snapshots_api._save_volume_snapshot(root, item, payloads[item.logical_id])
+            split_payloads, status = monitor.aggregate_provider_summaries(
+                root, [(item, payloads[item.logical_id]) for item in records]
+            )
+            status["split_complete"] = True
+            with patch.object(hub_api, "upload_summary"):
+                published = publication_api._publish_provider_payloads(
+                    root, connection, split_payloads, status, None
+                )
+        monitor.save_split_status(root, {"complete": True, "device_ids": published["device_ids"]})
+        return records, payloads, published
+
+    def _scan_published_fixture(self, root, current, payloads, *, final=True, force=False):
+        fingerprints = {
+            item.volume_name: item.fingerprint for item in monitor.load_registry(root)
+        }
+        with patch.object(
+            volumes_api, "volume_fingerprint",
+            side_effect=lambda _docker, name: fingerprints[name],
+        ), patch.object(
+            collector_api, "ensure_collector_image", return_value="collector"
+        ), patch.object(
+            collector_api, "_run_collector",
+            side_effect=lambda _docker, _image, item, _root, **_kwargs: payloads[item.logical_id],
+        ) as collector, patch.object(
+            hub_api, "upload_summary"
+        ) as upload, patch.object(
+            state_api, "_now", return_value="2026-09-03T00:01:00Z"
+        ):
+            updated, status = monitor.scan_registration(
+                root, "docker", Path("/work/cage"), current,
+                version="0.38.9", storage_policy=object(), allow_build=False,
+                force=force, final=final,
+            )
+        return updated, status, collector, upload
+
+    def test_identical_final_freshly_collects_without_upload_and_refreshes_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            current, peer = records
+            refreshed = deepcopy(payloads)
+            refreshed[current.logical_id]["updatedAt"] = "2026-09-03T00:01:00Z"
+            refreshed[current.logical_id]["limits"]["updatedAt"] = "2026-09-03T00:01:00Z"
+            with patch.object(snapshots_api, "_snapshot_is_recent", return_value=True):
+                updated, status, collector, upload = self._scan_published_fixture(
+                    root, current, refreshed, force=False,
+                )
+
+            collector.assert_called_once()
+            self.assertEqual(collector.call_args.args[2].logical_id, current.logical_id)
+            upload.assert_not_called()
+            self.assertEqual(status["generation"], published["generation"])
+            self.assertEqual(status["last_good_generation"], published["last_good_generation"])
+            self.assertEqual(status["updated_at"], "2026-09-03T00:01:00Z")
+            self.assertEqual(monitor.load_aggregate_status(root), status)
+            self.assertEqual(updated.last_success_at, "2026-09-03T00:01:00Z")
+            self.assertEqual(monitor.load_volume_snapshot(root, current), refreshed[current.logical_id])
+            self.assertEqual(monitor.load_volume_snapshot(root, peer), payloads[peer.logical_id])
+            last_good = publication_api._load_generation_payloads(root, status["last_good_generation"])
+            self.assertEqual(last_good["openai-api"]["updatedAt"], "2026-09-03T00:00:00Z")
+
+    def test_final_refreshes_local_project_metadata_when_outward_payload_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            empty = monitor.VolumeRegistration(
+                "2" * 32, records[0].device_id, "codex-state-empty", "container",
+                "/work/empty", "Cage: empty (Container)",
+                dict(FINGERPRINT, name="codex-state-empty"),
+            )
+            monitor.save_registry(root, [*records, empty])
+            snapshots_api._save_volume_snapshot(
+                root, empty,
+                self._summary(empty.device_id, {}, period_windows=self._period_windows("2026-09-03")),
+            )
+            _updated, status, collector, upload = self._scan_published_fixture(root, records[0], payloads)
+            collector.assert_called_once()
+            upload.assert_not_called()
+            self.assertEqual(status["project_count"], 3)
+            self.assertEqual(status["providers"]["openai-api"]["project_count"], 3)
+            self.assertEqual(status["generation"], published["generation"])
+            self.assertEqual(monitor.load_aggregate_status(root), status)
+
+    def test_final_publication_observes_current_peer_registry_price_and_provider_changes(self):
+        for change in ("last-turn", "peer", "peer-label", "retired-peer", "price", "provider-policy"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                provider = "custom-provider" if change == "provider-policy" else "openai"
+                records, payloads, published = self._published_scan_fixture(root, provider=provider)
+                current, peer = records
+                refreshed = deepcopy(payloads)
+                if change in ("last-turn", "peer"):
+                    item = current if change == "last-turn" else peer
+                    name = "current" if item == current else "peer"
+                    refreshed[item.logical_id] = self._period_summary(item, name, 7, "2026-09-03")
+                    if item == peer:
+                        snapshots_api._save_volume_snapshot(root, peer, refreshed[peer.logical_id])
+                elif change in ("peer-label", "retired-peer"):
+                    peer = replace(
+                        peer,
+                        display_name="Cage: renamed peer (Container)" if change == "peer-label" else peer.display_name,
+                        status="retired" if change == "retired-peer" else peer.status,
+                    )
+                    monitor.save_registry(root, [current, peer])
+                elif change == "price":
+                    monitor.save_pricing(root, {"openai-api:gpt-test": {"input_per_million": 1}})
+                elif change == "provider-policy":
+                    monitor.approve_provider_label(root, "custom-provider")
+                    providers_api._activate_provider_label(root, "custom-provider")
+                _updated, status, collector, upload = self._scan_published_fixture(root, current, refreshed)
+
+                collector.assert_called_once()
+                self.assertGreater(upload.call_count, 0)
+                self.assertNotEqual(status["generation"], published["generation"])
+                if change in ("last-turn", "peer"):
+                    self.assertEqual(status["total_tokens"], 12)
+                elif change == "peer-label":
+                    outbound = json.dumps(upload.call_args.args[1], sort_keys=True)
+                    self.assertIn("Cage: renamed peer (Container)", outbound)
+                elif change == "retired-peer":
+                    self.assertEqual(status["total_tokens"], 5)
+                    self.assertEqual(status["project_count"], 1)
+                elif change == "price":
+                    self.assertGreater(status["cost_usd"], 0)
+                elif change == "provider-policy":
+                    self.assertEqual(status["providers"]["custom-provider"]["total_tokens"], 10)
+                    self.assertEqual(status["providers"]["unattributed"]["total_tokens"], 0)
+
+    def test_final_rollover_refreshes_only_stale_peer_and_publishes_new_period(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            current, peer = records
+            refreshed = deepcopy(payloads)
+            for payload in refreshed.values():
+                payload["periodWindows"] = self._period_windows("2026-09-04")
+            _updated, status, collector, upload = self._scan_published_fixture(root, current, refreshed)
+
+            self.assertEqual([call.args[2].logical_id for call in collector.call_args_list], [current.logical_id, peer.logical_id])
+            upload.assert_called_once()
+            self.assertNotEqual(status["generation"], published["generation"])
+            self.assertEqual(upload.call_args.args[1]["periodWindows"], self._period_windows("2026-09-04"))
+
+    def test_final_period_mismatch_preserves_last_good_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            current, _peer = records
+            refreshed = deepcopy(payloads)
+            refreshed[current.logical_id]["periodWindows"] = self._period_windows("2026-09-04")
+            with self.assertRaisesRegex(monitor.MonitorError, "period windows changed"):
+                self._scan_published_fixture(root, current, refreshed)
+            self.assertEqual(monitor.load_aggregate_status(root)["generation"], published["generation"])
+
+    def test_non_final_force_and_scheduled_full_scan_republish_identical_payloads(self):
+        for forced in (True, False):
+            with self.subTest(forced=forced), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                records, payloads, published = self._published_scan_fixture(root)
+                scheduler = scheduler_api._default_scheduler_state()
+                scheduler["next_full_reconciliation_at"] = 1.0
+                monitor.save_scheduler_state(root, scheduler)
+                _updated, status, _collector, upload = self._scan_published_fixture(
+                    root, records[0], payloads, final=False, force=forced,
+                )
+                upload.assert_called_once()
+                self.assertNotEqual(status["generation"], published["generation"])
+
     def test_pending_provider_label_blocks_normal_uploads(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
