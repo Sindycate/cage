@@ -299,6 +299,12 @@ to wall-clock time, so scan duration does not shift the next deadline. Normal
 use does not require `monitor sync`; `cage monitor sync` is the explicit forced
 full-reconciliation and repair path.
 
+Exit scans collect fresh usage and compare each complete hub-visible provider
+payload with its connection-bound last successful upload. Unchanged streams
+retain their actual published payloads; only changed streams are sent. Pending
+repair, incomplete baselines, provider-set changes and forced reconciliation
+still require complete publication.
+
 Volumes recovered by `monitor discover` or a prior migration are reused
 automatically on a normal launch when their exact Docker fingerprint is still
 unchanged and there is no ownership conflict. The safe display label is then

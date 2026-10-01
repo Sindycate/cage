@@ -130,6 +130,23 @@ def _collect_current_registration(
         return record, payload, content_changed, previous_metadata_changed
 
 
+def _check_aggregate_volume_fingerprints(
+    config_root: Path,
+    docker: str,
+    active: list[models_api.VolumeRegistration],
+) -> None:
+    """Recheck live identities after collection, without per-peer Docker starts."""
+
+    names = [record.volume_name for record in active if record.target != "host"]
+    fingerprints = volumes_api.volume_fingerprints(docker, names) if names else {}
+    for record in active:
+        if record.target == "host":
+            _checked_volume_fingerprint(config_root, docker, record)
+        elif fingerprints[record.volume_name] != record.fingerprint:
+            _mark_volume_fingerprint_conflict(config_root, record)
+            raise errors_api.MonitorError(f"monitor volume changed for {record.display_name}")
+
+
 def _summaries_from_cached_or_collected(
     config_root: Path,
     docker: str,
@@ -151,8 +168,8 @@ def _summaries_from_cached_or_collected(
     cached: dict[str, dict[str, Any]] = {}
     missing: list[models_api.VolumeRegistration] = []
     period_windows_refreshed = False
+    _check_aggregate_volume_fingerprints(config_root, docker, active)
     for record in active:
-        _checked_volume_fingerprint(config_root, docker, record)
         override = overrides.get(record.logical_id)
         if override is not None and not full:
             payload = validation_api._validate_summary(override, record.device_id)
@@ -646,6 +663,18 @@ def scan_registration(
                 active = [item for item in registrations if item.status == "active"]
                 if not active or not any(item.logical_id == refreshed.logical_id for item in active):
                     raise errors_api.MonitorError("monitor project is not active")
+                aggregate_current = next(
+                    item for item in active if item.logical_id == refreshed.logical_id
+                )
+                if (
+                    aggregate_current.target != refreshed.target
+                    or aggregate_current.volume_name != refreshed.volume_name
+                    or aggregate_current.fingerprint != refreshed.fingerprint
+                ):
+                    # The current payload belongs to the source collected above,
+                    # not a replacement explicitly adopted while it was running.
+                    # Display-only promotion can still reuse that exact payload.
+                    raise errors_api.MonitorError("monitor project identity changed during collection")
                 if split_state_api.provider_split_pending(config_root, connection):
                     raise errors_api.MonitorError(
                         "provider split migration is pending; run cage monitor migrate --yes"

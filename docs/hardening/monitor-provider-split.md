@@ -144,6 +144,15 @@ refreshes only the current volume and signals ordinary aggregation, so exit
 does not trigger an all-volume scan. `cage monitor sync` is the explicit forced
 full-reconciliation and repair command.
 
+Aggregation inspects exact Docker source identities in bounded batches, freshly
+after current-source collection. Exit scans compare complete privacy-normalized
+provider payloads with the connection-bound last-good generation, excluding
+only observation clocks. Only changed streams are uploaded; unchanged streams
+retain their actual last successful payloads in the complete generation.
+Fresh local status remains separate from those published clocks. Provider-set
+changes, incomplete baselines, pending repair, scheduled full reconciliation
+and manual forced sync still require complete publication.
+
 Token Monitor v0.49.0 exposes one-device ingest without a multi-device
 transaction. Cage writes a private prepared generation and records the exact
 provider device IDs and attempted order. A partial upload is rolled back to

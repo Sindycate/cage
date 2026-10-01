@@ -3,6 +3,36 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-10-01 — v0.38.10 final monitor latency
+
+Aggregation previously started a Docker inspection for each registered volume.
+Inspect exact requested names in bounded groups of 64, validate every returned
+identity and fail closed on missing, duplicated, unexpected or malformed
+results. Keep the current source's independent pre-collection check and obtain
+fresh aggregate identities after collection. Reject a collected current payload
+if a concurrent explicit adoption changed its source identity; allow display-only
+promotion and preserve the newly adopted registration.
+
+Eligible exit scans compare each provider's complete privacy-normalized outbound
+payload with its connection-bound last-good payload. Send only changed streams
+and carry the exact previously published payloads for automatically skipped
+streams into the full new generation. Retain fresh local observation status.
+Pending repair, incomplete baselines, changed provider sets or connections and
+normal forced/scheduled publication keep complete-generation behavior.
+
+A matched macOS TUI comparison used the same existing container images and
+configuration, a fresh temporary workspace/volume, then a repeat launch. Normal
+`/quit` return fell from 6.60/6.10 seconds to 5.58/5.07 seconds. Both final scans
+collected fresh data, made zero upload calls and exited normally. Collection
+still accounted for 3.81/3.65 seconds. Three separate read-only comparisons of
+all registered container identities returned identical results: mean sequential
+inspection was 1.61 seconds, bounded batch inspection 0.08 seconds. No existing
+sessions were stopped and no protection setting changed. Regression coverage
+includes five-stream composite baselines, attempted-only rollback and crash
+repair, full-rewrite guards, exact batch validation and source replacement.
+All 174 monitor tests passed. The canonical publisher owns the full release
+checks and public verification.
+
 ## 2026-10-01 — v0.38.9 CLI lifecycle latency
 
 Ordinary launch previously collected full Docker image provenance before

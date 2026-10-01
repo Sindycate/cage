@@ -6,6 +6,25 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.10 — 2026-10-01
+
+### Final Token Monitor publication
+
+Update Cage normally. Aggregation checks registered Docker volume identities
+in bounded batches. Collection still checks its source independently, and
+aggregation obtains fresh identities after collection; replaced sources still
+require explicit adoption.
+
+When an exit scan changes usage in only some provider streams, Cage sends
+those streams and retains the actual last successful payloads for the others.
+Local status still reflects the fresh scan. Provider-set or connection changes,
+incomplete comparison baselines, pending repair, scheduled full reconciliation
+and `cage monitor sync` retain complete publication. Reporting windows and all
+other hub-visible changes remain significant.
+
+No configuration or history migration is required. Already-running processes
+keep their loaded code; the improvement applies to newly launched processes.
+
 ## 0.38.9 — 2026-10-01
 
 ### CLI launch and final monitor scan

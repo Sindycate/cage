@@ -367,20 +367,19 @@ def _publication_context(
     ).hexdigest()
 
 
-def _equivalent_provider_payloads(
+def _unchanged_provider_payloads(
     config_root: Path,
     payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
     previous: dict[str, dict[str, Any]],
-) -> bool:
-    """Compare the complete hub-visible generation, excluding observation clocks.
+) -> set[str]:
+    """Find unchanged hub-visible streams, excluding observation clocks.
 
     Session usage timestamps, reporting windows, pricing, labels and every
     other outward field remain significant. Private accounting evidence is
     normalized through the same privacy boundary used by actual uploads.
     """
 
-    if set(payloads) != set(previous):
-        return False
+    unchanged: set[str] = set()
     for provider, (payload, _status) in payloads.items():
         device_id = providers_api.provider_device_id(config_root, provider)
         validation_api._validate_summary(payload, device_id)
@@ -389,9 +388,9 @@ def _equivalent_provider_payloads(
         for outward in (current_outbound, previous_outbound):
             outward.pop("updatedAt", None)
             outward["limits"].pop("updatedAt", None)
-        if current_outbound != previous_outbound:
-            return False
-    return True
+        if current_outbound == previous_outbound:
+            unchanged.add(provider)
+    return unchanged
 
 
 def _save_published_status(
@@ -437,6 +436,7 @@ def _publish_provider_payloads(
     _repair_pending_upload(config_root, connection)
     previous_generation, previous = _previous_generation(config_root, previous_status)
     context = _publication_context(config_root, connection)
+    automatically_skipped: set[str] = set()
     if (
         skip_unchanged
         and not had_pending_upload
@@ -445,13 +445,26 @@ def _publish_provider_payloads(
         and previous_status.get("last_good_generation") == previous_generation
         and previous_status.get("upload_state") == "complete"
         and previous_status.get("publication_context") == context
-        and _equivalent_provider_payloads(config_root, payloads, previous)
+        and set(payloads) == set(previous)
     ):
-        # A fresh collection can change local pricing coverage or scan metadata
-        # without changing anything the hub receives. Refresh that local status
-        # while retaining the actual last-good upload generation and its clocks.
-        return _save_published_status(config_root, status, previous_generation, context)
-    generation = _write_generation_payloads(config_root, payloads)
+        unchanged = _unchanged_provider_payloads(config_root, payloads, previous)
+        if unchanged == set(payloads) and not skipped:
+            # Refresh local observation metadata while retaining the actual
+            # last-good upload generation and its clocks.
+            return _save_published_status(config_root, status, previous_generation, context)
+        # Explicit skips represent streams already verified by a migration;
+        # their candidate payloads still belong in the complete new generation.
+        automatically_skipped = unchanged - skipped
+        skipped.update(automatically_skipped)
+    generation_payloads = {
+        provider: (previous[provider], provider_status)
+        if provider in automatically_skipped else (payload, provider_status)
+        for provider, (payload, provider_status) in payloads.items()
+    }
+    # Automatically skipped streams retain the exact last-good payload, not
+    # unsent observation clocks. This composite remains a truthful rollback
+    # baseline for every stream while local status reflects the fresh scan.
+    generation = _write_generation_payloads(config_root, generation_payloads)
     provider_ids = {
         provider: providers_api.provider_device_id(config_root, provider)
         for provider in sorted(payloads)

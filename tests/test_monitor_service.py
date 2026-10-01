@@ -13,6 +13,7 @@ from cage_core import cli, monitor
 from cage_core.monitoring import (
     collector as collector_api,
     constants as constants_api,
+    host_sources as host_sources_api,
     hub as hub_api,
     lifecycle as lifecycle_api,
     providers as providers_api,
@@ -27,6 +28,19 @@ from monitor_test_support import FINGERPRINT, MonitorTestCase
 
 
 class MonitorServiceTests(MonitorTestCase):
+    def setUp(self):
+        super().setUp()
+        self._real_volume_fingerprints = volumes_api.volume_fingerprints
+        # Older service fixtures model live identity through the single-volume
+        # boundary. Keep those models while new tests exercise the real batch.
+        self.enterContext(patch.object(
+            volumes_api, "volume_fingerprints",
+            side_effect=lambda docker, names: {
+                name: volumes_api.volume_fingerprint(docker, name)
+                for name in dict.fromkeys(names)
+            },
+        ))
+
     def _published_scan_fixture(self, root, *, provider="openai"):
         connection = monitor.MonitorConnection("https://hub.example", "secret")
         monitor.save_connection(root, connection)
@@ -55,8 +69,11 @@ class MonitorServiceTests(MonitorTestCase):
         monitor.save_split_status(root, {"complete": True, "device_ids": published["device_ids"]})
         return records, payloads, published
 
-    def _scan_published_fixture(self, root, current, payloads, *, final=True, force=False):
-        fingerprints = {
+    def _scan_published_fixture(
+        self, root, current, payloads, *, final=True, force=False,
+        fingerprints=None, collect=None,
+    ):
+        fingerprints = fingerprints if fingerprints is not None else {
             item.volume_name: item.fingerprint for item in monitor.load_registry(root)
         }
         with patch.object(
@@ -66,7 +83,9 @@ class MonitorServiceTests(MonitorTestCase):
             collector_api, "ensure_collector_image", return_value="collector"
         ), patch.object(
             collector_api, "_run_collector",
-            side_effect=lambda _docker, _image, item, _root, **_kwargs: payloads[item.logical_id],
+            side_effect=collect or (
+                lambda _docker, _image, item, _root, **_kwargs: payloads[item.logical_id]
+            ),
         ) as collector, patch.object(
             hub_api, "upload_summary"
         ) as upload, patch.object(
@@ -78,6 +97,175 @@ class MonitorServiceTests(MonitorTestCase):
                 force=force, final=final,
             )
         return updated, status, collector, upload
+
+    @staticmethod
+    def _inspected_fingerprints(fingerprints, names):
+        return [
+            {
+                "Name": name, "Driver": fingerprints[name]["driver"],
+                "Scope": fingerprints[name]["scope"],
+                "CreatedAt": fingerprints[name]["created_at"],
+                "Labels": {"io.cage.identity": fingerprints[name]["label_identity"]},
+            }
+            for name in reversed(names)
+        ]
+
+    def test_final_batches_all_live_peer_checks_after_fresh_collection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, _published = self._published_scan_fixture(root)
+            current, peer = records
+            for index in range(2, 17):
+                name = f"codex-state-peer-{index}"
+                record = replace(
+                    peer, logical_id=f"{index:032x}", volume_name=name,
+                    fingerprint=dict(FINGERPRINT, name=name),
+                )
+                records.append(record)
+                payload = self._summary(
+                    record.device_id, {}, period_windows=self._period_windows("2026-09-03")
+                )
+                snapshots_api._save_volume_snapshot(root, record, payload)
+            monitor.save_registry(root, records)
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+            collected = False
+
+            def collect(_docker, _image, item, _root, **_kwargs):
+                nonlocal collected
+                collected = True
+                return payloads[item.logical_id]
+
+            def inspect(_docker, arguments):
+                self.assertTrue(collected, "aggregate check reused a pre-collector observation")
+                return self._inspected_fingerprints(fingerprints, arguments[2:])
+
+            with patch.object(
+                volumes_api, "volume_fingerprints", wraps=self._real_volume_fingerprints
+            ) as batch, patch.object(volumes_api, "_docker_json", side_effect=inspect) as query:
+                _updated, _status, collector, _upload = self._scan_published_fixture(
+                    root, current, payloads, fingerprints=fingerprints, collect=collect
+                )
+            collector.assert_called_once()
+            names = [item.volume_name for item in records]
+            batch.assert_called_once_with("docker", names)
+            query.assert_called_once_with("docker", ["volume", "inspect", *names])
+
+    def test_final_batch_rejects_current_replacement_after_collector(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            current = records[0]
+            fingerprints = {item.volume_name: item.fingerprint for item in records}
+
+            def collect(_docker, _image, item, _root, **_kwargs):
+                fingerprints[item.volume_name] = dict(item.fingerprint, created_at="2026-09-04T00:00:00Z")
+                return payloads[item.logical_id]
+
+            with patch.object(
+                volumes_api, "volume_fingerprints", wraps=self._real_volume_fingerprints
+            ), patch.object(
+                volumes_api, "_docker_json",
+                side_effect=lambda _docker, arguments: self._inspected_fingerprints(fingerprints, arguments[2:]),
+            ), patch.object(publication_api, "_publish_provider_payloads") as publish:
+                with self.assertRaisesRegex(monitor.MonitorError, "volume changed"):
+                    self._scan_published_fixture(
+                        root, current, payloads, fingerprints=fingerprints, collect=collect
+                    )
+            publish.assert_not_called()
+            self.assertEqual(monitor.load_registry(root)[0].status, "needs-adoption")
+            self.assertEqual(monitor.load_aggregate_status(root), published)
+
+    def test_final_invalid_batch_retains_last_good_without_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, published = self._published_scan_fixture(root)
+            with patch.object(
+                volumes_api, "volume_fingerprints", wraps=self._real_volume_fingerprints
+            ), patch.object(volumes_api, "_docker_json", return_value=[]), patch.object(
+                publication_api, "_publish_provider_payloads"
+            ) as publish:
+                with self.assertRaisesRegex(monitor.MonitorError, "incomplete.*inventory"):
+                    self._scan_published_fixture(root, records[0], payloads)
+            publish.assert_not_called()
+            self.assertEqual(monitor.load_aggregate_status(root), published)
+            self.assertTrue(all(item.status == "active" for item in monitor.load_registry(root)))
+
+    def test_aggregate_batch_preserves_managed_host_checks_without_docker_inspect(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            records = self._registered_monitor_projects(Path(temporary), "host", "container")
+            host, container = replace(records[0], target="host"), records[1]
+            with patch.object(host_sources_api, "_ensure_managed_host_home") as home, patch.object(
+                volumes_api, "volume_fingerprints", return_value={container.volume_name: container.fingerprint}
+            ) as batch:
+                service_api._check_aggregate_volume_fingerprints(Path(temporary), "docker", [host, container])
+            home.assert_called_once_with(Path(temporary), host)
+            batch.assert_called_once_with("docker", [container.volume_name])
+            with patch.object(host_sources_api, "_ensure_managed_host_home") as home, patch.object(
+                volumes_api, "volume_fingerprints"
+            ) as batch:
+                service_api._check_aggregate_volume_fingerprints(Path(temporary), "docker", [host])
+            home.assert_called_once_with(Path(temporary), host)
+            batch.assert_not_called()
+            with patch.object(
+                host_sources_api, "_ensure_managed_host_home",
+                side_effect=monitor.MonitorError("unsafe managed host home"),
+            ):
+                with self.assertRaisesRegex(monitor.MonitorError, "unsafe managed host"):
+                    service_api._check_aggregate_volume_fingerprints(Path(temporary), "docker", [host])
+
+    def test_old_current_override_cannot_cross_explicit_source_adoption(self):
+        for changed_field in ("fingerprint", "volume_name", "target"):
+            with self.subTest(changed_field=changed_field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                records, payloads, published = self._published_scan_fixture(root)
+                current, peer = records
+                fingerprints = {item.volume_name: item.fingerprint for item in records}
+                if changed_field == "fingerprint":
+                    replacement = replace(current, fingerprint=dict(current.fingerprint, created_at="2026-09-04T00:00:00Z"))
+                elif changed_field == "volume_name":
+                    replacement = replace(current, volume_name="codex-state-replacement", fingerprint=dict(current.fingerprint, name="codex-state-replacement"))
+                else:
+                    replacement = replace(current, target="desktop")
+                replacement_payload = self._period_summary(replacement, "replacement", 25, "2026-09-03")
+
+                @contextlib.contextmanager
+                def coordinator(_root):
+                    # Adoption and its fresh cache occur after old collection,
+                    # before the aggregate rereads the authoritative registry.
+                    monitor.save_registry(root, [replacement, peer])
+                    snapshots_api._save_volume_snapshot(root, replacement, replacement_payload)
+                    fingerprints[replacement.volume_name] = replacement.fingerprint
+                    yield True
+
+                with patch.object(scheduler_api, "try_coordinator_lease", side_effect=coordinator), patch.object(
+                    publication_api, "_publish_provider_payloads"
+                ) as publish:
+                    with self.assertRaisesRegex(monitor.MonitorError, "identity changed during collection"):
+                        self._scan_published_fixture(root, current, payloads, fingerprints=fingerprints)
+                publish.assert_not_called()
+                self.assertEqual(monitor.load_registry(root)[0].status, "active")
+                self.assertEqual(monitor.load_registry(root)[0].fingerprint, replacement.fingerprint)
+                self.assertEqual(monitor.load_volume_snapshot(root, replacement), replacement_payload)
+                self.assertEqual(monitor.load_aggregate_status(root), published)
+
+    def test_current_override_allows_display_promotion_during_collection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            records, payloads, _published = self._published_scan_fixture(root)
+            current, peer = records
+            promoted = replace(current, display_name="Cage: promoted (Container)")
+
+            @contextlib.contextmanager
+            def coordinator(_root):
+                monitor.save_registry(root, [promoted, peer])
+                yield True
+
+            with patch.object(scheduler_api, "try_coordinator_lease", side_effect=coordinator):
+                updated, status, collector, upload = self._scan_published_fixture(root, current, payloads)
+            collector.assert_called_once()
+            upload.assert_called_once()
+            self.assertEqual(updated.display_name, promoted.display_name)
+            self.assertEqual(status["total_tokens"], 10)
 
     def test_identical_final_freshly_collects_without_upload_and_refreshes_status(self):
         with tempfile.TemporaryDirectory() as temporary:

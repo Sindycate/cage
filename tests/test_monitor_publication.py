@@ -17,6 +17,11 @@ from monitor_test_support import FINGERPRINT, MonitorTestCase
 
 
 class MonitorPublicationTests(MonitorTestCase):
+    @staticmethod
+    def _five_provider_totals():
+        return {"openai-api": 5, "openai-compatible": 6, "zllm": 8,
+                "unattributed": 9, "demo-provider": 10}
+
     def _published_fixture(self, root):
         connection = monitor.MonitorConnection("https://hub.example", "secret")
         record = self._registered_monitor_projects(root, "current")[0]
@@ -28,6 +33,268 @@ class MonitorPublicationTests(MonitorTestCase):
                 root, connection, payloads, status, None,
             )
         return connection, payloads, published
+
+    def _provider_payloads(self, root, totals, timestamp):
+        extra = sorted(set(totals) - constants_api.PUBLIC_PROVIDER_IDS)
+        monitor.save_provider_labels(root, {
+            "version": constants_api.PROVIDER_LABELS_VERSION,
+            "approved": extra, "active": extra,
+        })
+        record = self._registered_monitor_projects(root, "current")[0]
+        summary = self._summary(record.device_id, {
+            f"codex:session-{provider}": self._session(
+                f"session-{provider}", total=total, input_tokens=total,
+                output_tokens=0, provider=provider,
+            )
+            for provider, total in totals.items()
+        }, period_windows=self._period_windows("2026-09-03"))
+        with patch.object(state_api, "_now", return_value=timestamp):
+            payloads, status = monitor.aggregate_provider_summaries(root, [(record, summary)])
+        self.assertEqual(set(payloads), set(totals))
+        status["split_complete"] = True
+        return payloads, status
+
+    def _published_provider_fixture(self, root, totals=None):
+        connection = monitor.MonitorConnection("https://hub.example", "secret")
+        payloads, status = self._provider_payloads(
+            root, totals if totals is not None else {"openai-api": 5, "zllm": 8},
+            "2026-09-03T00:00:00Z",
+        )
+        with patch.object(hub_api, "upload_summary"):
+            published = publication_api._publish_provider_payloads(
+                root, connection, payloads, status, None,
+            )
+        return connection, payloads, published
+
+    def test_final_changed_stream_preserves_a_complete_composite_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            totals = self._five_provider_totals()
+            connection, first, previous = self._published_provider_fixture(root, totals)
+            totals["zllm"] += 1
+            candidate, status = self._provider_payloads(root, totals, "2026-09-03T00:01:00Z")
+            # Private evidence and fresh clocks alone do not require a POST.
+            candidate["openai-api"][0]["today"]["sessions"]["codex:session-openai-api"]["providerTokenUsage"] = {"private": {}}
+            untouched_candidate = deepcopy(candidate)
+            with patch.object(hub_api, "upload_summary") as upload:
+                published = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous, skip_unchanged=True,
+                )
+            upload.assert_called_once_with(connection, candidate["zllm"][0], config_root=root)
+            self.assertEqual(candidate, untouched_candidate)
+            composite = publication_api._load_generation_payloads(root, published["last_good_generation"])
+            self.assertEqual(set(composite), set(totals))
+            for provider in totals:
+                self.assertEqual(composite[provider], candidate[provider][0] if provider == "zllm" else first[provider][0])
+            self.assertEqual(published["providers"], status["providers"])
+            self.assertEqual(published["updated_at"], "2026-09-03T00:01:00Z")
+
+            # A later change must compare against the composite, not the first
+            # generation or the previous scan's unsent observation clocks.
+            totals["openai-api"] += 1
+            second, second_status = self._provider_payloads(root, totals, "2026-09-03T00:02:00Z")
+            with patch.object(hub_api, "upload_summary") as upload:
+                second_published = publication_api._publish_provider_payloads(
+                    root, connection, second, second_status, published, skip_unchanged=True,
+                )
+            upload.assert_called_once_with(connection, second["openai-api"][0], config_root=root)
+            second_composite = publication_api._load_generation_payloads(root, second_published["generation"])
+            for provider in totals:
+                self.assertEqual(second_composite[provider], second[provider][0] if provider == "openai-api" else composite[provider])
+
+            same, same_status = self._provider_payloads(root, totals, "2026-09-03T00:03:00Z")
+            with patch.object(hub_api, "upload_summary") as upload:
+                same_published = publication_api._publish_provider_payloads(
+                    root, connection, same, same_status, second_published, skip_unchanged=True,
+                )
+            upload.assert_not_called()
+            self.assertEqual(same_published["generation"], second_published["generation"])
+            self.assertEqual(same_published["updated_at"], same_status["updated_at"])
+
+    def test_final_partial_failure_rolls_back_only_the_attempted_stream(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, previous_payloads, previous = self._published_provider_fixture(root)
+            candidate, status = self._provider_payloads(root, {"openai-api": 5, "zllm": 9}, "2026-09-03T00:01:00Z")
+            with patch.object(hub_api, "upload_summary", side_effect=[monitor.MonitorError("upload failed"), None]) as upload:
+                with self.assertRaisesRegex(monitor.MonitorError, "upload failed"):
+                    publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_unchanged=True,
+                    )
+            self.assertEqual([call.args[1] for call in upload.call_args_list],
+                             [candidate["zllm"][0], previous_payloads["zllm"][0]])
+            self.assertEqual(monitor.load_aggregate_status(root), previous)
+            self.assertIsNone(monitor.load_upload_state(root))
+
+    def test_second_changed_upload_failure_preserves_unchanged_streams(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            totals = self._five_provider_totals()
+            connection, first, previous = self._published_provider_fixture(root, totals)
+            totals["openai-api"] += 1
+            totals["zllm"] += 1
+            candidate, status = self._provider_payloads(root, totals, "2026-09-03T00:01:00Z")
+            with patch.object(hub_api, "upload_summary", side_effect=[
+                None, monitor.MonitorError("second upload failed"), None, None,
+            ]) as upload, patch.object(
+                publication_api, "save_upload_state", wraps=publication_api.save_upload_state,
+            ) as journal:
+                with self.assertRaisesRegex(monitor.MonitorError, "second upload failed"):
+                    publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_unchanged=True,
+                    )
+            self.assertEqual([call.args[1] for call in upload.call_args_list], [
+                candidate["openai-api"][0], candidate["zllm"][0],
+                first["openai-api"][0], first["zllm"][0],
+            ])
+            attempted = {"openai-api", "zllm"}
+            for call in journal.call_args_list:
+                self.assertTrue(set(call.args[1]["attempted"]).issubset(attempted))
+            self.assertEqual(set(journal.call_args_list[-1].args[1]["attempted"]), attempted)
+            self.assertEqual(monitor.load_aggregate_status(root), previous)
+            self.assertIsNone(monitor.load_upload_state(root))
+
+    def test_final_commit_crash_repairs_attempted_stream_then_rewrites_all(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, previous_payloads, previous = self._published_provider_fixture(root)
+            candidate, status = self._provider_payloads(root, {"openai-api": 5, "zllm": 9}, "2026-09-03T00:01:00Z")
+            with patch.object(hub_api, "upload_summary") as upload, patch.object(
+                publication_api, "_save_published_status", side_effect=OSError("commit failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "commit failed"):
+                    publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_unchanged=True,
+                    )
+            upload.assert_called_once()
+            self.assertEqual(monitor.load_aggregate_status(root), previous)
+            pending = monitor.load_upload_state(root)
+            self.assertEqual(pending["attempted"], ["zllm"])
+            self.assertEqual(set(pending["provider_ids"]), set(candidate))
+            prepared = publication_api._load_generation_payloads(root, pending["generation"])
+            self.assertEqual(prepared["openai-api"], previous_payloads["openai-api"][0])
+            with patch.object(hub_api, "upload_summary") as upload:
+                published = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous, skip_unchanged=True,
+                )
+            self.assertEqual([call.args[1] for call in upload.call_args_list],
+                             [previous_payloads["zllm"][0], candidate["openai-api"][0], candidate["zllm"][0]])
+            self.assertIsNone(monitor.load_upload_state(root))
+            committed = publication_api._load_generation_payloads(root, published["generation"])
+            self.assertEqual(committed, {provider: payload for provider, (payload, _) in candidate.items()})
+
+    def test_explicit_verified_skip_keeps_its_candidate_in_composite_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, first, previous = self._published_provider_fixture(
+                root, {"openai-api": 5, "openai-compatible": 6, "zllm": 8},
+            )
+            candidate, status = self._provider_payloads(
+                root, {"openai-api": 6, "openai-compatible": 6, "zllm": 9}, "2026-09-03T00:01:00Z",
+            )
+            with patch.object(hub_api, "upload_summary") as upload:
+                published = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous,
+                    skip_upload_for={"zllm"}, skip_unchanged=True,
+                )
+            upload.assert_called_once_with(connection, candidate["openai-api"][0], config_root=root)
+            composite = publication_api._load_generation_payloads(root, published["generation"])
+            self.assertEqual(composite["zllm"], candidate["zllm"][0])
+            self.assertEqual(composite["openai-compatible"], first["openai-compatible"][0])
+
+    def test_explicit_verified_clocks_commit_even_when_all_usage_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, first, previous = self._published_provider_fixture(root)
+            candidate, status = self._provider_payloads(root, {"openai-api": 5, "zllm": 8}, "2026-09-03T00:01:00Z")
+            with patch.object(hub_api, "upload_summary") as upload:
+                published = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous,
+                    skip_upload_for={"zllm"}, skip_unchanged=True,
+                )
+            upload.assert_not_called()
+            self.assertNotEqual(published["generation"], previous["generation"])
+            composite = publication_api._load_generation_payloads(root, published["generation"])
+            self.assertEqual(composite["zllm"], candidate["zllm"][0])
+            self.assertEqual(composite["openai-api"], first["openai-api"][0])
+            self.assertEqual(published["providers"], status["providers"])
+            self.assertIsNone(monitor.load_upload_state(root))
+
+    def test_provider_set_changes_require_a_complete_rewrite(self):
+        for change in ("added", "removed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                totals = self._five_provider_totals()
+                connection, _, previous = self._published_provider_fixture(root, totals)
+                if change == "added":
+                    totals["second-demo-provider"] = 11
+                else:
+                    totals.pop("openai-compatible")
+                candidate, status = self._provider_payloads(root, totals, "2026-09-03T00:01:00Z")
+                with patch.object(hub_api, "upload_summary") as upload:
+                    published = publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_unchanged=True,
+                    )
+                self.assertEqual([call.args[1] for call in upload.call_args_list],
+                                 [candidate[provider][0] for provider in sorted(candidate)])
+                committed = publication_api._load_generation_payloads(root, published["generation"])
+                self.assertEqual(committed, {provider: payload for provider, (payload, _) in candidate.items()})
+
+    def test_retired_zero_stream_is_sent_once_and_then_reused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection, first, previous = self._published_provider_fixture(root)
+            candidate, status = self._provider_payloads(root, {"openai-api": 5}, "2026-09-03T00:01:00Z")
+            record = monitor.load_registry(root)[0]
+            summary = self._summary(record.device_id, {}, period_windows=self._period_windows("2026-09-03"))
+            with patch.object(state_api, "_now", return_value="2026-09-03T00:01:00Z"):
+                service_api._add_previous_provider_payloads(root, [(record, summary)], candidate, status, previous)
+            self.assertEqual(candidate["zllm"][0]["allTime"]["totalTokens"], 0)
+            with patch.object(hub_api, "upload_summary") as upload:
+                published = publication_api._publish_provider_payloads(
+                    root, connection, candidate, status, previous, skip_unchanged=True,
+                )
+            upload.assert_called_once_with(connection, candidate["zllm"][0], config_root=root)
+            composite = publication_api._load_generation_payloads(root, published["generation"])
+            self.assertEqual(composite["openai-api"], first["openai-api"][0])
+            repeated, repeated_status = self._provider_payloads(root, {"openai-api": 5}, "2026-09-03T00:02:00Z")
+            with patch.object(state_api, "_now", return_value="2026-09-03T00:02:00Z"):
+                service_api._add_previous_provider_payloads(root, [(record, summary)], repeated, repeated_status, published)
+            with patch.object(hub_api, "upload_summary") as upload:
+                republished = publication_api._publish_provider_payloads(
+                    root, connection, repeated, repeated_status, published, skip_unchanged=True,
+                )
+            upload.assert_not_called()
+            self.assertEqual(republished["generation"], published["generation"])
+
+    def test_partial_comparison_preserves_significant_fields_and_period_windows(self):
+        for change in ("session-time", "message-count", "agent-version", "hostname", "cost", "period-window"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                connection, _, previous = self._published_provider_fixture(root)
+                candidate, status = self._provider_payloads(root, {"openai-api": 5, "zllm": 8}, "2026-09-03T00:01:00Z")
+                payload = candidate["zllm"][0]
+                session = payload["today"]["sessions"]["codex:session-zllm"]
+                if change == "session-time":
+                    session["lastUsedAt"] = "2026-09-03T00:02:00Z"
+                elif change == "message-count":
+                    session["messageCount"] += 1
+                elif change == "agent-version":
+                    payload["agentVersion"] = "test-new-version"
+                elif change == "hostname":
+                    payload["hostname"] = "Cage (changed label)"
+                elif change == "cost":
+                    payload["today"]["costUsd"] = 0.25
+                else:
+                    for current, _ in candidate.values():
+                        current["periodWindows"] = self._period_windows("2026-09-04")
+                with patch.object(hub_api, "upload_summary") as upload:
+                    publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_unchanged=True,
+                    )
+                expected = sorted(candidate) if change == "period-window" else ["zllm"]
+                self.assertEqual([call.args[1] for call in upload.call_args_list],
+                                 [candidate[provider][0] for provider in expected])
 
     def test_equivalent_outward_generation_refreshes_local_status_without_upload(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -83,7 +350,10 @@ class MonitorPublicationTests(MonitorTestCase):
         for change in ("legacy-context", "hub", "credential", "failed-status", "missing-last-good"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                connection, payloads, previous = self._published_fixture(root)
+                totals = self._five_provider_totals()
+                connection, _, previous = self._published_provider_fixture(root, totals)
+                totals["zllm"] += 1
+                payloads, status = self._provider_payloads(root, totals, "2026-09-03T00:01:00Z")
                 old_context = previous["publication_context"]
                 if change == "legacy-context":
                     previous.pop("publication_context")
@@ -97,10 +367,11 @@ class MonitorPublicationTests(MonitorTestCase):
                     previous.pop("last_good_generation")
                 with patch.object(hub_api, "upload_summary") as upload:
                     refreshed = publication_api._publish_provider_payloads(
-                        root, connection, payloads, deepcopy(previous), previous,
+                        root, connection, payloads, status, previous,
                         skip_unchanged=True,
                     )
-                upload.assert_called_once()
+                self.assertEqual([call.args[1] for call in upload.call_args_list],
+                                 [payloads[provider][0] for provider in sorted(payloads)])
                 self.assertNotEqual(refreshed["generation"], previous["generation"])
                 if change in ("hub", "credential"):
                     self.assertNotEqual(refreshed["publication_context"], old_context)
@@ -127,20 +398,21 @@ class MonitorPublicationTests(MonitorTestCase):
     def test_equivalent_pending_generation_repairs_then_publishes_complete_generation(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            connection, payloads, previous = self._published_fixture(root)
+            connection, payloads, previous = self._published_provider_fixture(root, self._five_provider_totals())
             pending_generation = publication_api._write_generation_payloads(root, payloads)
             monitor.save_upload_state(root, publication_api._upload_state_for_generation(
                 generation=pending_generation,
                 previous_generation=previous["generation"],
-                provider_ids={"openai-api": monitor.provider_device_id(root, "openai-api")},
-                attempted=["openai-api"], state="repair_pending",
+                provider_ids={provider: monitor.provider_device_id(root, provider) for provider in payloads},
+                attempted=["zllm"], state="repair_pending",
             ))
             with patch.object(hub_api, "upload_summary") as upload:
                 refreshed = publication_api._publish_provider_payloads(
                     root, connection, payloads, deepcopy(previous), previous,
                     skip_unchanged=True,
                 )
-            self.assertEqual(upload.call_count, 2)
+            self.assertEqual([call.args[1] for call in upload.call_args_list],
+                             [payloads["zllm"][0]] + [payloads[provider][0] for provider in sorted(payloads)])
             self.assertNotEqual(refreshed["generation"], previous["generation"])
             self.assertIsNone(monitor.load_upload_state(root))
 
@@ -154,6 +426,21 @@ class MonitorPublicationTests(MonitorTestCase):
                 )
             upload.assert_called_once()
             self.assertNotEqual(refreshed["generation"], previous["generation"])
+
+    def test_default_publication_rewrites_unchanged_peers_and_preserves_explicit_skips(self):
+        for explicit in (set(), {"zllm"}):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                connection, _, previous = self._published_provider_fixture(root)
+                candidate, status = self._provider_payloads(root, {"openai-api": 5, "zllm": 9}, "2026-09-03T00:01:00Z")
+                with patch.object(hub_api, "upload_summary") as upload:
+                    published = publication_api._publish_provider_payloads(
+                        root, connection, candidate, status, previous, skip_upload_for=explicit,
+                    )
+                self.assertEqual([call.args[1] for call in upload.call_args_list],
+                                 [candidate[provider][0] for provider in sorted(set(candidate) - explicit)])
+                committed = publication_api._load_generation_payloads(root, published["generation"])
+                self.assertEqual(committed, {provider: payload for provider, (payload, _) in candidate.items()})
 
     def test_previous_private_provider_stream_is_not_republished(self):
         with tempfile.TemporaryDirectory() as temporary:

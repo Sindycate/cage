@@ -5,6 +5,14 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.10 — 2026-10-01
+
+- batch Token Monitor's exact Docker volume identity checks during aggregation,
+  retaining fresh checks after collection and fail-closed replacement handling;
+- on exit, upload only provider streams whose complete hub payload changed;
+  retain the actual last successful payload for unchanged streams and preserve
+  full forced sync, scheduled reconciliation and interrupted-upload recovery.
+
 ## 0.38.9 — 2026-10-01
 
 - check Docker free space without enumerating every image at ordinary launch;
