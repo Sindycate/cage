@@ -997,7 +997,7 @@ class MonitorServiceTests(MonitorTestCase):
             ) as upload, contextlib.redirect_stderr(terminal):
                 worker = monitor.ActiveMonitor(scan, 30)
                 worker._stop.set()
-                worker._run()
+                worker._background_scan()
 
             self.assertEqual(terminal.getvalue(), "")
             upload.assert_not_called()
@@ -1151,6 +1151,7 @@ class MonitorServiceTests(MonitorTestCase):
         worker._scan = scan
         worker._interval = 30
         worker._stop = stop
+        worker._schedule_lock = threading.Lock()
         with patch.object(lifecycle_api.time, "time", side_effect=lambda: clock[0]):
             worker._run()
 
@@ -1171,7 +1172,7 @@ class MonitorServiceTests(MonitorTestCase):
             with patch.object(lifecycle_api.threading.Thread, "start"):
                 worker = monitor.ActiveMonitor(scan, 30)
             worker._stop.set()
-            worker._run()  # startup scan fails while Codex owns the terminal
+            worker._background_scan()  # failure while Codex owns the terminal
             self.assertEqual(terminal.getvalue(), "")
             with patch.object(worker._thread, "join"):
                 worker.stop()
@@ -1188,7 +1189,7 @@ class MonitorServiceTests(MonitorTestCase):
             with patch.object(lifecycle_api.threading.Thread, "start"):
                 worker = monitor.ActiveMonitor(scan, 30)
             worker._stop.set()
-            worker._run()
+            worker._background_scan()
         self.assertIn("WARNING: Token Monitor scan skipped: hub unavailable", output.getvalue())
 
     def test_failed_full_reconciliation_waits_for_next_wall_clock_slot(self):

@@ -1272,6 +1272,7 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
     runtime.lifecycle.register(
         "Token Monitor collector",
         lambda: _stop_codex_monitor(runtime),
+        quiesce=runtime.monitor_worker.request_stop,
     )
 
 
@@ -1289,7 +1290,9 @@ def _start_poketoken_export(runtime: ContainerRuntime) -> None:
     worker = poketoken.ActiveExport(
         lambda: poketoken.sync(runtime.config_root, runtime.docker, runtime.install_root, runtime.plan)
     )
-    runtime.lifecycle.register("PokeTokenBar local export", worker.stop)
+    runtime.lifecycle.register(
+        "PokeTokenBar local export", worker.stop, quiesce=worker.request_stop
+    )
     print(f"  PokeTokenBar scan folder: {poketoken.export_path(runtime.config_root)}")
 
 

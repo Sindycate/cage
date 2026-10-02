@@ -19,6 +19,7 @@ Cleanup = Callable[[], int | None]
 class Resource:
     name: str
     cleanup: Cleanup
+    quiesce: Cleanup | None = None
 
 
 class LifecycleCoordinator:
@@ -29,8 +30,10 @@ class LifecycleCoordinator:
         self._lock = threading.Lock()
         self._closed = False
 
-    def register(self, name: str, cleanup: Cleanup) -> Resource:
-        resource = Resource(name=name, cleanup=cleanup)
+    def register(
+        self, name: str, cleanup: Cleanup, *, quiesce: Cleanup | None = None
+    ) -> Resource:
+        resource = Resource(name=name, cleanup=cleanup, quiesce=quiesce)
         with self._lock:
             if self._closed:
                 raise RuntimeError("cannot register a resource after cleanup")
@@ -43,7 +46,7 @@ class LifecycleCoordinator:
                 self._resources.remove(resource)
 
     def cleanup(self, primary_status: int = 0) -> int:
-        """Clean up in reverse order and preserve primary failure precedence."""
+        """Quiesce all schedules, then clean up in reverse ownership order."""
 
         with self._lock:
             if self._closed:
@@ -52,6 +55,18 @@ class LifecycleCoordinator:
             resources = list(reversed(self._resources))
             self._resources.clear()
         cleanup_status = 0
+        # Stop every optional scheduler before any cleanup can block on joins,
+        # final accounting or target teardown. Quiesce callbacks only request
+        # a stop; existing work and resource ownership remain with cleanup.
+        for resource in resources:
+            if resource.quiesce is None:
+                continue
+            try:
+                status = resource.quiesce()
+            except Exception:
+                status = 1
+            if cleanup_status == 0 and status:
+                cleanup_status = int(status)
         for resource in resources:
             try:
                 status = resource.cleanup()

@@ -6,6 +6,25 @@ when that version is committed and tagged.
 
 ## Unreleased
 
+## 0.38.11 — 2026-10-02
+
+### Accounting reads and shutdown scheduling
+
+Update Cage normally. Token Monitor reads long JSONL lines in linear framing
+work rather than repeatedly searching the accumulated prefix. Token totals,
+provider evidence, replay handling, UTF-8 decoding and oversized-line behavior
+retain their existing contracts. History mounts remain read-only.
+
+Container cleanup requests both Token Monitor and PokeTokenBar to stop
+scheduling before waiting for either worker or collecting final usage. Host
+monitor cleanup uses the same explicit request phase. An already-running scan
+is still allowed to finish, and fresh final collection remains synchronous;
+shutdown can therefore still take longer with large project histories.
+
+No configuration or history migration is required. Already-running processes
+keep their loaded code; these changes apply to newly launched processes after
+upgrading. This release does not install a detached accounting worker.
+
 ## 0.38.10 — 2026-10-01
 
 ### Final Token Monitor publication

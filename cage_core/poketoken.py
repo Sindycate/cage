@@ -281,6 +281,7 @@ class ActiveExport:
     def __init__(self, scan):
         self._scan = scan
         self._stop = threading.Event()
+        self._schedule_lock = threading.Lock()
         self._error: str | None = None
         self._thread = threading.Thread(target=self._run, name="cage-poketoken", daemon=True)
         self._thread.start()
@@ -295,12 +296,24 @@ class ActiveExport:
                 print(f"WARNING: {exc}; run cage poketoken status", file=sys.stderr)
 
     def _run(self) -> None:
-        self._attempt()
+        self._scheduled_attempt()
         while not self._stop.wait(INTERVAL_SECONDS):
-            self._attempt()
+            self._scheduled_attempt()
+
+    def _scheduled_attempt(self) -> None:
+        with self._schedule_lock:
+            if self._stop.is_set():
+                return
+        self._attempt()
+
+    def request_stop(self) -> None:
+        """Stop admitting scheduled exports without joining or final export."""
+
+        with self._schedule_lock:
+            self._stop.set()
 
     def stop(self) -> int:
-        self._stop.set()
+        self.request_stop()
         self._thread.join()
         self._attempt()
         if self._error:

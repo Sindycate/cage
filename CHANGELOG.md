@@ -5,6 +5,15 @@ details live in the linked migration guide.
 
 ## Unreleased
 
+## 0.38.11 — 2026-10-02
+
+- read long JSONL accounting records without repeatedly searching and copying
+  the accumulated line, retaining UTF-8 decoding, size limits and exact
+  history-prefix/replay accounting;
+- stop both Token Monitor and PokeTokenBar schedules before waiting for either
+  worker or collecting final usage, preventing another periodic tick during
+  another worker's final cleanup; preserve fresh synchronous final collection.
+
 ## 0.38.10 — 2026-10-01
 
 - batch Token Monitor's exact Docker volume identity checks during aggregation,

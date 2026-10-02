@@ -17,19 +17,38 @@ function lines(filename, visit) {
   try {
     if (!fs.fstatSync(fd).isFile()) throw new Error('unsafe accounting source');
     const buffer = Buffer.alloc(65536), decoder = new StringDecoder('utf8');
-    let pending = '', skipping = false, count;
+    let fragments = [], pendingLength = 0, skipping = false, count;
     while ((count = fs.readSync(fd, buffer)) > 0) {
-      pending += decoder.write(buffer.subarray(0, count));
-      let end;
-      while ((end = pending.indexOf('\n')) >= 0) {
-        if (!skipping) visit(pending.slice(0, end));
-        pending = pending.slice(end + 1); skipping = false;
+      const chunk = decoder.write(buffer.subarray(0, count));
+      let start = 0, end;
+      // Search each decoded chunk once; flatten a growing line only at its end.
+      while ((end = chunk.indexOf('\n', start)) >= 0) {
+        if (!skipping) {
+          const tail = chunk.slice(start, end);
+          if (fragments.length) {
+            fragments.push(tail);
+            visit(fragments.join(''));
+          } else visit(tail);
+        }
+        fragments = []; pendingLength = 0; skipping = false;
+        start = end + 1;
       }
-      // Oversized prompt/tool lines are irrelevant to token accounting.
-      if (pending.length > MAX_BYTES) { pending = ''; skipping = true; }
+      if (!skipping && start < chunk.length) {
+        const tail = chunk.slice(start);
+        fragments.push(tail);
+        pendingLength += tail.length;
+        // Keep the existing decoded-length guard after this chunk's complete
+        // lines. Oversized prompt/tool lines remain skipped until a newline.
+        if (pendingLength > MAX_BYTES) {
+          fragments = []; pendingLength = 0; skipping = true;
+        }
+      }
     }
-    pending += decoder.end();
-    if (pending && !skipping) visit(pending);
+    if (!skipping) {
+      const tail = decoder.end();
+      if (tail) fragments.push(tail);
+      if (pendingLength || tail) visit(fragments.join(''));
+    }
   } finally { fs.closeSync(fd); }
 }
 

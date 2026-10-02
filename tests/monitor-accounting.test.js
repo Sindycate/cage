@@ -32,6 +32,91 @@ function read(events, targetModels) {
   try { const p = path.join(dir, 'session.jsonl'); fs.writeFileSync(p, events.map(e => JSON.stringify(e)).join('\n')); return readWrites(p, now, targetModels); }
   finally { fs.rmSync(dir, { recursive: true }); }
 }
+function readRaw(contents) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cage-accounting-lines-'));
+  try {
+    const filename = path.join(dir, 'session.jsonl');
+    fs.writeFileSync(filename, contents);
+    return readWrites(filename, now);
+  } finally { fs.rmSync(dir, { recursive: true }); }
+}
+test('large tool lines take linear newline-search work and preserve following usage', () => {
+  const tool = { type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(8 * 1024 * 1024) } };
+  const contents = [context('model-a'), tool, event([100, 10, 40, 50], [100, 10, 40, 50])]
+    .map(row => JSON.stringify(row)).join('\n');
+  const indexOf = String.prototype.indexOf;
+  let searchedCharacters = 0, source;
+  // A work bound catches rescanning a growing prefix without a timing threshold.
+  String.prototype.indexOf = function(search, start = 0) {
+    if (search === '\n') searchedCharacters += Math.max(0, this.length - start);
+    return indexOf.call(this, search, start);
+  };
+  try { source = readRaw(contents); }
+  finally { String.prototype.indexOf = indexOf; }
+  assert.ok(searchedCharacters <= contents.length * 4,
+    `newline searches examined ${searchedCharacters} characters for ${contents.length} source characters`);
+  for (const period of ['today', 'month', 'allTime']) {
+    assert.equal(source.periods[period].get('model-a').cacheWriteTokens, 50);
+    assert.equal(source.periods[period].get('model-a').outputTokens, 10);
+  }
+});
+test('decoded chunks preserve split UTF-8, CRLF, empty lines and final unterminated usage', () => {
+  const usageLine = JSON.stringify(event([100, 10, 40, 50], [100, 10, 40, 50]));
+  const prefix = '\n\r\n';
+  const model = 'model-🙂漢';
+  const skeleton = JSON.stringify({ padding: '', ...context(model) });
+  const beforeEmoji = skeleton.slice(0, skeleton.indexOf('🙂'));
+  const padding = 'x'.repeat(65535 - Buffer.byteLength(prefix + beforeEmoji));
+  const unicodeLine = JSON.stringify({ padding, ...context(model) });
+  // The emoji's first byte is the final byte in the first 64 KiB read.
+  assert.equal(Buffer.byteLength(prefix + unicodeLine.slice(0, unicodeLine.indexOf('🙂'))), 65535);
+  const unicode = readRaw(prefix + unicodeLine + '\r\n\n' + usageLine);
+  assert.equal(unicode.periods.allTime.get(model).cacheWriteTokens, 50);
+  assert.equal(unicode.periods.allTime.get(model).outputTokens, 10);
+
+  const asciiSkeleton = JSON.stringify({ padding: '', ...context('model-a') });
+  const asciiLine = JSON.stringify({ padding: 'x'.repeat(65535 - asciiSkeleton.length), ...context('model-a') });
+  const crlf = readRaw(asciiLine + '\r\n' + usageLine);
+  assert.equal(crlf.periods.allTime.get('model-a').cacheWriteTokens, 50);
+  assert.equal(crlf.periods.allTime.get('model-a').outputTokens, 10);
+});
+test('invalid UTF-8 keeps decoder replacement semantics without dropping later records', () => {
+  const contextLine = JSON.stringify(context('model-placeholder'));
+  const [before, after] = contextLine.split('placeholder');
+  const contents = Buffer.concat([Buffer.from(before), Buffer.from([0xff]), Buffer.from(after + '\n' +
+    JSON.stringify(event([100, 10, 40, 50], [100, 10, 40, 50])) + '\n'), Buffer.from([0xf0, 0x9f])]);
+  const source = readRaw(contents);
+  assert.equal(source.periods.allTime.get('model-�').cacheWriteTokens, 50);
+  assert.equal(source.periods.allTime.get('model-�').outputTokens, 10);
+  assert.equal(source.periods.allTime.size, 1);
+});
+function paddedUsageLine(length, model = 'model-a') {
+  const row = event([100, 10, 40, 50], [100, 10, 40, 50]);
+  row.payload.model = model;
+  const prefix = JSON.stringify(row).slice(0, -1) + ',"padding":"';
+  const suffix = '"}';
+  return prefix + 'x'.repeat(length - prefix.length - suffix.length) + suffix;
+}
+test('the decoded-length guard preserves boundary lines and resumes after oversized lines', () => {
+  const limit = 32 * 1024 * 1024;
+  const recovery = event([200, 20, 80, 100], [100, 10, 40, 50]);
+  recovery.payload.model = 'model-b';
+  const recoveryLine = JSON.stringify(recovery);
+  for (const [length, expected] of [[limit + 1, true], [limit + 65536, false]]) {
+    const source = readRaw(paddedUsageLine(length) + '\n\r\n' + recoveryLine);
+    assert.equal(source.periods.allTime.has('model-a'), expected, `line length ${length}`);
+    if (expected) assert.equal(source.periods.allTime.get('model-a').cacheWriteTokens, 50);
+    assert.equal(source.periods.allTime.get('model-b').cacheWriteTokens, 50);
+    assert.equal(source.periods.allTime.get('model-b').outputTokens, 10);
+  }
+});
+test('EOF processes an allowed pending line and discards an oversized pending line', () => {
+  const limit = 32 * 1024 * 1024;
+  const accepted = readRaw(paddedUsageLine(limit - 1));
+  assert.equal(accepted.periods.allTime.get('model-a').cacheWriteTokens, 50);
+  const skipped = readRaw(paddedUsageLine(limit + 65536));
+  assert.equal(skipped.periods.allTime.size, 0);
+});
 test('switches preserve per-model writes; duplicate totals count once', () => {
   const a = event([100, 10, 40, 50], [100, 10, 40, 50]);
   const source = read([context('model-a'), a, a, context('model-b'), event([300, 30, 140, 130], [200, 20, 100, 80])]);

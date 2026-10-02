@@ -177,6 +177,56 @@ class LaunchPlanContractTests(unittest.TestCase):
 
 
 class LifecycleCoordinatorTests(unittest.TestCase):
+    def test_all_quiesce_hooks_run_before_reverse_cleanup(self):
+        observed = []
+        lifecycle = LifecycleCoordinator()
+        lifecycle.register(
+            "first", lambda: observed.append("cleanup-first"),
+            quiesce=lambda: observed.append("stop-first"),
+        )
+        lifecycle.register(
+            "second", lambda: observed.append("cleanup-second"),
+            quiesce=lambda: observed.append("stop-second"),
+        )
+        self.assertEqual(lifecycle.cleanup(), 0)
+        self.assertEqual(observed, [
+            "stop-second", "stop-first", "cleanup-second", "cleanup-first",
+        ])
+        self.assertEqual(lifecycle.cleanup(), 0)
+        self.assertEqual(len(observed), 4)
+
+    def test_quiesce_failure_does_not_skip_other_stops_or_cleanup(self):
+        for primary_status in (0, 23):
+            with self.subTest(primary_status=primary_status):
+                observed = []
+                lifecycle = LifecycleCoordinator()
+
+                def failing_stop():
+                    observed.append("stop-second")
+                    raise RuntimeError("stop failed")
+
+                lifecycle.register(
+                    "first", lambda: observed.append("cleanup-first") or 7,
+                    quiesce=lambda: observed.append("stop-first"),
+                )
+                lifecycle.register(
+                    "second", lambda: observed.append("cleanup-second") or 8,
+                    quiesce=failing_stop,
+                )
+                self.assertEqual(lifecycle.cleanup(primary_status), primary_status or 1)
+                self.assertEqual(observed, [
+                    "stop-second", "stop-first", "cleanup-second", "cleanup-first",
+                ])
+
+    def test_released_resource_is_neither_quiesced_nor_cleaned(self):
+        cleanup, quiesce = Mock(), Mock()
+        lifecycle = LifecycleCoordinator()
+        resource = lifecycle.register("released", cleanup, quiesce=quiesce)
+        lifecycle.release(resource)
+        self.assertEqual(lifecycle.cleanup(), 0)
+        cleanup.assert_not_called()
+        quiesce.assert_not_called()
+
     def test_cleanup_is_reverse_order_and_primary_failure_wins(self):
         observed: list[str] = []
         lifecycle = LifecycleCoordinator()

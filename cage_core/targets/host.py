@@ -395,6 +395,7 @@ def run_host_target(
         raise HostTargetError(f"cannot start Codex OAuth session: {exc}") from exc
     finally:
         if worker is not None:
+            worker.request_stop()
             worker.stop()
         if managed_session is not None:
             try:

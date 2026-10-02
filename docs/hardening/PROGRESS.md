@@ -3,6 +3,49 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-10-02 — v0.38.11 long-history reads and shutdown scheduling
+
+The supplemental JSONL reader repeatedly concatenated and searched a growing
+line for each 64 KiB read. Long prompt/tool records made framing superlinear,
+even when those records contained no usage. Search only the new decoded chunk,
+retain bounded fragments and join a completed line once. Preserve the existing
+decoded-character guard after complete lines, oversized skip recovery, UTF-8
+replacement/EOF behavior, exact parser-prefix matching and replay accounting.
+No accounting/provider/pricing rules or history mount permissions change.
+
+Add a nonblocking quiesce phase to resource cleanup: every registered scheduler
+receives its stop request before any reverse-order cleanup joins or finalizes.
+Token Monitor and PokeTokenBar use stop admission guarded against timer races;
+already-admitted work remains owned until normal cleanup. Host monitor cleanup
+uses the same explicit request. Fresh final usage remains synchronous.
+
+Read-only collector comparisons on a roughly 0.8 GiB live history measured
+11.82/13.16 seconds before and 8.41/8.96 with the prototype. A subsequent run
+of the tracked implementation measured 14.61 seconds before and 8.00 after;
+supplemental line processing fell from 6.97 to 4.07 seconds. The active history
+continued changing, so these are stage timings rather than a frozen-input or
+whole-CLI exit guarantee. Existing sessions were not closed, and collection
+used scoped read-only mounts, isolated scratch state and no hub connection.
+
+All 25 Node accounting regressions passed. The original implementation passes
+all compatibility fixtures but fails the deterministic linear search-work
+bound: about 550 million searched characters for an 8 MiB record. Fixtures
+cover split/malformed UTF-8, CRLF, EOF and the existing 32 MiB guard boundary.
+Python regressions cover expired-tick admission races, nonblocking stop
+requests, preservation of in-flight and final work, both container schedules
+stopped during a blocked final export, primary failure precedence, released
+resources and host auth/OAuth/source-lease ordering. Replacing only cleanup
+with the prior implementation makes the blocked-final regression fail because
+the other monitor's schedule remains enabled.
+The canonical publisher owns full release checks and public verification.
+
+Detached collection remains a separate architecture step: a final-only job
+cannot safely replace joins while an in-process periodic scan still owns a
+collector. Durable work must bind source/adoption and connection identities,
+preserve collector ownership across process exit, and retain publication,
+retry, cancellation and crash-recovery contracts. This release does not add
+such a worker or change statistics delivery timing.
+
 ## 2026-10-01 — v0.38.10 final monitor latency
 
 Aggregation previously started a Docker inspection for each registered volume.

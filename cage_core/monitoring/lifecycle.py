@@ -20,6 +20,7 @@ class ActiveMonitor:
         self._interval = validation_api.validate_interval(interval_seconds)
         self._interactive = sys.stderr.isatty()
         self._stop = threading.Event()
+        self._schedule_lock = threading.Lock()
         self._final_scan_done = False
         self._thread = threading.Thread(target=self._run, name="cage-token-monitor", daemon=True)
         self._thread.start()
@@ -28,15 +29,23 @@ class ActiveMonitor:
         # Compute the first wall-clock boundary before collection starts so a
         # slow collector cannot shift every later tick by one full interval.
         next_due = (math.floor(time.time() / self._interval) + 1) * self._interval
-        self._background_scan()
+        self._scheduled_scan()
         while not self._stop.is_set():
             wait_seconds = max(0.0, next_due - time.time())
             if self._stop.wait(wait_seconds):
                 return
-            self._background_scan()
+            self._scheduled_scan()
             now = time.time()
             missed = max(1, math.floor((now - next_due) / self._interval) + 1)
             next_due += missed * self._interval
+
+    def _scheduled_scan(self) -> None:
+        # Serialize admission with stop requests without holding the lock
+        # during collection. An admitted scan remains in flight for stop().
+        with self._schedule_lock:
+            if self._stop.is_set():
+                return
+        self._background_scan()
 
     def _background_scan(self) -> None:
         try:
@@ -48,8 +57,14 @@ class ActiveMonitor:
             if not self._interactive:
                 print(f"WARNING: Token Monitor scan skipped: {exc}", file=sys.stderr)
 
+    def request_stop(self) -> None:
+        """Stop admitting scheduled scans without waiting or final collection."""
+
+        with self._schedule_lock:
+            self._stop.set()
+
     def stop(self) -> None:
-        self._stop.set()
+        self.request_stop()
         self._thread.join(timeout=constants_api.SCAN_TIMEOUT_SECONDS + 10)
         if self._final_scan_done:
             return

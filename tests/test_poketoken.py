@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -221,8 +222,10 @@ def test_worker_is_registered_and_final_scan_runs(prepared):
     root, launch = prepared
     lifecycle = LifecycleCoordinator()
     runtime = SimpleNamespace(plan=launch.plan, config_root=root, docker="docker", install_root=ROOT, lifecycle=lifecycle)
-    with patch.object(poketoken, "sync") as sync:
+    initial_scan = threading.Event()
+    with patch.object(poketoken, "sync", side_effect=lambda *args: initial_scan.set()) as sync:
         container._start_poketoken_export(runtime)
+        assert initial_scan.wait(1)
         assert lifecycle.cleanup() == 0
         assert sync.call_count == 2
         lifecycle.cleanup()
