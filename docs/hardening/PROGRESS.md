@@ -3,6 +3,19 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-10-05 — v0.38.13 Linux recovery-fixture ownership
+
+The first background-accounting candidate, commit `00683e8d9e57` for 0.38.12,
+passed canonical local gates and CI's Python, macOS installer, static and secret
+checks. Its Linux Docker recovery fixtures failed because capability-free root
+could not write a bind directory owned by the runner. No tag or release was
+created for 0.38.12. Run those disposable collectors with the host UID/GID,
+matching the production private-cache ownership contract; preserve dropped
+capabilities and no-new-privileges. Production collection code is unchanged.
+
+Advance the release version to 0.38.13 rather than rewriting pushed history.
+The canonical publisher will validate and publish this corrected exact commit.
+
 ## 2026-10-05 — v0.38.12 background accounting release candidate
 
 Promote the prepared Codex CLI container accounting implementation to version

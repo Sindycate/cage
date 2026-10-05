@@ -4,7 +4,7 @@ This file records user-visible and configuration migrations introduced by the
 hardening workflow. Entries move from **Unreleased** to a concrete version only
 when that version is committed and tagged.
 
-## 0.38.12 — 2026-10-05
+## 0.38.13 — 2026-10-05
 
 ### Codex CLI background accounting
 

@@ -47,6 +47,7 @@ def owned(tmp_path):
 
 def command(docker, image, cache, script):
     return [docker, "run", "--rm", "--network", "none", "--read-only",
+            "--user", f"{os.getuid()}:{os.getgid()}",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--mount", f"type=bind,src={cache},dst=/cache", "--entrypoint", "sh", image, "-c", script]
 

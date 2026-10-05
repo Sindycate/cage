@@ -1,6 +1,6 @@
 # Background accounting for Codex CLI exit
 
-Introduced in Cage 0.38.12. After updating, new Codex CLI container processes
+Introduced in Cage 0.38.13. After updating, new Codex CLI container processes
 use this accounting lifecycle. Already-open processes retain their loaded code.
 
 ## Ownership and completion

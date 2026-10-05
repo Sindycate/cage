@@ -3,7 +3,7 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
-## 0.38.12 — 2026-10-05
+## 0.38.13 — 2026-10-05
 
 - defer accounting for Codex CLI containers through a durable queue: commit final
   Token Monitor and PokeTokenBar requests at exit, then finish collection and
@@ -13,6 +13,8 @@ details live in the linked migration guide.
   collectors before cache reuse;
 - expose local queue/worker status and explicit retry/cancel commands, while
   preserving synchronous manual sync and host/Desktop final accounting.
+- run Docker recovery fixtures as their host owner so capability-free writes
+  exercise the same private-cache ownership contract on Linux and macOS.
 
 ## 0.38.11 — 2026-10-02
 
