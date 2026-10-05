@@ -12,6 +12,7 @@ import stat
 import time
 from datetime import datetime
 from typing import Any
+from ..accounting import execution
 
 from . import constants as constants_api
 from . import errors as errors_api
@@ -137,6 +138,11 @@ def _save_volume_snapshot(
     record: models_api.VolumeRegistration,
     payload: dict[str, Any],
 ) -> None:
+    with execution.commit(config_root):
+        _save_volume_snapshot_owned(config_root, record, payload)
+
+
+def _save_volume_snapshot_owned(config_root: Path, record: models_api.VolumeRegistration, payload: dict[str, Any]) -> None:
     payload = validation_api._validate_summary(payload, record.device_id)
     captured_at = state_api._now()
     state_api._write_json(

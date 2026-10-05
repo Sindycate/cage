@@ -10,6 +10,11 @@ from pathlib import Path
 import secrets
 import stat
 from typing import Any
+from contextvars import ContextVar
+from ..accounting import execution, grants
+
+_binding: ContextVar[str] = ContextVar("monitor_publication_binding", default="")
+_authority: ContextVar[str] = ContextVar("monitor_publication_authority", default="")
 
 from . import constants as constants_api
 from . import errors as errors_api
@@ -38,7 +43,7 @@ def _generation_manifest_path(config_root: Path, generation: str) -> Path:
 
 
 def _validate_upload_state(config_root: Path, value: object) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or set(value) - {"connection_context", "authority_context"} != {
         "version",
         "state",
         "generation",
@@ -51,6 +56,10 @@ def _validate_upload_state(config_root: Path, value: object) -> dict[str, Any]:
         raise errors_api.MonitorError("monitor upload state has an invalid shape")
     if value["version"] != constants_api.UPLOAD_STATE_VERSION:
         raise errors_api.MonitorError("monitor upload state has an invalid version")
+    for key in ("connection_context", "authority_context"):
+        binding = value.get(key, "")
+        if not isinstance(binding, str) or (binding and (len(binding) != 64 or any(c not in "0123456789abcdef" for c in binding))):
+            raise errors_api.MonitorError("monitor upload authority context is invalid")
     if value["state"] not in {"pending", "repair_pending"}:
         raise errors_api.MonitorError("monitor upload state has an invalid status")
     _validate_generation_id(value["generation"])
@@ -89,6 +98,8 @@ def load_upload_state(config_root: Path) -> dict[str, Any] | None:
 
 
 def save_upload_state(config_root: Path, value: dict[str, Any]) -> None:
+    if _binding.get():
+        value = {**value, "connection_context": _binding.get(), "authority_context": _authority.get()}
     state_api._write_json(
         state_api.monitor_root(config_root) / constants_api.UPLOAD_STATE_FILE,
         _validate_upload_state(config_root, value),
@@ -271,9 +282,23 @@ def _repair_pending_upload(
     config_root: Path,
     connection: models_api.MonitorConnection,
 ) -> None:
+    with grants.effects(config_root), execution.commit(config_root):
+        _check_connection(config_root, connection)
+        _repair_pending_upload_owned(config_root, connection)
+
+
+def _repair_pending_upload_owned(config_root: Path, connection: models_api.MonitorConnection) -> None:
     pending = load_upload_state(config_root)
     if pending is None:
         return
+    context = pending.get("connection_context")
+    if context and context != _publication_context(config_root, connection):
+        raise errors_api.MonitorError("pending publication belongs to a previous connection; run cage monitor sync to reconcile current sources")
+    if not context and execution.active():
+        raise errors_api.MonitorError("legacy publication repair needs explicit cage monitor sync")
+    authority = pending.get("authority_context")
+    if authority and authority != _authority_context(config_root):
+        raise errors_api.MonitorError("pending publication belongs to changed sources; run cage monitor sync")
     provider_ids = pending["provider_ids"]
     _validate_exact_provider_ids(config_root, provider_ids)
     previous_generation = pending["previous_generation"]
@@ -358,7 +383,7 @@ def _publication_context(
     """Bind the last-good baseline to its private hub/account connection."""
 
     encoded = json.dumps(
-        [connection.hub_url, connection.secret], ensure_ascii=True, separators=(",", ":")
+        [connection.hub_url, connection.secret, *([connection.epoch] if connection.epoch else [])], ensure_ascii=True, separators=(",", ":")
     ).encode("utf-8")
     return hmac.new(
         bytes.fromhex(identity_api.host_install_id(config_root)),
@@ -404,6 +429,7 @@ def _save_published_status(
     next_status["last_good_generation"] = generation
     next_status["upload_state"] = "complete"
     next_status["publication_context"] = context
+    next_status["authority_context"] = _authority.get() or _authority_context(config_root)
     state_api._write_json(
         state_api.monitor_root(config_root) / constants_api.AGGREGATE_STATUS_FILE,
         next_status,
@@ -411,7 +437,75 @@ def _save_published_status(
     return next_status
 
 
+def _authority_context(config_root: Path) -> str:
+    value = state_api._read_json(
+        state_api.monitor_root(config_root) / constants_api.REGISTRY_FILE,
+        max_bytes=constants_api.MAX_REGISTRY_BYTES,
+    )
+    records = value.get("registrations", []) if isinstance(value, dict) else []
+    active = {r["logical_id"]: {
+        "source": grants.source_identity(r),
+        "epoch": grants.current(config_root, "monitor:" + r["logical_id"]),
+    } for r in records if r.get("status") == "active"}
+    return grants.digest(active)
+
+
 def _publish_provider_payloads(
+    config_root: Path,
+    connection: models_api.MonitorConnection,
+    payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+    status: dict[str, Any],
+    previous_status: dict[str, Any] | None,
+    *,
+    skip_upload_for: frozenset[str] | set[str] = frozenset(),
+    skip_unchanged: bool = False,
+    replace_revoked: bool = False,
+) -> dict[str, Any]:
+    with grants.effects(config_root), execution.commit(config_root):
+        _check_connection(config_root, connection)
+        context = _publication_context(config_root, connection)
+        authority = _authority_context(config_root)
+        pending = load_upload_state(config_root)
+        if replace_revoked and pending and (
+            pending.get("connection_context") not in (None, context)
+            or pending.get("authority_context") not in (None, authority)
+            or not pending.get("connection_context")
+        ):
+            # Explicit full sync authorizes a new complete generation. Preserve
+            # uncertainty as evidence; never roll an old connection's payloads
+            # back onto the new connection or resurrect a forgotten source.
+            state_api._write_json(state_api.monitor_root(config_root) / "superseded-upload.json", pending)
+            remove_upload_state(config_root)
+            previous_status = None
+        token = _binding.set(context)
+        authority_token = _authority.set(authority)
+        try:
+            result = _publish_provider_payloads_owned(
+                config_root, connection, payloads, status, previous_status,
+                skip_upload_for=skip_upload_for, skip_unchanged=skip_unchanged,
+            )
+            state_api._remove_private_file(
+                state_api.monitor_root(config_root) / "superseded-upload.json",
+                max_bytes=constants_api.MAX_CONNECTION_BYTES,
+            )
+            return result
+        finally:
+            _binding.reset(token)
+            _authority.reset(authority_token)
+
+
+def _check_connection(config_root: Path, connection: models_api.MonitorConnection) -> None:
+    if connection.epoch:
+        # Validate both fields and epoch; a reader can race the two-file update
+        # before acquiring this fence. Legacy constructor-only callers are
+        # retained for explicit migrations; load_connection always binds one.
+        from .connection import load_connection
+        current = load_connection(config_root)
+        if current is None or not current.enabled or current != connection or current.epoch != connection.epoch:
+            raise errors_api.MonitorError("monitor connection changed before publication")
+
+
+def _publish_provider_payloads_owned(
     config_root: Path,
     connection: models_api.MonitorConnection,
     payloads: dict[str, tuple[dict[str, Any], dict[str, Any]]],
@@ -456,6 +550,20 @@ def _publish_provider_payloads(
         # their candidate payloads still belong in the complete new generation.
         automatically_skipped = unchanged - skipped
         skipped.update(automatically_skipped)
+    # A revoked baseline can still prove unchanged outward data above, but
+    # must never become rollback material for a changed publication. The
+    # supersession marker also covers a crash before the new journal exists.
+    superseded = state_api._read_json(
+        state_api.monitor_root(config_root) / "superseded-upload.json",
+        max_bytes=constants_api.MAX_CONNECTION_BYTES,
+    )
+    if superseded or (isinstance(previous_status, dict) and (
+        previous_status.get("authority_context") not in (None, _authority.get())
+        or previous_status.get("publication_context") not in (None, context)
+    )):
+        previous_generation, previous = "", {}
+        skipped.difference_update(automatically_skipped)
+        automatically_skipped.clear()
     generation_payloads = {
         provider: (previous[provider], provider_status)
         if provider in automatically_skipped else (payload, provider_status)

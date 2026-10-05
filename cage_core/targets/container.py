@@ -21,6 +21,7 @@ from typing import TextIO
 
 from .. import bridge as bridge_policy, config, monitor, opencode_policy, storage, oauth_broker
 from .. import poketoken
+from ..accounting import backends as accounting_backends, lifecycle as accounting_lifecycle, runtime as accounting_runtime
 from ..opencode import (
     OpenCodeError,
     create_launch_snapshot,
@@ -78,7 +79,9 @@ class ContainerRuntime:
     opencode_snapshot: Path | None = None
     opencode_environment: dict[str, str] = field(default_factory=dict)
     monitor_record: monitor.VolumeRegistration | None = None
-    monitor_worker: monitor.ActiveMonitor | None = None
+    monitor_worker: monitor.ActiveMonitor | accounting_lifecycle.Producer | None = None
+    accounting_transport: dict | None = None
+    accounting_runtime: Path | None = None
     oauth_connection: oauth_broker.BrokerConnection | None = None
     oauth_proxy: str = ""
     codex_snapshot: Path | None = None
@@ -1248,6 +1251,25 @@ def _start_codex_monitor(runtime: ContainerRuntime) -> None:
     if connection is None or not connection.enabled:
         return
 
+    if runtime.plan.target == "container":
+        try:
+            _prepare_accounting(runtime)
+            source, permissions = accounting_backends.monitor_source(
+                runtime.config_root, record, runtime.accounting_transport,
+                runtime.plan.cage_version, runtime.plan.storage_policy,
+            )
+            runtime.monitor_worker = accounting_lifecycle.Producer(
+                runtime.config_root, runtime.docker, runtime.accounting_runtime,
+                source, permissions, connection.interval_seconds,
+            )
+            runtime.lifecycle.register(
+                "Token Monitor handoff", lambda: _stop_codex_monitor(runtime),
+                quiesce=runtime.monitor_worker.request_stop,
+            )
+        except (monitor.MonitorError, OSError, ValueError):
+            print("WARNING: Token Monitor background handoff could not start; run cage monitor jobs", file=sys.stderr)
+        return
+
     def scan(force: bool, *, final: bool = False) -> None:
         monitor.scan_registration(
             runtime.config_root,
@@ -1287,13 +1309,31 @@ def _stop_codex_monitor(runtime: ContainerRuntime) -> int:
 def _start_poketoken_export(runtime: ContainerRuntime) -> None:
     if poketoken.CAPABILITY not in runtime.plan.capabilities:
         return
-    worker = poketoken.ActiveExport(
-        lambda: poketoken.sync(runtime.config_root, runtime.docker, runtime.install_root, runtime.plan)
-    )
+    try:
+        _prepare_accounting(runtime)
+        source, permissions = accounting_backends.poke_source(
+            runtime.config_root, runtime.docker, runtime.plan, runtime.accounting_transport,
+        )
+        worker = accounting_lifecycle.Producer(
+            runtime.config_root, runtime.docker, runtime.accounting_runtime,
+            source, permissions, poketoken.INTERVAL_SECONDS,
+        )
+    except (monitor.MonitorError, poketoken.ExportError, OSError, ValueError):
+        print("WARNING: PokeTokenBar background handoff could not start; run cage poketoken status", file=sys.stderr)
+        return
     runtime.lifecycle.register(
         "PokeTokenBar local export", worker.stop, quiesce=worker.request_stop
     )
     print(f"  PokeTokenBar scan folder: {poketoken.export_path(runtime.config_root)}")
+
+
+def _prepare_accounting(runtime: ContainerRuntime) -> None:
+    # Capture endpoint and executable before the interactive session. Exit only
+    # uses these immutable inputs; installation replacement cannot mix helpers.
+    if runtime.accounting_transport is None:
+        runtime.accounting_transport = accounting_runtime.transport(runtime.docker)
+    if runtime.accounting_runtime is None:
+        runtime.accounting_runtime = accounting_runtime.snapshot(runtime.config_root, runtime.install_root)
 
 
 def _install_signal_handlers():

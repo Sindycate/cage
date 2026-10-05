@@ -4,7 +4,40 @@ This file records user-visible and configuration migrations introduced by the
 hardening workflow. Entries move from **Unreleased** to a concrete version only
 when that version is committed and tagged.
 
-## Unreleased
+## 0.38.12 — 2026-10-05
+
+### Codex CLI background accounting
+
+After updating Cage, new Codex CLI container launches hand initial,
+periodic and final accounting to an on-demand host worker. Closing the CLI waits
+for durable queue writes, not for Docker collection or hub/export delivery.
+Statistics can therefore become current after the shell prompt returns.
+Host and Desktop accounting keep synchronous final collection. Existing open
+processes keep their loaded code; no process is interrupted or converted.
+
+No central configuration changes or login service are required. Private state
+appears under `<Cage config>/accounting/`. The worker retains code snapshots and
+records exact source, endpoint and permission identities. Existing connection,
+source ownership, history mounts, pricing and provider semantics are preserved.
+
+Check `cage monitor jobs [--json]` or `cage poketoken status [--json]` for pending,
+collected, delivered, retrying, blocked or cancelled work. `monitor jobs --retry`
+and `poketoken retry` wake authorized retained jobs; explicit `monitor sync` and
+`poketoken sync PATH` still wait for their work. Following a crash or reboot,
+the next wake resumes pending jobs. There is no automatic login restart.
+
+Disconnect, disable/re-adopt and forget invalidate older monitor work. A pending
+upload from old authority requires `monitor sync` to reconcile current sources;
+it cannot be replayed automatically. Changing a Poke preset affects new launches;
+`poketoken cancel-pending` also revokes already-admitted exports, preserving
+completed files and the pseudonym key.
+
+Rollback requires finishing or revoking pending work with this implementation
+before installing an older version. Do not remove queue, grant, runtime or
+attempt files while producers/workers are active. Older code does not understand
+new upload journal fields or revocation fences and must not repair such pending
+work. Retain private state for diagnosis instead of pruning Docker resources.
+See [the detailed contract and measurements](../accounting-worker.md).
 
 ## 0.38.11 — 2026-10-02
 

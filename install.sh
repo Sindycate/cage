@@ -280,6 +280,8 @@ for required in \
     configuration/__init__.py configuration/schema.py configuration/selection.py configuration/storage.py \
     configuration/rendering.py configuration/editing.py configuration/interaction.py configuration/codex.py \
     configuration/resolution.py configuration/packs.py configuration/diagnostics.py configuration/oauth.py configuration/ui.py configuration/cli.py \
+    accounting/__init__.py accounting/store.py accounting/grants.py accounting/queue.py accounting/runtime.py \
+    accounting/execution.py accounting/backends.py accounting/worker.py accounting/lifecycle.py \
     monitoring/__init__.py monitoring/accounting.py monitoring/aggregation.py monitoring/cleanup.py monitoring/collector.py \
     monitoring/connection.py monitoring/constants.py monitoring/errors.py monitoring/host_sources.py monitoring/hub.py \
     monitoring/identity.py monitoring/lifecycle.py monitoring/locks.py monitoring/migrations.py monitoring/models.py \

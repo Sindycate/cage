@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import config, monitor, opencode_policy, storage
 from . import poketoken
+from .accounting import grants as accounting_grants, queue as accounting_queue, runtime as accounting_runtime, worker as accounting_worker
 from .monitoring import hub as monitor_hub, state as monitor_state
 from .models import LaunchRequest
 from .planning import PlanError, PreparedLaunch, build_launch_plan
@@ -60,6 +61,8 @@ Commands:
   monitor connect URL         Connect the optional host-owned Token Monitor hub
   monitor disconnect          Remove the local hub credential and pause uploads
   monitor status [--json]     Show Cage devices, projects, cost, and migration state
+  monitor jobs [--json]       Show durable accounting jobs without contacting Docker or the hub
+  monitor jobs --retry        Wake pending jobs with their existing permissions
   monitor sync [PATH]         Scan and split registered Codex sources
   monitor split --dry-run     Preview provider totals without hub changes
   monitor discover [--json]   List all existing Cage Codex state volumes
@@ -75,6 +78,8 @@ Commands:
   monitor forget DEVICE_ID    Delete a Cage-owned hub device
   poketoken status            Show the local PokeTokenBar scan folder and errors
   poketoken sync PATH         Export one opted-in Codex container's usage now
+  poketoken retry             Retry pending authorized exports in the background
+  poketoken cancel-pending    Revoke admitted exports; preserve completed files
 
 Options:
   --preset NAME     Use a central config preset (one-shot override)
@@ -422,6 +427,19 @@ def _run_poketoken(
     arguments: list[str], *, config_root: Path, install_root: Path, cage_version: str,
 ) -> int:
     try:
+        if arguments == ["retry"]:
+            _wake_accounting(config_root, install_root, "poke")
+            print("PokeTokenBar pending exports scheduled.")
+            return 0
+        if arguments == ["cancel-pending"]:
+            config_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with accounting_grants.effects(config_root):
+                accounting_grants.revoke(config_root, ["poke"])
+            for job in accounting_queue.jobs(config_root):
+                if job["source"].get("backend") == "poke":
+                    accounting_queue.cancel(config_root, job["id"])
+            print("Pending PokeTokenBar exports revoked; existing export files preserved.")
+            return 0
         if arguments in (["status"], ["status", "--json"]):
             result = poketoken.status(config_root)
             if arguments[-1] == "--json":
@@ -431,6 +449,7 @@ def _run_poketoken(
                 print("Enable PokeTokenBar in TUI Launch defaults, or set poketoken = true in [defaults] or a Codex container preset.")
                 for source in result["sources"]:
                     print(f"  {source['source'][:12]}: {source.get('error') or 'exported at ' + source['updated_at']}")
+                _print_accounting_jobs(result["jobs"])
             return 0
         if not arguments or arguments[0] != "sync":
             raise CliError("Usage: cage poketoken status [--json] | sync PATH [--preset NAME]")
@@ -458,9 +477,27 @@ def _run_poketoken(
             config_root, storage.docker_command(), install_root, prepared.plan,
         )
         print(f"Exported Codex accounting to {destination}")
+        _wake_accounting(config_root, install_root, "poke")
         return 0
-    except poketoken.ExportError as exc:
+    except (poketoken.ExportError, monitor.MonitorError) as exc:
         raise CliError(str(exc)) from exc
+
+
+def _print_accounting_jobs(jobs: list[dict]) -> None:
+    for job in jobs:
+        print(f"  job {job['id'][:12]}: {job['phase']} "
+              f"(collected {job.get('collected')}, delivered {job.get('delivered')}, requested {job.get('requested')})")
+        if job.get("error"):
+            print(f"    {job['error']}")
+
+
+def _wake_accounting(config_root: Path, install_root: Path, backend: str) -> None:
+    if not any(j["source"].get("backend") == backend and j["phase"] not in {"delivered", "cancelled"}
+               for j in accounting_queue.jobs(config_root)):
+        return
+    accounting_queue.resume(config_root, backend)
+    pinned = accounting_runtime.snapshot(config_root, install_root)
+    accounting_worker.wake(config_root, storage.docker_command(), pinned)
 
 
 def _run_storage(arguments: list[str], *, config_root: Path) -> int:
@@ -743,6 +780,8 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     )
     provider_labels = monitor.provider_label_status(config_root)
     payload = {
+        "jobs": accounting_queue.status(config_root, "monitor"),
+        "worker": accounting_worker.status(config_root),
         "connected": bool(connection is not None and connection.enabled),
         "hub_url": connection.hub_url if connection is not None else "",
         "interval_seconds": connection.interval_seconds if connection is not None else None,
@@ -778,6 +817,7 @@ def _monitor_status(config_root: Path, *, as_json: bool = False) -> int:
     if as_json:
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return 0
+    _print_accounting_jobs(payload["jobs"])
     if connection is None or not connection.enabled:
         print("Token Monitor: disconnected")
     else:
@@ -1015,6 +1055,20 @@ def _run_monitor(
     action = arguments[0]
     rest = arguments[1:]
     try:
+        if action == "jobs":
+            if rest == ["--retry"]:
+                _wake_accounting(config_root, install_root, "monitor")
+                print("Pending Token Monitor jobs scheduled.")
+                return 0
+            if rest not in ([], ["--json"]):
+                raise CliError("monitor jobs accepts --json or --retry")
+            result = {"jobs": accounting_queue.status(config_root, "monitor"), "worker": accounting_worker.status(config_root)}
+            if rest == ["--json"]:
+                print(json.dumps(result, sort_keys=True))
+            else:
+                print("Token Monitor accounting worker: " + ("running" if result["worker"]["running"] else result["worker"]["state"]))
+                _print_accounting_jobs(result["jobs"])
+            return 0
         if action == "pricing":
             return _run_monitor_pricing(rest, config_root=config_root)
         if action == "provider":
@@ -1169,7 +1223,9 @@ def _run_monitor(
                 elif legacy_record is not None:
                     monitor.retire_registration(config_root, legacy_record.logical_id, disabled=True)
                 try:
-                    monitor.delete_device(connection, device_id)
+                    with accounting_grants.effects(config_root):
+                        accounting_grants.revoke(config_root, ["connection"])
+                        monitor.delete_device(connection, device_id)
                 except monitor.MonitorError as exc:
                     raise CliError(
                         "Token Monitor hub deletion failed; the local registration "
@@ -1379,6 +1435,7 @@ def _run_monitor(
             aggregate = monitor.load_aggregate_status(config_root) or {}
             device_count = len(aggregate.get("device_ids", [])) if isinstance(aggregate.get("device_ids"), list) else 1
             print(f"Synchronized {device_count} provider device(s) at {updated.last_success_at}")
+            _wake_accounting(config_root, install_root, "monitor")
             return 0
 
         if action == "add":
@@ -1406,6 +1463,7 @@ def _run_monitor(
             f"Synchronized {device_count} provider device(s) with "
             f"{len(updated)} project(s) at {updated[0].last_success_at}"
         )
+        _wake_accounting(config_root, install_root, "monitor")
         return 0
     except (CliError, config.ConfigError, PlanError, monitor.MonitorError, storage.StorageError, ValueError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1671,6 +1729,13 @@ def main(
             / "cage",
         )
     ).expanduser()
+    if len(arguments) == 3 and arguments[0] == "_accounting-drain":
+        try:
+            if not Path(arguments[1]).is_absolute() or not Path(arguments[2]).is_absolute():
+                raise monitor.MonitorError("accounting worker paths must be absolute")
+            return accounting_worker.drain(Path(arguments[1]), arguments[2], root)
+        except (OSError, ValueError, monitor.MonitorError):
+            return 1
     if len(arguments) == 2 and arguments[0] == "_oauth-broker":
         from .oauth_broker import serve
         return serve(Path(arguments[1]))

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from typing import Any
 from .. import storage
+from ..accounting import execution
 
 from . import accounting as accounting_api
 from . import constants as constants_api
@@ -432,6 +433,7 @@ def _run_collector(
     gid: int,
 ) -> dict[str, Any]:
     root = state_api.monitor_root(config_root)
+    execution.recover(config_root, docker, "monitor:" + record.logical_id)
     run_root = root / constants_api.RUN_DIR
     state_api._ensure_private_directory(run_root)
     state_path = snapshots_api._project_state_path(config_root, record)
@@ -515,7 +517,8 @@ def _run_collector(
     ]
     try:
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=constants_api.SCAN_TIMEOUT_SECONDS)
+            with execution.collector(config_root, docker, "monitor:" + record.logical_id, command, image) as owned:
+                result = subprocess.run(owned, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=constants_api.SCAN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
             raise errors_api.MonitorError("Token Monitor collector timed out") from exc
         except OSError as exc:

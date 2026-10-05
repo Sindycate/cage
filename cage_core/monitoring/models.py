@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import errors as errors_api
@@ -17,6 +17,7 @@ class MonitorConnection:
     secret: str
     interval_seconds: int = 300
     enabled: bool = True
+    epoch: str = field(default="", compare=False, repr=False)
 
 
 @dataclass(frozen=True)

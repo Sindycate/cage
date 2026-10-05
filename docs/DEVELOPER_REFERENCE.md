@@ -155,6 +155,17 @@ cage --mount-rw ~/scratch/output ~/path/to/repo
 
 ## Architecture
 
+`cage_core/accounting/` owns durable background work for Codex CLI container
+Token Monitor and PokeTokenBar accounting. `lifecycle.Producer` performs only
+short queue transactions; `worker` serializes delivery in an on-demand process.
+`store` supplies bounded private atomic files and kernel locks, `queue` owns
+revision/receipt transitions, `grants` fences revocation, `runtime` binds Docker
+and pins Python code, and `execution` owns exact collector attempts. `backends`
+adapts these records to the existing monitor and export services, without a
+serialized LaunchPlan or arbitrary command. Host/Desktop callers keep their
+existing lifecycle. Read [the worker contract](accounting-worker.md) before
+changing shutdown, recovery, admission or delivery behavior.
+
 The optional Codex CLI container accounting exporter lives in
 `cage_core/poketoken.py`; its bounded standalone collector and record allowlist
 live in `cage_core/poketoken_records.py`. `[defaults].poketoken` supplies the

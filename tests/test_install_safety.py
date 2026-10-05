@@ -14,7 +14,7 @@ CAGE = ROOT / "cage"
 SYSTEM_BASH = "/bin/bash"
 REFACTORED_CORE_MODULES = tuple(
     path.relative_to(ROOT / "cage_core").as_posix()
-    for package in ("configuration", "monitoring")
+    for package in ("configuration", "monitoring", "accounting")
     for path in sorted((ROOT / "cage_core" / package).rglob("*.py"))
 ) + ("poketoken.py", "poketoken_records.py")
 

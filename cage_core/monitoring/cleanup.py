@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import shutil
 import stat
+from ..accounting import execution
 
 from . import constants as constants_api
 from . import errors as errors_api
 from . import identity as identity_api
+from . import locks as locks_api
 from . import state as state_api
 from . import validation as validation_api
 
@@ -69,4 +71,6 @@ def remove_project_state(config_root: Path, logical_id: str) -> None:
     validation_api.validate_logical_id(logical_id)
     projects = state_api.monitor_root(config_root) / constants_api.PROJECT_DIR
     state_api._ensure_private_directory(projects)
-    state_api._remove_owned_directory(projects / identity_api.project_id_for(config_root, logical_id), description="monitor project state")
+    with locks_api._wait_for_volume_lock(config_root, logical_id):
+        execution.recover(config_root, None, "monitor:" + logical_id)
+        state_api._remove_owned_directory(projects / identity_api.project_id_for(config_root, logical_id), description="monitor project state")

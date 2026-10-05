@@ -212,8 +212,10 @@ differ. PokeTokenBar establishes its own growth baseline, so importing old
 usage does not promise retroactive rewards. Official account-limit rewards are
 separate from this token feed.
 
-Errors are retained in `cage poketoken status` and warned after the coding
-session exits. Invalid records, symlinks, oversized sources, changed volume
+Exports run in Cage's on-demand accounting process. Closing the CLI records a
+durable final request and returns without waiting for the export. Completion
+and failures remain visible in `cage poketoken status`; a failed handoff prints
+a warning after the session exits. Invalid records, symlinks, oversized sources, changed volume
 identities, or rewritten accounting history fail closed and preserve the
 last good files. Limits are 20,000 rollouts, 512 MiB per rollout, 16 MiB per
 line, 2 GiB of source data and 64 MiB of accounting output per scan. The
@@ -222,8 +224,12 @@ export deliberately retains history when a source file disappears.
 Choose **Off** in Launch defaults to stop inherited exports, and disable any
 explicit preset **On** overrides separately. For just one launch/preset,
 choose **Off** in Customize launch. Removing a preset's setting restores
-inheritance; it does not disable an enabled global default. Finish existing Cage
-sessions to stop their exporters. Removing the scan folder from PokeTokenBar
+inheritance; it does not disable an enabled global default. Use
+`cage poketoken cancel-pending` to revoke already-admitted exports, including
+requests from currently open CLI producers. A later opted-in launch can admit
+new work. `cage poketoken retry` retries retained work without restoring revoked
+permission; `sync PATH` remains a synchronous explicit refresh.
+Removing the scan folder from PokeTokenBar
 stops it reading retained data; disabling export does not erase history. Keep
 the private `poketoken/identity` file: replacing it changes pseudonyms and can
 cause downstream usage to be counted again.
@@ -415,10 +421,34 @@ cache-write events with the parser's exact per-model totals and reclassifies
 writes from ordinary input without changing token counts. Legacy summaries
 without sufficient source evidence remain incomplete.
 
-During an interactive session, background monitor failures stay in
-`cage monitor status` so they cannot overwrite Codex's prompt. The status shows
-recorded scan errors and the underlying upload-repair cause. Redirected logs
-still receive warnings; final scan failures print after the session exits.
+For Codex CLI containers, initial, periodic and final accounting run in one
+on-demand host process shared by the Cage configuration directory. Exit only
+commits a small final request; Docker collection and hub delivery can finish
+after the shell prompt returns. Source history remains read-only. Host and
+Desktop targets retain synchronous final accounting.
+
+`cage monitor jobs` shows queue revisions and worker ownership without contacting
+Docker or the hub; add `--json` for machine-readable output. `collected` means
+local collection finished, while `delivered` identifies a completed provider
+generation. A busy coordinator or failed upload leaves delivery pending. The
+existing `cage monitor status` also includes jobs, scan errors and upload repair.
+Interactive background errors do not overwrite Codex's prompt. A failed durable
+handoff warns at exit; it does not replace Codex's exit code.
+
+Jobs survive process failure and reboot. An eligible launch wakes retained work;
+`cage monitor jobs --retry` retries it explicitly, and `cage monitor sync` still
+waits for a full reconciliation before waking pending work. Automatic retries
+back off and eventually stop at `blocked`. No login service is installed, so
+work left after reboot resumes on the next wake rather than immediately at login.
+Disconnect, source disable/adoption and device forget revoke old permissions;
+reconnecting with the same credentials does not revive old jobs. If an interrupted
+upload belongs to revoked authority, `cage monitor sync` reconciles the currently
+authorized sources instead of replaying old payloads.
+
+These changes apply to newly launched Cage processes. Already-open sessions keep
+their loaded code and older lifecycle rules. See the
+[background accounting contract](docs/accounting-worker.md) for recovery,
+compatibility and measurement details.
 
 `monitor status` shows today/month/all-time price coverage and distinguishes
 missing rates, missing model components, unreconciled cache writes and unknown

@@ -17,6 +17,80 @@ from monitor_test_support import FINGERPRINT, MonitorTestCase
 
 
 class MonitorPublicationTests(MonitorTestCase):
+    def test_revoked_source_repair_requires_explicit_full_sync(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            connection, payloads, previous = self._published_fixture(root)
+            with patch.object(hub_api, "upload_summary", side_effect=monitor.MonitorError("fixture unavailable")):
+                with self.assertRaises(monitor.MonitorError):
+                    publication_api._publish_provider_payloads(root, connection, payloads, previous, previous)
+            self.assertIsNotNone(publication_api.load_upload_state(root))
+            records = monitor.load_registry(root)
+            monitor.retire_registration(root, records[0].logical_id, disabled=True)
+            monitor.save_registry(root, records)  # same fingerprint, new authorization
+            with patch.object(hub_api, "upload_summary") as upload:
+                with self.assertRaisesRegex(monitor.MonitorError, "changed sources"):
+                    publication_api._publish_provider_payloads(root, connection, payloads, previous, previous)
+                upload.assert_not_called()
+                publication_api._publish_provider_payloads(root, connection, payloads, previous, previous, replace_revoked=True)
+                upload.assert_called_once()
+            self.assertIsNone(publication_api.load_upload_state(root))
+
+    def test_reconnect_same_credentials_does_not_repair_previous_connection(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            connection, payloads, status = self._published_fixture(root)
+            monitor.save_connection(root, connection)
+            old = monitor.load_connection(root)
+            with patch.object(hub_api, "upload_summary"):
+                previous = publication_api._publish_provider_payloads(root, old, payloads, status, status)
+            with patch.object(hub_api, "upload_summary", side_effect=monitor.MonitorError("fixture unavailable")):
+                with self.assertRaises(monitor.MonitorError):
+                    publication_api._publish_provider_payloads(root, old, payloads, previous, previous)
+            monitor.disable_connection(root)
+            monitor.save_connection(root, old)
+            new = monitor.load_connection(root)
+            with patch.object(hub_api, "upload_summary") as upload:
+                with self.assertRaisesRegex(monitor.MonitorError, "previous connection"):
+                    publication_api._publish_provider_payloads(root, new, payloads, status, previous)
+                upload.assert_not_called()
+
+    def test_crash_after_superseding_journal_cannot_restore_old_baseline(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            connection, payloads, status = self._published_fixture(root)
+            monitor.save_connection(root, connection)
+            old = monitor.load_connection(root)
+            with patch.object(hub_api, "upload_summary"):
+                previous = publication_api._publish_provider_payloads(root, old, payloads, status, status)
+            with patch.object(hub_api, "upload_summary", side_effect=monitor.MonitorError("fixture unavailable")):
+                with self.assertRaises(monitor.MonitorError):
+                    publication_api._publish_provider_payloads(root, old, payloads, previous, previous)
+            monitor.save_connection(root, old)
+            new = monitor.load_connection(root)
+            with patch.object(publication_api, "_publish_provider_payloads_owned", side_effect=OSError("fixture crash")):
+                with self.assertRaises(OSError):
+                    publication_api._publish_provider_payloads(root, new, payloads, status, previous, replace_revoked=True)
+            self.assertTrue((root / "monitor" / "superseded-upload.json").exists())
+            self.assertIsNone(publication_api.load_upload_state(root))
+            with patch.object(hub_api, "upload_summary", side_effect=monitor.MonitorError("fixture unavailable")) as upload:
+                with self.assertRaises(monitor.MonitorError):
+                    publication_api._publish_provider_payloads(root, new, payloads, status, previous)
+            upload.assert_called_once()  # no old-generation rollback POST
+            self.assertEqual(publication_api.load_upload_state(root)["previous_generation"], "")
+
+    def test_old_fields_with_new_epoch_cannot_cross_a_connection_update(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            connection, payloads, status = self._published_fixture(root)
+            monitor.save_connection(root, monitor.MonitorConnection(connection.hub_url, "new-synthetic-secret"))
+            current = monitor.load_connection(root)
+            raced = monitor.MonitorConnection(connection.hub_url, connection.secret, epoch=current.epoch)
+            with patch.object(hub_api, "upload_summary") as upload:
+                with self.assertRaisesRegex(monitor.MonitorError, "connection changed"):
+                    publication_api._publish_provider_payloads(root, raced, payloads, status, status)
+            upload.assert_not_called()
+
     @staticmethod
     def _five_provider_totals():
         return {"openai-api": 5, "openai-compatible": 6, "zllm": 8,

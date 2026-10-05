@@ -44,6 +44,7 @@ class MonitorServiceTests(MonitorTestCase):
     def _published_scan_fixture(self, root, *, provider="openai"):
         connection = monitor.MonitorConnection("https://hub.example", "secret")
         monitor.save_connection(root, connection)
+        connection = monitor.load_connection(root)
         records = self._registered_monitor_projects(root, "current", "peer")
         payloads = {
             item.logical_id: self._summary(

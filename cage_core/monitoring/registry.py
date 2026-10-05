@@ -8,6 +8,7 @@ import stat
 import subprocess
 from dataclasses import replace
 from typing import Any
+from ..accounting import execution, grants
 
 from . import constants as constants_api
 from . import errors as errors_api
@@ -146,13 +147,11 @@ def save_registry(config_root: Path, registrations: list[models_api.VolumeRegist
         if validated.legacy_device_id:
             legacy_ids.add(validated.legacy_device_id)
         serialized.append(value)
-    state_api._write_json(
-        _registry_path(state_api.monitor_root(config_root)),
-        {
-            "version": constants_api.REGISTRY_VERSION,
-            "registrations": serialized,
-        },
-    )
+    path = _registry_path(state_api.monitor_root(config_root))
+    previous = state_api._read_json(path, max_bytes=constants_api.MAX_REGISTRY_BYTES)
+    old = previous.get("registrations", []) if isinstance(previous, dict) else []
+    with grants.registry_change(config_root, old, serialized):
+        state_api._write_json(path, {"version": constants_api.REGISTRY_VERSION, "registrations": serialized})
 
 
 def _recovered_registration_for_launch(
@@ -475,7 +474,7 @@ def update_registration(config_root: Path, record: models_api.VolumeRegistration
     validation_api.validate_volume_name(record.volume_name)
     validation_api.validate_display_name(record.display_name)
     validation_api.validate_fingerprint(record.fingerprint)
-    with locks_api._registry_write_lock(config_root):
+    with locks_api._registry_write_lock(config_root), execution.commit(config_root):
         registrations = load_registry(config_root)
         if not any(item.logical_id == record.logical_id for item in registrations):
             raise errors_api.MonitorError("monitor registration disappeared")
@@ -509,7 +508,7 @@ def _record_scan_error(config_root: Path, record: models_api.VolumeRegistration,
     """Best-effort status bookkeeping that never masks the scan failure."""
 
     try:
-        with locks_api._registry_write_lock(config_root):
+        with locks_api._registry_write_lock(config_root), execution.commit(config_root):
             registrations = load_registry(config_root)
             current = next(
                 (item for item in registrations if item.logical_id == record.logical_id),

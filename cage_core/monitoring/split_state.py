@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 from typing import Any
+from ..accounting import execution
 
 from . import constants as constants_api
 from . import errors as errors_api
@@ -17,6 +18,11 @@ from . import validation as validation_api
 
 
 def save_split_status(config_root: Path, value: dict[str, Any]) -> None:
+    with execution.commit(config_root):
+        _save_split_status(config_root, value)
+
+
+def _save_split_status(config_root: Path, value: dict[str, Any]) -> None:
     if not isinstance(value, dict) or type(value.get("complete")) is not bool:
         raise errors_api.MonitorError("monitor provider split status is invalid")
     device_ids = value.get("device_ids", [])

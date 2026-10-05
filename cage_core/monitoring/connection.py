@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from ..accounting import grants
 
 from . import constants as constants_api
 from . import errors as errors_api
@@ -37,10 +38,14 @@ def load_connection(config_root: Path) -> models_api.MonitorConnection | None:
         secret=value["secret"],
         interval_seconds=validation_api.validate_interval(value["interval_seconds"]),
         enabled=value["enabled"],
+        epoch=grants.ensure(config_root, "connection"),
     )
 
 
 def save_connection(config_root: Path, connection: models_api.MonitorConnection) -> None:
+    # Validate before rotating an existing permission generation.
+    validation_api.normalize_hub_url(connection.hub_url)
+    validation_api.validate_interval(connection.interval_seconds)
     if (
         not isinstance(connection.secret, str)
         or not connection.secret
@@ -48,19 +53,29 @@ def save_connection(config_root: Path, connection: models_api.MonitorConnection)
         or any(character in connection.secret for character in "\x00\r\n")
     ):
         raise errors_api.MonitorError("monitor connection secret is invalid")
-    state_api._write_json(
-        _connection_path(state_api.monitor_root(config_root)),
-        {
-            "version": constants_api.STATE_VERSION,
-            "hub_url": validation_api.normalize_hub_url(connection.hub_url),
-            "secret": connection.secret,
-            "interval_seconds": validation_api.validate_interval(connection.interval_seconds),
-            "enabled": bool(connection.enabled),
-        },
-    )
+    state_api._ensure_private_directory(state_api.monitor_root(config_root))
+    with grants.effects(config_root):
+        grants.revoke(config_root, ["connection"])
+        state_api._write_json(
+            _connection_path(state_api.monitor_root(config_root)),
+            {
+                "version": constants_api.STATE_VERSION,
+                "hub_url": validation_api.normalize_hub_url(connection.hub_url),
+                "secret": connection.secret,
+                "interval_seconds": validation_api.validate_interval(connection.interval_seconds),
+                "enabled": bool(connection.enabled),
+            },
+        )
 
 
 def disable_connection(config_root: Path) -> None:
+    state_api._ensure_private_directory(state_api.monitor_root(config_root))
+    with grants.effects(config_root):
+        grants.revoke(config_root, ["connection"])
+        _disable_connection(config_root)
+
+
+def _disable_connection(config_root: Path) -> None:
     root = state_api.monitor_root(config_root)
     state_api._ensure_private_directory(root)
     path = _connection_path(root)

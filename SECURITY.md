@@ -330,6 +330,44 @@ host ChatGPT application itself into a containerized process. The repository,
 explicit read-write mounts, selected credentials, MCP/host-command bridges,
 and external connector actions retain their documented authority.
 
+## Background accounting ownership
+
+Codex CLI container accounting can outlive the foreground session. The host
+keeps a bounded, mode-0600 queue under the private mode-0700 `accounting/`
+directory. Jobs contain fixed backend inputs, a source fingerprint, a Docker
+engine/context binding and revocable permission generations. They contain no
+hub secret, executable command, full launch plan or conversation content. The
+worker reads current host-owned credentials only after checking permission.
+It executes an immutable private copy of Cage's Python helpers in isolated
+Python mode, with no inherited terminal descriptors. No login daemon is installed.
+
+One kernel lifetime lock owns processing for a configuration directory. Small
+queue transactions never wait for collector or HTTP locks. Completed collection
+and completed delivery are distinct receipts; an older revision cannot
+acknowledge a newer final request. Host effects share a revocation fence with
+disconnect and source mutations. Old epochs stay invalid after reconnect or
+re-adoption, even when credentials or fingerprints return to the same values.
+Interrupted publication records bind both connection and source authority;
+reconciliation under new authority requires an explicit full sync. A forget
+can wait for an owned collector before removing its exact private cache.
+
+Before starting a collector, the worker records its random name/nonce, job,
+engine, immutable image, requested mounts and returned container ID. Recovery
+holds the source lock and stops only a matching owned collector before reusing
+its cache. An uncertain create is retained for later reconciliation; because
+create and start are separate, that late stopped container cannot write cache.
+No PID guessing, session interruption or broad Docker cleanup is used.
+Source mounts, collector network/resource restrictions, sanitization,
+pseudonyms, provider rules and publication repair remain in their existing
+implementations. Container-generated queue input is not accepted as authority.
+
+This fence protects processes running the new implementation. Older already-open
+processes do not know these epochs and keep their original synchronous behavior;
+they cannot acquire the new guarantees retroactively. A user or process with
+the same host privileges, control of Docker, or an explicit writable mount over
+Cage's private state remains outside this protection. See the
+[worker contract](docs/accounting-worker.md) for retention and recovery limits.
+
 ## Optional PokeTokenBar export
 
 PokeTokenBar export is a Codex CLI container capability, off by default and
@@ -368,8 +406,11 @@ by a process that can modify its own session logs. PokeTokenBar runs on the host
 and remains separately trusted; Cage does not control its networking or data
 handling. The export is not a sandbox for hostile code. Disabling the applicable
 default or preset setting takes effect for subsequent launches; explicit preset
-opt-ins remain enabled when the global default is off. Finish existing sessions
-to stop their collectors. Retained exports are not deleted automatically.
+opt-ins remain enabled when the global default is off. `cage poketoken
+cancel-pending` revokes exports already admitted by this implementation, including
+those from open producers; later opted-in launches can admit new work. Existing
+older processes keep their loaded behavior. Retained exports are not deleted
+automatically.
 
 ## Writable repository state
 

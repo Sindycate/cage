@@ -3,7 +3,16 @@
 All notable Cage changes are recorded here. Breaking or recovery-sensitive
 details live in the linked migration guide.
 
-## Unreleased
+## 0.38.12 — 2026-10-05
+
+- defer accounting for Codex CLI containers through a durable queue: commit final
+  Token Monitor and PokeTokenBar requests at exit, then finish collection and
+  delivery in an on-demand process; preserve primary exit status;
+- bind queued work and upload repair to source/connection permission epochs,
+  exact Docker identities and pinned Python helpers; recover only owned
+  collectors before cache reuse;
+- expose local queue/worker status and explicit retry/cancel commands, while
+  preserving synchronous manual sync and host/Desktop final accounting.
 
 ## 0.38.11 — 2026-10-02
 

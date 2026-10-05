@@ -95,7 +95,7 @@ def test_stop_request_preserves_admitted_work_without_waiting_for_it(kind):
             closer.join(2)
 
 
-def test_both_container_schedules_stop_before_a_blocked_final_export(tmp_path, monkeypatch):
+def test_legacy_schedules_stop_before_a_blocked_final_export(tmp_path, monkeypatch):
     """A slow first cleanup cannot leave the other timer free to tick."""
     lifecycle = LifecycleCoordinator()
     runtime = SimpleNamespace(
@@ -143,8 +143,10 @@ def test_both_container_schedules_stop_before_a_blocked_final_export(tmp_path, m
         patch.object(poketoken, "ActiveExport", side_effect=construct_export),
     ):
         with patch.object(threading.Thread, "start"):
-            container._start_codex_monitor(runtime)
-            container._start_poketoken_export(runtime)
+            runtime.monitor_worker = monitor.ActiveMonitor(lambda force: monitor_scan(final=force), 300)
+            lifecycle.register("legacy monitor", runtime.monitor_worker.stop, quiesce=runtime.monitor_worker.request_stop)
+            export = poketoken.ActiveExport(export_scan)
+            lifecycle.register("legacy export", export.stop, quiesce=export.request_stop)
         token = runtime.monitor_worker
         export = holder["export"]
         token._interval = 0.01

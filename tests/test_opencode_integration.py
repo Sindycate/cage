@@ -188,11 +188,13 @@ class OpenCodeConfigTests(unittest.TestCase):
             )
             with patch.object(
                 container_target.monitor, "load_connection", return_value=connection
-            ), patch.object(container_target.monitor, "ActiveMonitor") as worker:
+            ), patch.object(container_target, "_prepare_accounting"), patch.object(
+                container_target.accounting_backends, "monitor_source", return_value=({}, {})
+            ), patch.object(container_target.accounting_lifecycle, "Producer") as worker:
                 container_target._start_codex_monitor(runtime)
 
             worker.assert_called_once()
-            self.assertEqual(worker.call_args.args[1], 60)
+            self.assertEqual(worker.call_args.args[-1], 60)
 
     def test_callback_ports_are_fixed_scoped_and_readiness_checked(self):
         with tempfile.TemporaryDirectory() as raw:

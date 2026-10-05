@@ -218,18 +218,28 @@ def test_disabled_plan_cannot_export_or_start_worker(prepared):
     worker.assert_not_called()
 
 
-def test_worker_is_registered_and_final_scan_runs(prepared):
+def test_producer_is_registered_and_final_request_is_durable(prepared):
+    from cage_core.accounting import grants, queue, worker
     root, launch = prepared
     lifecycle = LifecycleCoordinator()
-    runtime = SimpleNamespace(plan=launch.plan, config_root=root, docker="docker", install_root=ROOT, lifecycle=lifecycle)
-    initial_scan = threading.Event()
-    with patch.object(poketoken, "sync", side_effect=lambda *args: initial_scan.set()) as sync:
+    runtime = SimpleNamespace(plan=launch.plan, config_root=root, docker="docker", install_root=ROOT, lifecycle=lifecycle,
+                              accounting_transport={}, accounting_runtime=ROOT)
+    permissions = {"poke": grants.ensure(root, "poke")}
+    initial = threading.Event()
+    with (
+        patch.object(container.accounting_backends, "poke_source", return_value=({"backend": "poke"}, permissions)),
+        patch.object(worker, "wake", side_effect=lambda *args: initial.set()),
+        patch.object(poketoken, "sync") as sync,
+    ):
         container._start_poketoken_export(runtime)
-        assert initial_scan.wait(1)
-        assert lifecycle.cleanup() == 0
-        assert sync.call_count == 2
+        assert initial.wait(1)
+        assert lifecycle.cleanup(17) == 17
+        job = queue.jobs(root)[0]
+        assert job["requested"] == job["final"] == 2
+        assert job["delivered"] == 0
         lifecycle.cleanup()
-        assert sync.call_count == 2
+        assert queue.jobs(root)[0] == job
+        sync.assert_not_called()
 
 
 def test_periodic_worker_retries_and_reports_final_errors(monkeypatch, capsys):

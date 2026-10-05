@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import hmac
@@ -22,6 +23,7 @@ from . import poketoken_records as records
 from .models import LaunchPlan
 from .monitoring import collector, volumes
 from .monitoring.errors import MonitorError
+from .accounting import execution, grants, queue
 
 
 INTERVAL_SECONDS = 300
@@ -31,6 +33,13 @@ CAPABILITY = "poketoken-local-export"
 
 class ExportError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ExportSource:
+    volume_name: str
+    image: str
+    fingerprint: dict[str, str] | None = None
 
 
 def export_path(config_root: Path) -> Path:
@@ -96,13 +105,16 @@ def _write(fd: int, name: str, data: bytes) -> None:
 
 
 @contextmanager
-def _store(config_root: Path):
+def _store(config_root: Path, *, exclusive: bool = True):
     base = os.open(config_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         info = os.fstat(base)
         if info.st_uid != os.getuid() or info.st_mode & 0o022:
             raise ExportError("unsafe Cage configuration directory")
         with _directory(base, "poketoken") as root:
+            if not exclusive:
+                yield root
+                return
             lock = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=root)
             try:
                 _check_file(lock, 0)
@@ -136,7 +148,7 @@ def _key(root: int) -> bytes:
     return value
 
 
-def _collect(docker: str, plan: LaunchPlan, install_root: Path) -> bytes:
+def _collect(docker: str, plan: LaunchPlan | ExportSource, install_root: Path, *, config_root: Path | None = None) -> bytes:
     mounts = []
     roots = []
     for subpath in ("sessions", "archived_sessions"):
@@ -160,17 +172,22 @@ def _collect(docker: str, plan: LaunchPlan, install_root: Path) -> bytes:
     script = (install_root / "cage_core" / "poketoken_records.py").read_bytes()
     with tempfile.TemporaryFile() as output:
         try:
-            result = subprocess.run(
-                command, input=script, stdout=output, stderr=subprocess.DEVNULL,
-                timeout=COLLECT_TIMEOUT, check=False,
-            )
+            from contextlib import nullcontext
+            ownership = (execution.collector(config_root, docker, "poke:" + plan.volume_name, command, plan.image)
+                         if config_root is not None else nullcontext(command))
+            with ownership as owned:
+                result = subprocess.run(
+                    owned, input=script, stdout=output, stderr=subprocess.DEVNULL,
+                    timeout=COLLECT_TIMEOUT, check=False,
+                )
         except subprocess.TimeoutExpired as exc:
             # A terminated Docker client does not necessarily stop its container.
-            subprocess.run(
-                [docker, "rm", "-f", name], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=30, check=False,
-            )
+            if not execution.active():
+                subprocess.run(
+                    [docker, "rm", "-f", name], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=False,
+                )
             raise ExportError("PokeTokenBar collection timed out") from exc
         if result.returncode:
             raise ExportError("PokeTokenBar collection failed; source may be invalid, unsafe, or oversized")
@@ -227,21 +244,30 @@ def _require_plan(plan: LaunchPlan) -> None:
 
 def sync(config_root: Path, docker: str, install_root: Path, plan: LaunchPlan) -> Path:
     _require_plan(plan)
+    return sync_source(config_root, docker, install_root, ExportSource(plan.volume_name, plan.image))
+
+
+def sync_source(config_root: Path, docker: str, install_root: Path, plan: ExportSource, *, on_collected=None) -> Path:
     try:
         with _store(config_root) as root:
+            execution.recover(config_root, docker, "poke:" + plan.volume_name)
             key = _key(root)
             source = _opaque(key, "volume", plan.volume_name)
             status_name = "status-" + source + ".json"
             try:
                 before = volumes.volume_fingerprint(docker, plan.volume_name)
+                if plan.fingerprint is not None and plan.fingerprint != before:
+                    raise ExportError("queued Codex volume identity changed")
                 identity = records.encode(before)
                 previous = _read(root, "volume-" + source, 4096)
                 if previous is not None and previous != identity:
                     raise ExportError("Codex volume was replaced; refusing to mix export histories")
-                files = _prepare(_collect(docker, plan, install_root), key)
+                files = _prepare(_collect(docker, plan, install_root, config_root=config_root), key)
                 if volumes.volume_fingerprint(docker, plan.volume_name) != before:
                     raise ExportError("Codex volume changed during collection")
-                with _directory(root, "exports") as exports, _directory(exports, source) as destination:
+                if on_collected is not None:
+                    on_collected(grants.digest({name: hashlib.sha256(data).hexdigest() for name, data in files.items()}))
+                with execution.commit(config_root), _directory(root, "exports") as exports, _directory(exports, source) as destination:
                     # Validate every retained destination before making any updates.
                     for name, content in files.items():
                         old = _read(destination, name, records.MAX_OUTPUT)
@@ -249,9 +275,9 @@ def sync(config_root: Path, docker: str, install_root: Path, plan: LaunchPlan) -
                             raise ExportError("Codex accounting history changed or shrank; retaining the last good export")
                     for name, content in files.items():
                         _write(destination, name, content)
-                _write(root, "volume-" + source, identity)
-                result = {"source": source, "updated_at": datetime.now(timezone.utc).isoformat(), "files": len(files), "error": None}
-                _write(root, status_name, records.encode(result))
+                    _write(root, "volume-" + source, identity)
+                    result = {"source": source, "updated_at": datetime.now(timezone.utc).isoformat(), "files": len(files), "error": None}
+                    _write(root, status_name, records.encode(result))
             except (ExportError, MonitorError, OSError, ValueError, RecursionError, subprocess.SubprocessError) as exc:
                 message = str(exc) if isinstance(exc, ExportError) else "PokeTokenBar export failed validation or source access"
                 _write(root, status_name, records.encode({"source": source, "error": message}))
@@ -262,17 +288,18 @@ def sync(config_root: Path, docker: str, install_root: Path, plan: LaunchPlan) -
 
 
 def status(config_root: Path) -> dict:
+    pending = queue.status(config_root, "poke")
     if not (config_root / "poketoken").exists():
-        return {"path": str(export_path(config_root)), "sources": []}
+        return {"path": str(export_path(config_root)), "sources": [], "jobs": pending}
     try:
-        with _store(config_root) as root:
+        with _store(config_root, exclusive=False) as root:
             sources = []
             for name in sorted(os.listdir(root)):
                 if name.startswith("status-") and name.endswith(".json"):
                     value = _read(root, name, 4096)
                     if value is not None:
                         sources.append(json.loads(value))
-            return {"path": str(export_path(config_root)), "sources": sources}
+            return {"path": str(export_path(config_root)), "sources": sources, "jobs": pending}
     except (OSError, ValueError) as exc:
         raise ExportError("cannot read private PokeTokenBar status") from exc
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
+from ..accounting import execution
 
 from . import accounting as accounting_api
 from . import aggregation as aggregation_api
@@ -91,6 +92,7 @@ def _collect_current_registration(
     """Refresh exactly one volume and return payload/content/metadata changes."""
 
     with locks_api._wait_for_volume_lock(config_root, record.logical_id):
+        execution.recover(config_root, docker, "monitor:" + record.logical_id)
         _checked_volume_fingerprint(config_root, docker, record)
         previous, previous_metadata_changed = snapshots_api._load_trusted_volume_snapshot(
             config_root, record
@@ -265,6 +267,7 @@ def _collect_registered_summaries(
     result: list[tuple[models_api.VolumeRegistration, dict[str, Any]]] = []
     for record in active:
         with locks_api._wait_for_volume_lock(config_root, record.logical_id):
+            execution.recover(config_root, docker, "monitor:" + record.logical_id)
             _checked_volume_fingerprint(config_root, docker, record)
             payload = overrides.get(record.logical_id)
             if payload is None:
@@ -401,13 +404,17 @@ def _mark_scan_success(
     active: list[models_api.VolumeRegistration],
     success_at: str,
 ) -> list[models_api.VolumeRegistration]:
-    active_ids = {item.logical_id for item in active}
-    with locks_api._registry_write_lock(config_root):
+    expected = {item.logical_id: item for item in active}
+    active_ids = set(expected)
+    with locks_api._registry_write_lock(config_root), execution.commit(config_root):
         current = registry_api.load_registry(config_root)
+        for item in current:
+            old = expected.get(item.logical_id)
+            if old is not None and (item.status, item.target, item.volume_name, item.fingerprint) != ("active", old.target, old.volume_name, old.fingerprint):
+                raise errors_api.MonitorError("monitor source changed before scan completion")
         updated_all = [
             replace(
                 item,
-                status="active",
                 last_scan_at=success_at,
                 last_success_at=success_at,
                 last_error="",
@@ -559,6 +566,7 @@ def scan_all_registrations(
                     split_payloads,
                     status,
                     previous_status,
+                    replace_revoked=force and not migration,
                 )
                 if not migration:
                     split_state_api._mark_split_complete(config_root, status)
@@ -590,7 +598,29 @@ def scan_all_registrations(
                 raise errors_api.MonitorError("Token Monitor full reconciliation failed") from exc
 
 
-def scan_registration(
+@dataclass(frozen=True)
+class ScanWork:
+    """A durable caller's receipt; never a permission to discover new sources."""
+
+    on_collected: Callable[[str], None]
+    reuse_snapshot: str = ""
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    record: models_api.VolumeRegistration
+    status: dict[str, Any]
+    delivered: bool
+    reason: str = ""
+
+
+def scan_registration(*args, **kwargs) -> tuple[models_api.VolumeRegistration, dict[str, Any]]:
+    """Compatibility API for synchronous host/Desktop and explicit callers."""
+    result = scan_registration_outcome(*args, **kwargs)
+    return result.record, result.status
+
+
+def scan_registration_outcome(
     config_root: Path,
     docker: str,
     install_root: Path,
@@ -603,14 +633,17 @@ def scan_registration(
     gid: int | None = None,
     force: bool = False,
     final: bool = False,
-) -> tuple[models_api.VolumeRegistration, dict[str, Any]]:
+    work: ScanWork | None = None,
+) -> ScanOutcome:
     """Refresh one current volume, then merge it with trusted cached volumes.
 
-    A final lifecycle refresh is deliberately current-volume-only: it may
+    A synchronous final lifecycle refresh is current-volume-only: it may
     publish already-trusted peer snapshots and reread a stale reporting-period
     peer, but it never starts the bounded host-wide safety reconciliation or
     collects a peer with no snapshot. It always freshly collects the current
     source, while publication can reuse an equivalent last-good generation.
+    Durable callers can fill missing peer snapshots off the foreground path
+    and receive an explicit delivery receipt instead of an ambiguous status.
     """
 
     connection = connection_api.load_connection(config_root)
@@ -623,11 +656,17 @@ def scan_registration(
     )
     if current is None or current.status != "active":
         raise errors_api.MonitorError("monitor project is not active")
+    if work is not None and (current.target, current.volume_name, current.fingerprint) != (record.target, record.volume_name, record.fingerprint):
+        raise errors_api.MonitorError("queued monitor source identity changed")
     try:
         if providers_api.provider_label_migration_pending(config_root):
             raise errors_api.MonitorError(
                 "provider label migration is pending; run cage monitor provider status"
             )
+        reuse = False
+        if work is not None and work.reuse_snapshot:
+            cached, _ = snapshots_api._load_trusted_volume_snapshot(config_root, current)
+            reuse = cached is not None and snapshots_api._summary_content_hash(cached) == work.reuse_snapshot
         refreshed, current_payload, content_changed, metadata_changed = _collect_current_registration(
             config_root,
             docker,
@@ -639,8 +678,10 @@ def scan_registration(
             uid=uid,
             gid=gid,
             interval_seconds=connection.interval_seconds,
-            force=force or final,
+            force=(force or final) and not reuse,
         )
+        if work is not None:
+            work.on_collected(snapshots_api._summary_content_hash(current_payload))
     except Exception as exc:
         safe_error = registry_api._scan_error_for_records(config_root, [current], str(exc))
         registry_api._record_scan_error(config_root, current, safe_error)
@@ -652,10 +693,10 @@ def scan_registration(
 
     with scheduler_api.try_coordinator_lease(config_root) as coordinator:
         if not coordinator:
-            return refreshed, snapshots_api.load_aggregate_status(config_root) or {}
+            return ScanOutcome(refreshed, snapshots_api.load_aggregate_status(config_root) or {}, False, "coordinator_busy")
         with locks_api.try_aggregate_lock(config_root) as acquired:
             if not acquired:
-                return refreshed, snapshots_api.load_aggregate_status(config_root) or {}
+                return ScanOutcome(refreshed, snapshots_api.load_aggregate_status(config_root) or {}, False, "aggregate_busy")
             active = [refreshed]
             full_due = False
             try:
@@ -686,12 +727,12 @@ def scan_registration(
                     if cached is None:
                         cache_complete = False
                         break
-                if final and not cache_complete:
+                if final and not cache_complete and work is None:
                     # The current volume is safely refreshed above.  Do not turn
                     # process shutdown into an all-volume scan merely because a
                     # peer has no local snapshot yet; a future coordinator owner
                     # can reconcile that peer normally.
-                    return refreshed, previous_status or {}
+                    return ScanOutcome(refreshed, previous_status or {}, False, "peer_snapshot_missing")
                 scheduler = scheduler_api.load_scheduler_state(config_root)
                 now = time.time()
                 full_due = (
@@ -751,7 +792,8 @@ def scan_registration(
                         reference_payload=current_payload,
                     )
                 should_publish = bool(
-                    final
+                    work is not None
+                    or final
                     or force
                     or full_due
                     or content_changed
@@ -762,7 +804,7 @@ def scan_registration(
                     or publication_api.load_upload_state(config_root) is not None
                 )
                 if not should_publish:
-                    return refreshed, previous_status or {}
+                    return ScanOutcome(refreshed, previous_status or {}, False, "unchanged_cached_aggregate")
                 split_payloads, status = aggregation_api.aggregate_provider_summaries(config_root, summaries)
                 _add_previous_provider_payloads(
                     config_root,
@@ -778,7 +820,7 @@ def scan_registration(
                     split_payloads,
                     status,
                     previous_status,
-                    skip_unchanged=final,
+                    skip_unchanged=final or (work is not None and not full_due),
                 )
                 split_state_api._mark_split_complete(config_root, status)
                 updated_all = _mark_scan_success(config_root, active, state_api._now())
@@ -796,7 +838,7 @@ def scan_registration(
                         generation=generation,
                         now=time.time(),
                     )
-                return result, status
+                return ScanOutcome(result, status, True)
             except Exception as exc:
                 safe_error = registry_api._scan_error_for_records(config_root, active, str(exc))
                 if full_due:

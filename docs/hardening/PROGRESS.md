@@ -3,6 +3,91 @@
 This is the durable execution log for `WORKFLOW.md`. Keep entries concise and
 evidence-based. Newest entries go first.
 
+## 2026-10-05 — v0.38.12 background accounting release candidate
+
+Promote the prepared Codex CLI container accounting implementation to version
+0.38.12 after explicit release authorization. Initial, periodic and final work
+uses the durable queue; closing waits for the final metadata commit while the
+detached owner completes collection and delivery. Source/connection epochs,
+exact Docker attempt recovery, revision receipts and manual synchronous sync
+preserve accounting authority and recovery contracts. Host/Desktop retain
+their existing final lifecycle.
+
+Before publication, a local candidate installation matched all 115 source
+files and preserved existing configuration/state content. The 35 focused
+installer/queue checks passed again; installed command dispatch and a detached
+worker starting/exiting on an isolated empty queue passed. Docker was stopped
+during that installation, so it did not establish a full CLI exit measurement.
+The earlier 1021-test suite, real Docker recovery tests and synthetic timings
+remain recorded below. Release CI includes the real accounting recovery tests.
+
+The canonical publisher owns fresh local release gates, exact-SHA CI, immutable
+tag, release assets, image promotion and anonymous installer verification.
+This committed checkpoint does not itself claim public verification; use the
+publisher's final journal/result for that evidence. No existing session is
+stopped or converted by installation.
+
+## 2026-10-02 — prepared CLI background accounting (unpublished)
+
+Implement the researched on-demand worker for both Codex CLI container
+accounting backends from session start. The foreground now quiesces producers
+and fsyncs final revisions; collection, export and provider delivery continue
+under one detached process owner. Host/Desktop keep their synchronous paths.
+No installed runtime, live connection or existing session was changed. Version
+0.38.11 remains the base; this checkpoint is explicitly local-only, with no
+commit, push, tag, release or installer handoff performed.
+
+Add private bounded jobs, separate collection/delivery receipts, revision CAS,
+fair final priority and bounded retry/backoff. Coordinate idle exit with wake
+admission so retained work cannot lose a wake. A busy coordinator or missing
+peer is not a completed delivery. Reuse only a matching collected snapshot for
+delivery retry; a later final request forces another collection.
+
+Capture explicit Docker endpoint/engine identity and pin Python code before
+the session. Journal create/start and exact collector ownership before cache
+access. Recover a crashed worker's child by matching nonce, job, image, mounts
+and known ID; preserve uncertain creates that were never started. Connect,
+disconnect, source mutations and forget fence publication through new epochs.
+Prevent late scan completion from reactivating disabled sources. Bind upload
+repair to connection/source authority; an explicit full sync can supersede
+revoked work without restoring its old rollback baseline.
+
+Expose local monitor jobs, worker ownership, retry and Poke cancellation.
+Admission retries short lock contention once, and distinguishes an unconfirmed
+durable write from a saved request whose worker wake failed. Documentation
+records deferred visibility, reboot recovery, retained bounds and old-process
+limitations. Installer package validation includes all new modules; CI has an
+opt-in real Docker ownership/recovery step after its collector image build.
+
+On fixed synthetic 1/64 MiB histories, synchronous collection plus export took
+3.750–4.090 seconds. With 20 samples per case, final handoff p95 was
+25.979/24.401 ms with no worker initially owning the lease and
+17.383/17.330 ms with an owner running. Both fixtures ultimately delivered
+exactly 150 synthetic tokens and one sanitized export. This is the accounting
+stage, not total Codex TUI exit; cold worker does not imply cold OS caches.
+The [implementation contract](../accounting-worker.md) has the reproducible
+benchmark, limits and measured startup components.
+
+An additional three-sample diagnostic emitted two generic handoff warnings
+without recording their exception cause. The benchmark now treats any handoff
+exception as failure and requires every exit to advance its final revision.
+The strengthened path then passed a 300-exit real-worker stress run with no
+warnings, p95 19.294 ms and maximum 23.251 ms; every final revision was delivered.
+The earlier warnings' exact cause was not recovered. A separate successful
+three-sample run measured median final delivery at 3.923 seconds: background
+work still costs time after the foreground returns.
+
+Validation includes focused queue, backend, crash, source-revocation,
+connection ABA, publication-supersession and lifecycle tests; real Docker
+create/start and owner-crash recovery; full synthetic monitor/HTTP/export
+round-trips; Python/Bash/Node syntax, Compose and public-content checks. The
+final full suite passed 1021 tests with 23 skips and one existing
+fork-from-threaded-process deprecation warning. Both real Docker recovery
+tests passed separately. Gitleaks 8.30.1 found no leaks in the 181 tracked and
+candidate source files; an earlier unfiltered directory scan also visited an
+ignored bytecode fixture and reported its synthetic test key. No CI or public
+release verification is claimed for this unpublished diff.
+
 ## 2026-10-02 — v0.38.11 long-history reads and shutdown scheduling
 
 The supplemental JSONL reader repeatedly concatenated and searched a growing
